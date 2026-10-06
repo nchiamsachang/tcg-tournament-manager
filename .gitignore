@@ -1,0 +1,10 @@
+# Build output
+build/
+dist/
+
+# Local data (player records, generated exports, user settings)
+*.db
+*.db-shm
+*.db-wal
+settings.json
+exports/

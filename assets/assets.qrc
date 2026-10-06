@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/assets">
+        <file>mtg.png</file>
+        <file>optcg_logo.png</file>
+        <file>pokemon.png</file>
+    </qresource>
+</RCC>
