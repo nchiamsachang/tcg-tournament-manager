@@ -21,6 +21,13 @@ FreeType, HarfBuzz, PCRE2 and double-conversion) under their own permissive lice
 are listed, with their licence texts, at https://doc.qt.io/qt-6/licenses-used-in-qt.html.
 
 
+Lucide icons (built into TcgTournamentManager.exe)
+--------------------------------------------------
+Copyright (c) Lucide Icons and Contributors. Used under the ISC License; some icons derive
+from Feather (MIT License, Copyright (c) Cole Bemis). The full text is in Lucide-LICENSE.txt.
+https://lucide.dev
+
+
 SQLite (inside sqldrivers\qsqlite.dll)
 --------------------------------------
 SQLite is in the public domain. https://www.sqlite.org/copyright.html

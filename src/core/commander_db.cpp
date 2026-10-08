@@ -1,6 +1,8 @@
 #include "commander_db.h"
 
 #include "commander.h"
+#include "players.h"
+#include "tournaments.h"
 
 #include <QDate>
 #include <QHash>
@@ -54,11 +56,32 @@ static QVariantMap loadEvent(qint64 tournamentId)
     return ev;
 }
 
+// The event, for a change to it.  An event that was ended early is a read-only record.
+static QVariantMap loadOpenEvent(qint64 tournamentId)
+{
+    const QVariantMap ev = loadEvent(tournamentId);
+    if (ev["tournament_status"].toString() == tdb::TERMINATED)
+        throw CommanderError("This tournament was ended early. Its rounds and results are a read-only record.");
+    return ev;
+}
+
 static Rows loadPlayers(qint64 tournamentId)
 {
-    return db::query("SELECT e.player_id, p.display_name, e.checked_in, e.dropped, e.drop_round, e.final_placement "
-                     "FROM enrollments e JOIN players p ON p.player_id = e.player_id "
-                     "WHERE e.tournament_id = ? ORDER BY p.display_name COLLATE NOCASE", {tournamentId});
+    return db::query("SELECT e.player_id, p.display_name, p.deleted_at IS NOT NULL AS removed, e.checked_in, e.dropped, "
+                     "e.drop_round, e.final_placement FROM enrollments e JOIN players p ON p.player_id = e.player_id "
+                     "WHERE e.tournament_id = ? ORDER BY p.display_name COLLATE NOCASE, p.player_id", {tournamentId});
+}
+
+// The players as the screens and printouts show them: a name another participant also has
+// carries the player's id.  What is saved (results, placings, the final snapshot) uses loadPlayers.
+static Rows shownPlayers(qint64 tournamentId)
+{
+    Rows players = loadPlayers(tournamentId);
+    const QSet<qint64> shared = pdb::tournamentDuplicates(tournamentId);
+    if (!shared.isEmpty())
+        for (Row &p : players)
+            p["display_name"] = pdb::label(p["display_name"].toString(), p["player_id"].toLongLong(), shared);
+    return players;
 }
 
 // Every round with its pods and seats.  "byes" holds player ids.
@@ -209,7 +232,7 @@ QVariantMap getEvent(qint64 tournamentId)
 
 Rows getRegistrations(qint64 tournamentId)
 {
-    return loadPlayers(tournamentId);
+    return shownPlayers(tournamentId);
 }
 
 QVariantMap recommendation(int playerCount)
@@ -232,7 +255,7 @@ QVariantMap recommendation(int playerCount)
 void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
         throw CommanderError("Check-in closes when the event starts. Use a drop instead.");
     const int changed = db::exec("UPDATE enrollments SET checked_in = ? WHERE tournament_id = ? AND player_id = ?",
@@ -246,7 +269,7 @@ void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn)
 void updateEventConfig(qint64 tournamentId, int swissRounds, const QString &drawPolicy, const QString &threePodPlacement)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
         throw CommanderError("The number of rounds and the scoring are frozen once the event has started.");
     const int rounds = swissRounds == 0 ? ev["swiss_rounds"].toInt() : swissRounds;
@@ -280,7 +303,7 @@ QVariantMap syncRecommendation(qint64 tournamentId)
 {
     db::Tx tx;
     QVariantMap ev = loadEvent(tournamentId);
-    if (ev["stage"].toString() != "REGISTRATION")
+    if (ev["stage"].toString() != "REGISTRATION" || ev["tournament_status"].toString() == tdb::TERMINATED)
         return ev;
     const int n = checkedInCount(loadPlayers(tournamentId));
     const int recRounds = cmdr::recommendedRounds(n);
@@ -301,7 +324,7 @@ QVariantMap syncRecommendation(qint64 tournamentId)
 // nothing further — no playoff, semifinal or final is ever generated.
 static QString nextStep(const QVariantMap &ev, const QVariantList &rounds)
 {
-    if (ev["stage"].toString() != "SWISS")
+    if (ev["stage"].toString() != "SWISS" || ev["tournament_status"].toString() == tdb::TERMINATED)
         return "NONE";
     if (!rounds.isEmpty() && rounds.last().toMap().value("status").toString() == "ACTIVE")
         return "WAIT";
@@ -310,7 +333,7 @@ static QString nextStep(const QVariantMap &ev, const QVariantList &rounds)
 
 static qint64 publish(qint64 tournamentId, int expectedRoundNumber)
 {
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     const Rows players = loadPlayers(tournamentId);
     const QVariantList rounds = loadRounds(tournamentId);
     const int total = ev["swiss_rounds"].toInt();
@@ -376,7 +399,7 @@ static qint64 publish(qint64 tournamentId, int expectedRoundNumber)
 qint64 startEvent(qint64 tournamentId)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
         throw ConflictError("This event has already started.");
     const int n = checkedInCount(loadPlayers(tournamentId));
@@ -491,7 +514,7 @@ int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const
     if (pod["round_status"].toString() != "ACTIVE")
         throw CommanderError("This round is finalized. Use a correction to change its results.");
     const qint64 tid = pod["tournament_id"].toLongLong();
-    const QVariantMap ev = loadEvent(tid);
+    const QVariantMap ev = loadOpenEvent(tid);
     const Results results = resolve(pod, ev["settings"].toMap(), outcome, winnerId, eliminatedIds);
     const std::optional<Results> before = currentResults(pod);
     const int version = pod["result_version"].toInt();
@@ -518,6 +541,7 @@ int clearPodResult(qint64 podId, int expectedVersion)
         throw CommanderError(LEGACY_ROUND);
     if (pod["round_status"].toString() != "ACTIVE")
         throw CommanderError("This round is finalized. Use a correction to change its results.");
+    loadOpenEvent(pod["tournament_id"].toLongLong());
     const int version = pod["result_version"].toInt();
     if (pod["status"].toString() == "PENDING")
         return version;
@@ -586,6 +610,7 @@ static bool finalize(const Row &rnd)
         return false;
     const qint64 roundId = rnd["round_id"].toLongLong();
     const qint64 tid = rnd["tournament_id"].toLongLong();
+    loadOpenEvent(tid);
     const int pending = db::value("SELECT COUNT(*) FROM commander_pods WHERE round_id = ? AND status = 'PENDING'",
                                   {roundId}).toInt();
     if (pending)
@@ -615,7 +640,7 @@ bool finalizeRound(qint64 roundId)
 bool finishTournament(qint64 tournamentId)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     const QString stage = ev["stage"].toString();
     if (stage == "COMPLETE")
         return false;
@@ -649,7 +674,7 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
     db::Tx tx;
     const QVariantMap pod = loadPod(podId);
     const qint64 tid = pod["tournament_id"].toLongLong();
-    QVariantMap ev = loadEvent(tid);
+    QVariantMap ev = loadOpenEvent(tid);
     const Results results = resolve(pod, ev["settings"].toMap(), outcome, winnerId, eliminatedIds);
     const std::optional<Results> before = currentResults(pod);
     if (before && *before == results)
@@ -715,7 +740,7 @@ static int latestRoundNumber(qint64 tournamentId)
 void dropPlayer(qint64 tournamentId, qint64 playerId)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "SWISS")
         throw CommanderError("Players can only be dropped while the event is being played.");
     const int latest = latestRoundNumber(tournamentId);
@@ -731,7 +756,7 @@ void dropPlayer(qint64 tournamentId, qint64 playerId)
 void reinstatePlayer(qint64 tournamentId, qint64 playerId)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     const int latest = latestRoundNumber(tournamentId);
     const int changed = db::exec("UPDATE enrollments SET dropped = 0, drop_round = NULL WHERE tournament_id = ? "
                                  "AND player_id = ? AND dropped = 1 AND drop_round = ?",
@@ -745,7 +770,7 @@ void reinstatePlayer(qint64 tournamentId, qint64 playerId)
 void endSwissEarly(qint64 tournamentId)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     const Rows players = loadPlayers(tournamentId);
     const QVariantList rounds = loadRounds(tournamentId);
     const int active = activeCount(players);
@@ -761,7 +786,7 @@ void endSwissEarly(qint64 tournamentId)
 bool finishLegacyPlayoff(qint64 tournamentId)
 {
     db::Tx tx;
-    const QVariantMap ev = loadEvent(tournamentId);
+    const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() == "COMPLETE")
         return false;
     if (ev["stage"].toString() != "PLAYOFF")
@@ -779,7 +804,7 @@ bool finishLegacyPlayoff(qint64 tournamentId)
 QVariantList getStandings(qint64 tournamentId)
 {
     const QVariantMap ev = loadEvent(tournamentId);
-    return computeTable(ev, loadPlayers(tournamentId), loadRounds(tournamentId));
+    return computeTable(ev, shownPlayers(tournamentId), loadRounds(tournamentId));
 }
 
 // Adds names, pending counts and the legacy flag for display.
@@ -820,7 +845,7 @@ static QVariantList decorate(const QVariantList &rounds, const Rows &players)
 
 QVariantList getRounds(qint64 tournamentId)
 {
-    return decorate(loadRounds(tournamentId), loadPlayers(tournamentId));
+    return decorate(loadRounds(tournamentId), shownPlayers(tournamentId));
 }
 
 QVariantMap getState(qint64 tournamentId)
@@ -831,7 +856,7 @@ QVariantMap getState(qint64 tournamentId)
     {
         db::Tx tx;      // one consistent snapshot
         ev = loadEvent(tournamentId);
-        players = loadPlayers(tournamentId);
+        players = shownPlayers(tournamentId);
         rounds = loadRounds(tournamentId);
         table = computeTable(ev, players, rounds);
     }
@@ -868,6 +893,8 @@ QVariantMap getState(qint64 tournamentId)
         {"event", ev}, {"players", playerList}, {"rounds", shown}, {"standings", table},
         {"final_standings", finalStandings}, {"next", nextStep(ev, swiss)}, {"active_count", active},
         {"rounds_created", int(swiss.size())}, {"total_rounds", ev["swiss_rounds"]}, {"can_pair", active >= 3},
+        // ended early by the organizer: everything below is a read-only record
+        {"terminated", ev["tournament_status"].toString() == tdb::TERMINATED},
         // flagged by migration 3: the event reached a playoff under the earlier rules
         {"legacy", QVariantMap{{"flagged", ev["legacy_playoff"]}, {"cut", ev["playoff_cut"]},
                                {"playoff_rounds", legacyRounds},
@@ -916,6 +943,11 @@ QVariantMap progress(qint64 tournamentId)
     };
     if (stage == "PLAYOFF")
         out["long"] = QStringLiteral("All %1 rounds played · needs finishing").arg(ev["swiss_rounds"].toInt());
+    if (ev["tournament_status"].toString() == tdb::TERMINATED) {
+        out["active"] = false;
+        out["needs_finish"] = false;
+        out["long"] = QStringLiteral("Ended early in round %1 of %2").arg(number).arg(ev["swiss_rounds"].toInt());
+    }
     return out;
 }
 

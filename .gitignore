@@ -2,6 +2,9 @@
 build/
 dist/
 
+# Downloaded icon library to pick from; the icons the app uses are copied into assets/
+third_party/
+
 # Local data (player records, generated exports, user settings)
 *.db
 *.db-shm

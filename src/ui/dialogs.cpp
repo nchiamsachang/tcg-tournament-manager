@@ -7,13 +7,12 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QRadioButton>
+#include <QTimeZone>
 #include <QVBoxLayout>
-
-// the countdown turns orange in the last ten minutes and red in the last five
-static const int WARNING_SECS = 600, URGENT_SECS = 300;
 
 TimerWidget::TimerWidget(timerdb::Kind kind, qint64 roundId, std::function<void()> onExpire)
     : kind_(kind), roundId_(roundId), onExpire_(std::move(onExpire))
@@ -30,8 +29,13 @@ TimerWidget::TimerWidget(timerdb::Kind kind, qint64 roundId, std::function<void(
     caption = T::lbl("ROUND CLOCK", T::MUTED, 10, 700, false, false, 1.0);
     display = T::lbl("--:--", T::GREY_LT, 28, 600, false, true, 1.5);
     display->setMinimumWidth(T::px(118));
+    clockIcon = T::iconLabel("timer", T::GREY_LT, 22);
+    auto *time = new QHBoxLayout;
+    time->setSpacing(T::px(8));
+    time->addWidget(clockIcon);
+    time->addWidget(display, 1);
     text->addWidget(caption);
-    text->addWidget(display);
+    text->addLayout(time);
     lay_->addLayout(text, 1);
     toggleBtn = T::button("Start", "primary");
     resetBtn = T::button("Reset", "ghost");
@@ -67,6 +71,24 @@ void TimerWidget::resizeEvent(QResizeEvent *e)
     lay_->setDirection(stacked ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
 }
 
+// A clock on a page that is not being shown does not tick: it is re-read when it is shown again.
+void TimerWidget::hideEvent(QHideEvent *e)
+{
+    QFrame::hideEvent(e);
+    tick_.stop();
+    resync_.stop();
+}
+
+void TimerWidget::showEvent(QShowEvent *e)
+{
+    QFrame::showEvent(e);
+    if (!tick_.isActive()) {
+        sync();
+        tick_.start();
+        resync_.start();
+    }
+}
+
 void TimerWidget::sync()
 {
     show(timerdb::get(kind_, roundId_));
@@ -93,24 +115,30 @@ void TimerWidget::render()
     using timerdb::State;
     const State state = clock_.state();
     const double left = remaining();
-    QString color;
-    if (left <= 0) {
-        display->setText("Time expired");
-        display->setFont(T::font(17, 700, false, 0.0, 0));
-        color = T::RED;
-    } else {
-        display->setText(timerdb::clockText(clock_.secondsLeft()));
-        display->setFont(T::font(28, 600, true, 1.5));
-        color = left < URGENT_SECS ? T::RED : (left < WARNING_SECS ? T::ORANGE : T::GREY_LT);
+    // green while it counts down, red once the time is up, neutral while paused or not started;
+    // the caption above says the same in words
+    const bool expired = left <= 0;
+    const bool running = state == State::Running && !expired;
+    const bool closed = clock_.timer().closed;      // the tournament finished or was ended early
+    const QString color = expired ? T::RED : (running ? T::GREEN : T::GREY_LT);
+    display->setText(expired ? QString("Time expired") : timerdb::clockText(clock_.secondsLeft()));
+    // The digits change every second; the look only changes with the clock's state, so the
+    // fonts, colours, caption and buttons are redone then and not on every tick.
+    const QString look = QStringLiteral("%1|%2|%3|%4").arg(color).arg(int(state)).arg(expired).arg(closed);
+    if (look != look_) {
+        look_ = look;
+        display->setFont(expired ? T::font(17, 700, false, 0.0, 0) : T::font(28, 600, true, 1.5));
+        display->setStyleSheet("color:" + color + ";background:transparent;border:none;");
+        clockIcon->setPixmap(T::iconPixmap("timer", color, 22));
+        caption->setText(running ? QStringLiteral("ROUND CLOCK · RUNNING")
+                         : !expired && state == State::Paused ? QStringLiteral("ROUND CLOCK · PAUSED")
+                         : QStringLiteral("ROUND CLOCK"));
+        toggleBtn->setText(running ? "Pause" : (state == State::Paused ? "Resume" : "Start"));
+        toggleBtn->setEnabled(!expired && !closed);
+        resetBtn->setEnabled(!closed);
+        toggleBtn->setStyleSheet(T::buttonQss(running ? "secondary" : "primary", T::MIN_HIT));
+        T::setButtonIcon(toggleBtn, running ? "pause" : "play", T::labelColor(running ? "secondary" : "primary"));
     }
-    display->setStyleSheet("color:" + color + ";background:transparent;border:none;");
-    caption->setText(left > 0 && state == State::Running ? QStringLiteral("ROUND CLOCK · RUNNING")
-                     : left > 0 && state == State::Paused ? QStringLiteral("ROUND CLOCK · PAUSED")
-                     : QStringLiteral("ROUND CLOCK"));
-    const bool running = state == State::Running && left > 0;
-    toggleBtn->setText(running ? "Pause" : (state == State::Paused ? "Resume" : "Start"));
-    toggleBtn->setEnabled(left > 0);
-    toggleBtn->setStyleSheet(T::buttonQss(running ? "secondary" : "primary", T::MIN_HIT));
     // alert once, at the moment the clock runs out while this screen is open
     if (lastRemaining_ > 0 && left <= 0 && state == State::Running && onExpire_)
         onExpire_();
@@ -320,4 +348,240 @@ bool askText(QWidget *parent, const QString &title, const QString &label, const 
         return false;
     *value = edit->text().trimmed();
     return true;
+}
+
+bool confirmEndEarly(QWidget *parent, const QString &tournamentName)
+{
+    QDialog dlg(parent);
+    dlg.setObjectName("endEarlyDialog");
+    dlg.setWindowTitle("End this tournament early?");
+    dlg.setModal(true);
+    const int room = parent->window()->width() - 24;
+    dlg.setMinimumWidth(qMin(T::px(300), room));
+    dlg.resize(qMin(T::px(460), room), 10);
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->setSpacing(12);
+    layout->setContentsMargins(20, 18, 20, 18);
+
+    auto *head = new QHBoxLayout;
+    head->setSpacing(10);
+    head->addWidget(T::iconLabel("triangle-alert", T::RED, 22), 0, Qt::AlignTop);
+    head->addWidget(T::lbl("End this tournament early?", T::TEXT, 20, 700, true), 1);
+    layout->addLayout(head);
+    layout->addWidget(T::lbl(QStringLiteral("This will end %1 and remove it from active tournaments. Its saved rounds and "
+                                            "results will remain in History, marked \u2018Terminated.\u2019 Unreported "
+                                            "matches will remain unfinished.").arg(tournamentName),
+                             T::TEXT, 14, 400, true));
+
+    auto *buttons = new QWidget;
+    auto *row = new T::FlowLayout(buttons, 10);
+    QPushButton *keep = T::button("Keep tournament", "primary");
+    QPushButton *end = T::button("End tournament", "danger", "octagon-x");
+    // Enter and Space press the button with the focus, which is the safe one; a repeated click
+    // or keystroke from opening the dialog cannot end the tournament
+    keep->setDefault(true);
+    end->setAutoDefault(false);
+    QObject::connect(keep, &QPushButton::clicked, &dlg, &QDialog::reject);
+    QObject::connect(end, &QPushButton::clicked, &dlg, &QDialog::accept);
+    row->addWidget(keep);
+    row->addWidget(end);
+    layout->addWidget(buttons);
+    keep->setFocus();
+    return dlg.exec() == QDialog::Accepted;     // Escape and the close button reject
+}
+
+bool endTournamentEarly(MainWindow *mw, QWidget *parent, qint64 tournamentId)
+{
+    const db::Row t = tdb::tournamentById(tournamentId);
+    if (t.isEmpty())
+        return false;
+    const QString name = t["name"].toString(), game = t["game"].toString();
+    if (!confirmEndEarly(parent, name))
+        return false;
+    try {
+        tdb::terminateTournament(tournamentId);     // false when it was already ended: the result is the same
+    } catch (const std::exception &e) {
+        warn(parent, "Tournament not ended",
+             name + " could not be ended early, and nothing was changed.\n\n" + QString::fromUtf8(e.what()));
+        return false;
+    }
+    mw->removeTournamentTab(tournamentId);
+    mw->notify(name + QStringLiteral(" was ended early. Its rounds and results are in History, marked Terminated."), 10);
+    mw->navigateTo("hub", {{"game", game}});
+    return true;
+}
+
+QPushButton *endEarlyButton()
+{
+    QPushButton *b = T::button("End tournament early", "danger", "octagon-x");
+    b->setToolTip("Stops this tournament now and keeps its rounds and results as a record marked Terminated");
+    return b;
+}
+
+QWidget *terminatedNotice(const QString &terminatedAt)
+{
+    QDateTime when = QDateTime::fromString(terminatedAt, "yyyy-MM-dd HH:mm:ss");
+    when.setTimeZone(QTimeZone::utc());
+    const QString date = when.isValid() ? QStringLiteral(" on ") + QLocale().toString(when.toLocalTime(), "d MMM yyyy, HH:mm")
+                                        : QString();
+    QFrame *f = T::panel("tn", T::RED, 2);
+    auto *h = new QHBoxLayout(f);
+    h->setContentsMargins(18, 12, 18, 12);
+    h->setSpacing(10);
+    h->addWidget(T::iconLabel("octagon-x", T::RED, 20), 0, Qt::AlignTop);
+    h->addWidget(T::lbl(QStringLiteral("Terminated. This tournament was ended early%1. Its rounds and results are a read-only "
+                                       "record; matches that were not reported stay unfinished.").arg(date),
+                        T::TEXT, 13, 600, true), 1);
+    return f;
+}
+
+QString editTournamentName(MainWindow *mw, QWidget *parent, qint64 tournamentId)
+{
+    const QString current = tdb::tournamentById(tournamentId)["name"].toString();
+    QDialog dlg(parent);
+    dlg.setObjectName("renameDialog");
+    dlg.setWindowTitle("Edit tournament name");
+    dlg.setModal(true);
+    const int room = parent->window()->width() - 24;
+    dlg.setMinimumWidth(qMin(T::px(280), room));
+    dlg.resize(qMin(T::px(440), room), 10);
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->setSpacing(10);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->addWidget(T::lbl("Edit tournament name", T::TEXT, 20, 700, true));
+    layout->addWidget(T::caps("Tournament name"));
+    auto *edit = new QLineEdit(current);
+    edit->setAccessibleName("Tournament name");
+    edit->setMaxLength(tdb::MAX_NAME_LENGTH);
+    layout->addWidget(edit);
+    QLabel *error = T::lbl("", T::RED, 12, 600, true);
+    error->setObjectName("renameError");
+    error->hide();
+    layout->addWidget(error);
+
+    auto *buttons = new QWidget;
+    auto *row = new T::FlowLayout(buttons, 10);
+    QPushButton *save = T::button("Save", "primary");
+    QPushButton *cancel = T::button("Cancel", "ghost");
+    save->setDefault(true);             // Enter saves
+    cancel->setAutoDefault(false);
+    row->addWidget(save);
+    row->addWidget(cancel);
+    layout->addWidget(buttons);
+
+    QString saved;
+    QObject::connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    QObject::connect(save, &QPushButton::clicked, &dlg, [&] {
+        const QString name = edit->text().trimmed();
+        QString problem;
+        if (name.isEmpty()) {
+            problem = "Enter a name for the tournament.";
+        } else {
+            try {
+                if (tdb::renameTournament(tournamentId, name))
+                    saved = name;
+                dlg.accept();
+                return;
+            } catch (const std::exception &e) {
+                problem = QStringLiteral("The name was not changed. ") + QString::fromUtf8(e.what());
+            }
+        }
+        // the dialog stays open with what was typed, and the tournament keeps its name
+        error->setText(T::breakable(problem));
+        error->show();
+        edit->setFocus();
+        edit->selectAll();
+    });
+    edit->setFocus();
+    edit->selectAll();
+    dlg.exec();                         // Escape and the close button cancel
+    if (!saved.isEmpty())
+        mw->renameTournamentTab(tournamentId, saved);
+    return saved;
+}
+
+QPushButton *editNameButton()
+{
+    return T::iconButton("pencil", "Edit tournament name");
+}
+
+qint64 chooseSameName(QWidget *parent, const QString &name, const db::Rows &matches, const QString &verb)
+{
+    QDialog dlg(parent);
+    dlg.setObjectName("sameNameDialog");
+    dlg.setWindowTitle("A player with this name already exists");
+    dlg.setModal(true);
+    fitDialog(&dlg, parent, T::px(480), T::px(170) + int(qMin(matches.size(), 5)) * (T::BUTTON_H + 10));
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->setSpacing(10);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->addWidget(T::lbl("A player with this name already exists", T::TEXT, 20, 700, true));
+    layout->addWidget(T::lbl(matches.size() == 1
+                                 ? QStringLiteral("“%1” is already in the player directory. Is this the same person?").arg(name.simplified())
+                                 : QStringLiteral("%1 players named “%2” are already in the player directory. Is this one of them?")
+                                       .arg(matches.size()).arg(name.simplified()),
+                             T::TEXT, 14, 400, true));
+    QVBoxLayout *list = nullptr;
+    layout->addWidget(T::scrollArea(&list), 1);       // many namesakes scroll; the choices below stay in view
+    list->setSpacing(8);
+    qint64 choice = 0;
+    for (const db::Row &m : matches) {
+        const qint64 id = m["player_id"].toLongLong();
+        // the id is always shown here: it is what tells the records apart
+        auto *pick = new T::WrapButton(QStringLiteral("%1 %2 · %3").arg(verb, m["display_name"].toString(), pdb::formatId(id)), "secondary");
+        pick->setProperty("playerId", id);
+        QObject::connect(pick, &QPushButton::clicked, &dlg, [&dlg, &choice, id] {
+            choice = id;
+            dlg.accept();
+        });
+        list->addWidget(pick);
+    }
+    list->addStretch();
+    auto *buttons = new QWidget;
+    auto *row = new T::FlowLayout(buttons, 10);
+    QPushButton *different = T::button("Create a different player with this name", "ghost", "user-plus");
+    QPushButton *cancel = T::button("Cancel", "ghost");
+    for (QPushButton *b : {different, cancel})
+        b->setAutoDefault(false);       // Enter picks nothing by itself: the organizer chooses
+    QObject::connect(different, &QPushButton::clicked, &dlg, [&dlg, &choice] {
+        choice = -1;
+        dlg.accept();
+    });
+    QObject::connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    row->addWidget(different);
+    row->addWidget(cancel);
+    layout->addWidget(buttons);
+    cancel->setFocus();
+    return dlg.exec() == QDialog::Accepted ? choice : 0;
+}
+
+bool confirmRemovePlayer(QWidget *parent, const QString &shownName)
+{
+    QDialog dlg(parent);
+    dlg.setObjectName("removePlayerDialog");
+    dlg.setWindowTitle("Remove player");
+    dlg.setModal(true);
+    const int room = parent->window()->width() - 24;
+    dlg.setMinimumWidth(qMin(T::px(300), room));
+    dlg.resize(qMin(T::px(480), room), 10);
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->setSpacing(12);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->addWidget(T::lbl(QStringLiteral("Remove %1 from the player directory?").arg(shownName), T::TEXT, 20, 700, true));
+    layout->addWidget(T::lbl("They will no longer appear in player searches or be available for new enrollment. Their name and "
+                             "existing tournament results will remain in history, but their profile will no longer be accessible.",
+                             T::TEXT, 14, 400, true));
+    auto *buttons = new QWidget;
+    auto *row = new T::FlowLayout(buttons, 10);
+    QPushButton *cancel = T::button("Cancel", "primary");
+    QPushButton *remove = T::button("Remove player", "danger", "trash-2");
+    cancel->setDefault(true);
+    remove->setAutoDefault(false);
+    QObject::connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    QObject::connect(remove, &QPushButton::clicked, &dlg, &QDialog::accept);
+    row->addWidget(cancel);
+    row->addWidget(remove);
+    layout->addWidget(buttons);
+    cancel->setFocus();
+    return dlg.exec() == QDialog::Accepted;
 }

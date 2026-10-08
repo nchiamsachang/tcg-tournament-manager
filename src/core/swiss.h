@@ -28,6 +28,10 @@ QList<QPair<QString, QString>> tiebreakColumns(const QString &game);
 void calculateTiebreakers(qint64 tournamentId, const QString &game);
 db::Rows standings(qint64 tournamentId, const QString &game);     // from the stored figures; each row gains "standing"
 db::Rows currentStandings(qint64 tournamentId, const QString &game);   // calculateTiebreakers, then standings
+// The standings to show or print.  It never writes: looking at a table cannot change one.
+// A finished tournament shows the figures and placings saved when it was finalized; one
+// still being played, or ended early, shows them worked out from its matches in memory.
+db::Rows viewStandings(qint64 tournamentId, const QString &game);
 
 // Pairs and saves one round.  Used by the functions below; throws when there is nobody to pair.
 qint64 generatePairings(qint64 tournamentId, int roundNumber);

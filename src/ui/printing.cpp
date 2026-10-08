@@ -385,7 +385,7 @@ QList<Doc> tournamentReport(qint64 tournamentId)
         s.columns << qMakePair(c.second, tb);
     s.bold = {0, 1, 2};
     s.empty = "No standings yet.";
-    for (const db::Row &p : swiss::currentStandings(tournamentId, game)) {
+    for (const db::Row &p : swiss::viewStandings(tournamentId, game)) {
         QStringList row{p["standing"].toString(), p["display_name"].toString(), p["match_points"].toString(),
                         p["match_wins"].toString(), p["match_losses"].toString()};
         for (const auto &c : tiebreaks)

@@ -15,7 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql PrintSupport Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql PrintSupport Svg Test)
 
 if(MSVC)
     add_compile_options(/W3 /utf-8 /permissive-)

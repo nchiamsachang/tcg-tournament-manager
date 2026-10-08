@@ -86,6 +86,7 @@ struct Migration {
     int version;
     const char *name;
     void (*apply)();
+    bool rebuildsTable = false;     // drops and recreates a table: runs with foreign keys off, then checks them
 };
 const QList<Migration> &migrations();
 

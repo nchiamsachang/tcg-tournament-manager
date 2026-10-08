@@ -22,12 +22,14 @@ struct Timer {
     double startedAt = 0;           // database clock, seconds since 1970
     int limit = 0;                  // the tournament's round length in seconds
     double now = 0;                 // database clock when this was read
+    bool closed = false;            // the tournament is finished or was ended early: the clock is stopped for good
 };
 
 double clockOffset();               // seconds to add to this machine's clock to get the database clock
 double remaining(int limitSecs, State state, int elapsedSecs, bool hasStart, double startedAt, double now);
 double remaining(const Timer &t, double now);
 Timer get(Kind kind, qint64 roundId);
+// Start, pause and reset change nothing once the clock is closed.
 Timer start(Kind kind, qint64 roundId);     // starting a running clock changes nothing
 Timer pause(Kind kind, qint64 roundId);
 Timer reset(Kind kind, qint64 roundId);

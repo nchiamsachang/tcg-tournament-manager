@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QTextStream>
+#include <algorithm>
 
 RegistrationScreen::RegistrationScreen(MainWindow *mw, qint64 tid) : tournamentId(tid), mw_(mw)
 {
@@ -24,10 +25,19 @@ void RegistrationScreen::buildUi()
 {
     // Everything except the action bar scrolls, so Start stays reachable in a short window.
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body), 1);
+    root->addWidget(page(&body), 1);
 
     QBoxLayout *hdr = flip(T::row(12));
-    hdr->addWidget(T::lbl(QStringLiteral("Player Registration — ") + tName, T::TEXT, 24, 700, true), 1);
+    auto *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(6);
+    titleLabel = T::lbl(QStringLiteral("Player Registration — ") + tName, T::TEXT, 24, 700, true);
+    T::hugText(titleLabel);
+    titleRow->addWidget(titleLabel, 100);
+    renameBtn = editNameButton();
+    connect(renameBtn, &QPushButton::clicked, this, [this] { rename(); });
+    titleRow->addWidget(renameBtn, 0, Qt::AlignTop);
+    titleRow->addStretch(1);
+    hdr->addLayout(titleRow, 1);
     enrolledCountLabel = T::lbl("0 players enrolled", T::MUTED, 14);
     hdr->addWidget(enrolledCountLabel);
     body->addLayout(hdr);
@@ -38,13 +48,14 @@ void RegistrationScreen::buildUi()
     searchBox = new QLineEdit;
     searchBox->setPlaceholderText("Search existing players...");
     searchBox->setAccessibleName("Search existing players");
+    T::setFieldIcon(searchBox, "search");
     searchRow->addWidget(searchBox, 3);
     newNameBox = new QLineEdit;
     newNameBox->setPlaceholderText("New player name...");
     newNameBox->setAccessibleName("New player name");
     connect(newNameBox, &QLineEdit::returnPressed, this, [this] { addAndEnroll(); });
     searchRow->addWidget(newNameBox, 2);
-    addBtn = T::button("+ Add && enroll", "primary");
+    addBtn = T::button("Add && enroll", "primary", "user-plus");
     connect(addBtn, &QPushButton::clicked, this, [this] { addAndEnroll(); });
     searchRow->addWidget(addBtn);
     body->addLayout(searchRow);
@@ -71,10 +82,10 @@ void RegistrationScreen::buildUi()
     root->addSpacing(12);
     auto *bottom = new QWidget;
     auto *bl = new T::FlowLayout(bottom, 10);
-    QPushButton *back = T::button(QStringLiteral("← Back"), "ghost");
+    QPushButton *back = T::button("Back", "ghost", "arrow-left");
     connect(back, &QPushButton::clicked, this, [this] { mw_->navigateTo("hub", {{"game", game}}); });
     bl->addWidget(back);
-    startBtn = T::button(QStringLiteral("Start tournament  →"), "primary");
+    startBtn = T::button("Start tournament", "primary", "arrow-right", true);
     connect(startBtn, &QPushButton::clicked, this, [this] { confirmStart(); });
     bl->addWidget(startBtn);
     root->addWidget(bottom);
@@ -98,6 +109,8 @@ void RegistrationScreen::runSearch()
         return;
     T::clear(searchResultsLayout_);
     const db::Rows results = pdb::searchPlayers(text);
+    // which names need their id is decided from the whole directory, not from these results
+    const QSet<qint64> shared = pdb::directoryDuplicates();
     QSet<qint64> enrolled;
     for (const db::Row &p : tdb::enrolledPlayers(tournamentId))
         enrolled.insert(p["player_id"].toLongLong());
@@ -111,12 +124,13 @@ void RegistrationScreen::runSearch()
         row->setStyleSheet("#sr{background:" + T::SURFACE2 + ";border:2px solid " + T::BORDER + ";border-radius:14px;}");
         auto *hl = new QHBoxLayout(row);
         hl->setContentsMargins(14, 6, 10, 6);
-        hl->addWidget(T::lbl(results[i]["display_name"].toString(), T::TEXT, 14, 600, true), 1);
+        const QString shown = pdb::label(results[i]["display_name"].toString(), pid, shared);
+        hl->addWidget(T::lbl(shown, T::TEXT, 14, 600, true), 1);
         if (enrolled.contains(pid)) {
             hl->addWidget(T::pill("Enrolled", T::GREEN, false));
         } else {
-            QPushButton *btn = T::button("Enroll");
-            btn->setAccessibleName("Enroll " + results[i]["display_name"].toString());
+            QPushButton *btn = T::button("Enroll", "secondary", "user-plus");
+            btn->setAccessibleName("Enroll " + shown);
             connect(btn, &QPushButton::clicked, this, [this, pid] { enrollExisting(pid); });
             hl->addWidget(btn);
         }
@@ -125,11 +139,37 @@ void RegistrationScreen::runSearch()
     searchResultsFrame_->show();
 }
 
+// Only the heading changes: the lists, the scroll position and the focus stay as they are.
+void RegistrationScreen::rename()
+{
+    const QString name = editTournamentName(mw_, this, tournamentId);
+    renameBtn->setFocus();
+    if (name.isEmpty())
+        return;
+    tName = name;
+    titleLabel->setText(T::breakable(QStringLiteral("Player Registration — ") + tName));
+    T::hugText(titleLabel);
+}
+
 void RegistrationScreen::enrollExisting(qint64 playerId)
 {
-    tdb::enrollPlayer(tournamentId, playerId);
+    try {
+        tdb::enrollPlayer(tournamentId, playerId);      // a player already in the list is not added twice
+    } catch (const std::exception &e) {
+        warn(this, "Not enrolled", QString::fromUtf8(e.what()));
+        return;
+    }
     refreshEnrolled();
     runSearch();
+}
+
+// On a registration page a name is compared with the whole directory: anyone who could be
+// enrolled.  (The list from the database only marks namesakes inside this tournament.)
+static QString registrationName(const db::Row &player, const QSet<qint64> &shared)
+{
+    const qint64 id = player["player_id"].toLongLong();
+    const QString name = player["display_name"].toString();
+    return shared.contains(id) && !name.endsWith(pdb::formatId(id)) ? pdb::label(name, id, shared) : name;
 }
 
 void RegistrationScreen::addAndEnroll()
@@ -139,10 +179,15 @@ void RegistrationScreen::addAndEnroll()
         warn(this, "Missing Name", "Enter a player name first.");
         return;
     }
-    for (const db::Row &p : pdb::searchPlayers(name)) {
-        if (p["display_name"].toString().compare(name, Qt::CaseInsensitive) == 0) {
-            if (confirm(this, "Player Exists", p["display_name"].toString() + " already exists. Enroll them?"))
-                enrollExisting(p["player_id"].toLongLong());
+    // the same name may be the same person or somebody else: the organizer says which
+    const db::Rows namesakes = pdb::playersNamed(name);
+    if (!namesakes.isEmpty()) {
+        const qint64 choice = chooseSameName(this, name, namesakes, "Enroll");
+        if (choice == 0)
+            return;
+        if (choice > 0) {
+            enrollExisting(choice);
+            newNameBox->clear();
             return;
         }
     }
@@ -171,10 +216,11 @@ void RegistrationScreen::refreshEnrolled()
     const db::Rows players = tdb::enrolledPlayers(tournamentId);
     const int count = int(players.size());
     enrolledCountLabel->setText(QStringLiteral("%1 player%2 enrolled").arg(count).arg(count == 1 ? "" : "s"));
+    const QSet<qint64> shared = pdb::directoryDuplicates();
     for (const db::Row &p : players) {
         const qint64 pid = p["player_id"].toLongLong();
-        const QString name = p["display_name"].toString();
-        QPushButton *rm = T::button("Remove", "danger");
+        const QString name = registrationName(p, shared);
+        QPushButton *rm = T::button("Remove", "danger", "trash-2");
         rm->setAccessibleName("Remove " + name);
         connect(rm, &QPushButton::clicked, this, [this, pid, name] { unenroll(pid, name); });
         enrolledLayout->addWidget(playerRow(name, {rm}));
@@ -277,7 +323,7 @@ void CommanderRegistrationScreen::buildUi()
         updateCounts();
     });
     al->addWidget(resetBtn);
-    QPushButton *rules = T::button("Rules", "ghost");
+    QPushButton *rules = T::button("Rules", "ghost", "circle-help");
     connect(rules, &QPushButton::clicked, this, [this] {
         showText(this, "Event rules", cdb::rulesText(cdb::getEvent(tournamentId)));
     });
@@ -294,8 +340,12 @@ void CommanderRegistrationScreen::buildUi()
 static void showCheckedIn(QPushButton *toggle, QLabel *nameLabel, const QString &name, bool in)
 {
     toggle->setProperty("checkedIn", in);
-    toggle->setText(in ? QStringLiteral("✓  Checked in") : QStringLiteral("Check in"));
+    toggle->setText(in ? "Checked in" : "Check in");
     toggle->setStyleSheet(T::buttonQss(in ? "secondary" : "ghost", toggle->minimumHeight()));
+    if (in)
+        T::setButtonIcon(toggle, "circle-check", T::GREEN);     // green marks a player who is checked in
+    else
+        T::setButtonIcon(toggle, "check", T::TEXT);
     toggle->setAccessibleName((in ? "Undo check-in for " : "Check in ") + name);
     if (nameLabel)
         nameLabel->setStyleSheet("color:" + (in ? T::TEXT : T::MUTED) + ";background:transparent;border:none;");
@@ -306,14 +356,15 @@ void CommanderRegistrationScreen::refreshEnrolled()
     T::ScrollKeeper keep(this);         // the page stays where it is while the list is rebuilt
     T::clear(enrolledLayout);
     const db::Rows players = cdb::getRegistrations(tournamentId);
+    const QSet<qint64> shared = pdb::directoryDuplicates();
     for (const db::Row &p : players) {
         const qint64 pid = p["player_id"].toLongLong();
-        const QString name = p["display_name"].toString();
+        const QString name = registrationName(p, shared);
         const bool in = p["checked_in"].toInt() != 0;
         // as wide as its longer label, so the button does not shift sideways when it changes
-        QPushButton *toggle = T::button(QStringLiteral("✓  Checked in"), "secondary");
+        QPushButton *toggle = T::button("Checked in", "secondary", "circle-check");
         toggle->setMinimumWidth(toggle->sizeHint().width());
-        QPushButton *rm = T::button("Remove", "danger");
+        QPushButton *rm = T::button("Remove", "danger", "trash-2");
         rm->setAccessibleName("Remove " + name);
         connect(rm, &QPushButton::clicked, this, [this, pid, name] { unenroll(pid, name); });
         QWidget *row = playerRow(name, {toggle, rm}, !in);
@@ -450,13 +501,20 @@ RoundScreen::RoundScreen(MainWindow *mw, qint64 tid, int viewRound) : tournament
     status_ = tournament_.isEmpty() ? QString("IN_PROGRESS") : tournament_["status"].toString();
 
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body), 1);
+    root->addWidget(page(&body), 1);
 
     QBoxLayout *top = flip(T::row(16));
     auto *info = new QVBoxLayout;
     info->setSpacing(3);
+    auto *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(6);
     roundLabel = T::lbl(QStringLiteral("Round —"), T::TEXT, 24, 700, true);
-    info->addWidget(roundLabel);
+    titleRow->addWidget(roundLabel, 100);
+    renameBtn = editNameButton();
+    connect(renameBtn, &QPushButton::clicked, this, [this] { rename(); });
+    titleRow->addWidget(renameBtn, 0, Qt::AlignTop);
+    titleRow->addStretch(1);
+    info->addLayout(titleRow);
     subLabel = T::lbl("", T::MUTED, 13, 400, true);
     info->addWidget(subLabel);
     top->addLayout(info, 1);
@@ -464,6 +522,10 @@ RoundScreen::RoundScreen(MainWindow *mw, qint64 tid, int viewRound) : tournament
     top->addLayout(timerSlot_);
     body->addLayout(top);
     body->addSpacing(16);
+    if (status_ == tdb::TERMINATED) {
+        body->addWidget(terminatedNotice(tournament_["terminated_at"].toString()));
+        body->addSpacing(14);
+    }
 
     progressRow_ = new QHBoxLayout;
     progressRow_->setSpacing(6);
@@ -473,13 +535,22 @@ RoundScreen::RoundScreen(MainWindow *mw, qint64 tid, int viewRound) : tournament
     pairingsLayout_ = new QVBoxLayout;
     pairingsLayout_->setSpacing(10);
     body->addLayout(pairingsLayout_);
+    if (status_ == tdb::IN_PROGRESS) {
+        // apart from the round's routine actions in the bar below, so it is not pressed by accident
+        body->addSpacing(30);
+        body->addWidget(T::hline());
+        body->addSpacing(12);
+        endEarlyBtn = endEarlyButton();
+        connect(endEarlyBtn, &QPushButton::clicked, this, [this] { endTournamentEarly(mw_, this, tournamentId); });
+        body->addWidget(endEarlyBtn, 0, Qt::AlignLeft);
+    }
     body->addStretch();
     root->addSpacing(12);
 
     // bottom action bar (wraps when the window is narrow)
     auto *actions = new QWidget;
     auto *bottom = new T::FlowLayout(actions, 10);
-    printBtn = T::button(QStringLiteral("🖨  Print"), "ghost");
+    printBtn = T::button("Print", "ghost", "printer");
     printBtn->setToolTip(QStringLiteral("Print this round’s pairings or table signs"));
     connect(printBtn, &QPushButton::clicked, this, [this] {
         if (!currentRoundId)
@@ -487,16 +558,16 @@ RoundScreen::RoundScreen(MainWindow *mw, qint64 tid, int viewRound) : tournament
         printing::PrintDialog(this, printing::modernRoundData(tournament_, currentRoundNum, tdb::roundPairings(currentRoundId))).exec();
     });
     bottom->addWidget(printBtn);
-    standingsBtn = T::button("View standings");
+    standingsBtn = T::button("View standings", "secondary", "trophy");
     connect(standingsBtn, &QPushButton::clicked, this, [this] {
         mw_->navigateTo("standings", {{"tournament_id", tournamentId}, {"tournament_name", tName_}});
     });
     bottom->addWidget(standingsBtn);
-    nextRoundBtn = T::button(QStringLiteral("End round  →"), "primary");
+    nextRoundBtn = T::button("End round", "primary", "arrow-right", true);
     nextRoundBtn->setEnabled(false);
     connect(nextRoundBtn, &QPushButton::clicked, this, [this] { endRound(); });
     bottom->addWidget(nextRoundBtn);
-    finalizeBtn = T::button(QStringLiteral("Finalize tournament  →"), "primary");
+    finalizeBtn = T::button("Finalize tournament", "primary", "arrow-right", true);
     finalizeBtn->hide();
     connect(finalizeBtn, &QPushButton::clicked, this, [this] { finalizeTournament(); });
     bottom->addWidget(finalizeBtn);
@@ -516,6 +587,7 @@ void RoundScreen::loadRound()
     }
     if (info.isEmpty()) {
         roundLabel->setText(T::breakable(tName_ + QStringLiteral(" — No active round")));
+        T::hugText(roundLabel);
         printBtn->setEnabled(false);
         nextRoundBtn->hide();
         return;
@@ -523,6 +595,7 @@ void RoundScreen::loadRound()
     currentRoundId = info["round_id"].toLongLong();
     currentRoundNum = info["round_number"].toInt();
     roundLabel->setText(T::breakable(QStringLiteral("Round %1 — %2").arg(currentRoundNum).arg(tName_)));
+    T::hugText(roundLabel);
 
     // results can only be entered for the current round of a running tournament
     const bool live = status_ == "IN_PROGRESS" && currentRoundId == latest["round_id"].toLongLong();
@@ -620,7 +693,8 @@ void RoundScreen::updatePendingCount(const db::Rows &pairings, bool live)
         parts << format_;
     parts << QStringLiteral("Round %1 of %2").arg(currentRoundNum).arg(totalRounds)
           << QStringLiteral("%1 %2").arg(total).arg(total == 1 ? "match" : "matches")
-          << (live ? QStringLiteral("%1 pending").arg(pending) : QString("Tournament complete"));
+          << (live ? QStringLiteral("%1 pending").arg(pending)
+                   : status_ == tdb::TERMINATED ? QString("Terminated") : QString("Tournament complete"));
     subLabel->setText(parts.join(QStringLiteral("  ·  ")));
 
     T::clear(progressRow_);
@@ -640,10 +714,25 @@ void RoundScreen::updatePendingCount(const db::Rows &pairings, bool live)
     finalizeBtn->setEnabled(pending == 0 && total > 0);
 }
 
+// The heading, the clock's expiry notice and the next printout take the new name.  The page
+// is re-read in place (loadRound keeps the scroll position); nothing about the round changes.
+void RoundScreen::rename()
+{
+    const QString name = editTournamentName(mw_, this, tournamentId);
+    renameBtn->setFocus();
+    if (name.isEmpty())
+        return;
+    tName_ = name;
+    tournament_["name"] = name;
+    timerRound_ = 0;                    // the clock widget is rebuilt so its notice names the tournament correctly
+    loadRound();
+}
+
 void RoundScreen::recordResult(qint64 matchId, const QString &result)
 {
     try {
         tdb::reportMatchResult(matchId, result);
+        swiss::calculateTiebreakers(tournamentId, game_);       // records follow the result that was just entered
     } catch (const std::exception &e) {
         warn(this, "Error", QString::fromUtf8(e.what()));
         return;
@@ -705,7 +794,7 @@ StandingsScreen::StandingsScreen(MainWindow *mw, qint64 tid) : mw_(mw), tourname
     tiebreaks_ = swiss::tiebreakColumns(game_);
 
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body));      // the whole page scrolls; the table also scrolls sideways
+    root->addWidget(page(&body));      // the whole page scrolls; the table also scrolls sideways
     QBoxLayout *top = flip(T::row(12));
     auto *tv = new QVBoxLayout;
     tv->setSpacing(3);
@@ -713,7 +802,9 @@ StandingsScreen::StandingsScreen(MainWindow *mw, qint64 tid) : mw_(mw), tourname
     tv->addWidget(T::lbl(final ? "Final Standings" : "Standings", T::TEXT, 26, 700, true));
     QStringList sub{tName_, (T::gameShort(game_) + " " + format_).trimmed(),
                     QStringLiteral("%1 round%2").arg(totalRounds).arg(totalRounds == 1 ? "" : "s")};
-    if (!final)
+    if (status_ == tdb::TERMINATED)
+        sub << "Terminated";
+    else if (!final)
         sub << "In progress";
     tv->addWidget(T::lbl(sub.join(QStringLiteral("  ·  ")), T::MUTED, 13, 400, true));
     top->addLayout(tv, 1);
@@ -728,6 +819,11 @@ StandingsScreen::StandingsScreen(MainWindow *mw, qint64 tid) : mw_(mw), tourname
     top->addWidget(actions);
     body->addLayout(top);
     body->addSpacing(18);
+    if (status_ == tdb::TERMINATED) {
+        // not final placings: the standings as they stood when the tournament was ended
+        body->addWidget(terminatedNotice(t["terminated_at"].toString()));
+        body->addSpacing(14);
+    }
 
     QFrame *table = T::panel("st");
     const int fixed = COL_PLACE + COL_PTS + COL_W + COL_L + COL_TB * int(tiebreaks_.size());
@@ -768,7 +864,7 @@ StandingsScreen::StandingsScreen(MainWindow *mw, qint64 tid) : mw_(mw), tourname
 void StandingsScreen::load()
 {
     try {
-        standings = swiss::currentStandings(tournamentId_, game_);
+        standings = swiss::viewStandings(tournamentId_, game_);
     } catch (const std::exception &e) {
         warn(this, "Error", QString::fromUtf8(e.what()));
         standings.clear();
@@ -862,7 +958,7 @@ RoundSelectScreen::RoundSelectScreen(MainWindow *mw, qint64 tid)
     const QString name = t["name"].toString(), game = t["game"].toString();
     const int players = t["player_count"].toInt();
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body));
+    root->addWidget(page(&body));
 
     // One results panel, centred in the content area by the layout: equal stretch on both
     // sides, and a width cap so it does not sprawl in a wide window.
@@ -887,17 +983,43 @@ RoundSelectScreen::RoundSelectScreen(MainWindow *mw, qint64 tid)
     };
     centred(T::caps(QStringLiteral("Results  ·  ") + (T::gameShort(game) + " " + t["format"].toString()).trimmed(), T::PURPLE_LT, 12));
     v->addSpacing(6);
-    centred(T::lbl(name, T::TEXT, 28, 700, true));
+    // the name, centred, with the pencil beside it (and the same width left empty on the other side)
+    auto *nameRow = new QHBoxLayout;
+    nameRow->setSpacing(6);
+    nameRow->addStretch(1);
+    nameRow->addSpacing(44 + 6);
+    nameLabel = T::lbl(name, T::TEXT, 28, 700, true);
+    nameLabel->setAlignment(Qt::AlignHCenter);
+    T::hugText(nameLabel);
+    nameRow->addWidget(nameLabel, 100);
+    renameBtn = editNameButton();
+    connect(renameBtn, &QPushButton::clicked, this, [this, mw, tid] {
+        const QString renamed = editTournamentName(mw, this, tid);
+        renameBtn->setFocus();
+        if (!renamed.isEmpty()) {
+            nameLabel->setText(T::breakable(renamed));
+            T::hugText(nameLabel);
+        }
+    });
+    nameRow->addWidget(renameBtn, 0, Qt::AlignTop);
+    nameRow->addStretch(1);
+    v->addLayout(nameRow);
     v->addSpacing(6);
-    centred(T::lbl(QStringLiteral("Tournament complete  ·  %1 player%2").arg(players).arg(players == 1 ? "" : "s"),
-                   T::MUTED, 13, 400, true));
+    const bool terminated = t["status"].toString() == tdb::TERMINATED;
+    centred(T::lbl(QStringLiteral("%1  ·  %2 player%3").arg(terminated ? "Terminated" : "Tournament complete")
+                       .arg(players).arg(players == 1 ? "" : "s"),
+                   terminated ? T::RED : T::MUTED, 13, terminated ? 700 : 400, true));
     v->addSpacing(20);
+    if (terminated) {
+        v->addWidget(terminatedNotice(t["terminated_at"].toString()));
+        v->addSpacing(20);
+    }
 
     auto *actions = new QWidget;
     auto *al = new T::FlowLayout(actions, 10, true);
-    QPushButton *standings = T::button(QStringLiteral("View final standings  →"), "primary");
-    connect(standings, &QPushButton::clicked, this, [mw, tid, name, game] {
-        mw->navigateTo("standings", {{"tournament_id", tid}, {"tournament_name", name}, {"game", game}});
+    QPushButton *standings = T::button(terminated ? "View standings" : "View final standings", "primary", "trophy");
+    connect(standings, &QPushButton::clicked, this, [this, mw, tid, game] {
+        mw->navigateTo("standings", {{"tournament_id", tid}, {"tournament_name", nameLabel->text().remove(QChar(0x200B))}, {"game", game}});
     });
     al->addWidget(standings);
     v->addWidget(actions);
@@ -912,10 +1034,11 @@ RoundSelectScreen::RoundSelectScreen(MainWindow *mw, qint64 tid)
     const db::Rows rounds = tdb::rounds(tid);
     for (const db::Row &r : rounds) {
         const int number = r["round_number"].toInt();
-        QPushButton *btn = T::button(QStringLiteral("Round %1").arg(number));
+        QPushButton *btn = T::button(QStringLiteral("Round %1").arg(number), "secondary", "arrow-right", true);
         btn->setMinimumWidth(T::px(120));
-        connect(btn, &QPushButton::clicked, this, [mw, tid, name, game, number] {
-            mw->navigateTo("round", {{"tournament_id", tid}, {"tournament_name", name}, {"game", game}, {"round_number", number}});
+        connect(btn, &QPushButton::clicked, this, [this, mw, tid, game, number] {
+            mw->navigateTo("round", {{"tournament_id", tid}, {"tournament_name", nameLabel->text().remove(QChar(0x200B))},
+                                     {"game", game}, {"round_number", number}});
         });
         flow->addWidget(btn);
     }
@@ -937,8 +1060,13 @@ PlayersScreen::PlayersScreen(MainWindow *mw) : mw_(mw)
     searchBox = new QLineEdit;
     searchBox->setPlaceholderText("Search players...");
     searchBox->setAccessibleName("Search players");
+    T::setFieldIcon(searchBox, "search");
     bar->addWidget(searchBox, 1);
-    QPushButton *add = T::button("+ New player", "primary");
+    filterBtn = T::button("Filter", "secondary", "funnel");
+    connect(filterBtn, &QPushButton::clicked, this, [this] { openFilterMenu(); });
+    bar->addWidget(filterBtn);
+    showFilterState();
+    QPushButton *add = T::button("New player", "primary", "user-plus");
     connect(add, &QPushButton::clicked, this, [this] {
         QString name;
         if (!askText(this, "Add new player", "Display name", "Add player", &name))
@@ -947,44 +1075,171 @@ PlayersScreen::PlayersScreen(MainWindow *mw) : mw_(mw)
             warn(this, "Missing Name", "Enter a name.");
             return;
         }
+        // the same name may be the same person or somebody else: the organizer says which
+        const db::Rows namesakes = pdb::playersNamed(name);
+        if (!namesakes.isEmpty()) {
+            const qint64 choice = chooseSameName(this, name, namesakes, "Open");
+            if (choice > 0)
+                mw_->navigateTo("player_profile", {{"player_id", choice}});
+            if (choice != -1)
+                return;
+        }
         pdb::addPlayer(name);
-        populate(pdb::allPlayers());
+        runSearch();
     });
     bar->addWidget(add);
     root->addLayout(bar);
     root->addSpacing(14);
 
-    root->addWidget(T::scrollArea(&list_), 1);
+    root->addWidget(page(&list_), 1);
     list_->setSpacing(6);
 
     searchTimer_.setSingleShot(true);
     connect(&searchTimer_, &QTimer::timeout, this, [this] { runSearch(); });
     connect(searchBox, &QLineEdit::textChanged, this, [this] { searchTimer_.start(250); });
-    populate(pdb::allPlayers());
+    runSearch();
 }
 
+// The name search and the game filter together: a player is listed when the name matches and,
+// unless "All games" is chosen, they have played at least one of the ticked games.
 void PlayersScreen::runSearch()
 {
     const QString text = searchBox->text().trimmed();
-    populate(text.isEmpty() ? pdb::allPlayers() : pdb::searchPlayers(text));
+    db::Rows players = text.isEmpty() ? pdb::allPlayers() : pdb::searchPlayers(text);
+    const int named = int(players.size());
+    if (!gameFilter_.isEmpty()) {
+        const QHash<qint64, QStringList> played = pdb::gamesPlayed();
+        db::Rows kept;
+        for (const db::Row &p : players) {
+            const QStringList games = played.value(p["player_id"].toLongLong());
+            if (std::any_of(games.begin(), games.end(), [this](const QString &g) { return gameFilter_.contains(g); }))
+                kept << p;
+        }
+        players = kept;
+    }
+    populate(players, named);
 }
 
-void PlayersScreen::populate(const db::Rows &players)
+void PlayersScreen::setGameChecked(const QString &game, bool on)
 {
-    T::ScrollKeeper keep(this);
+    if (game.isEmpty())
+        gameFilter_.clear();            // "All games": ticking it clears the games, and it stays ticked until one is chosen
+    else if (on)
+        gameFilter_.insert(game);
+    else
+        gameFilter_.remove(game);
+    showFilterState();
+    runSearch();
+}
+
+// The button says when a filter is on: its label counts the games, it takes the outline of
+// a selected control, and its tooltip and accessible name list them.
+void PlayersScreen::showFilterState()
+{
+    QStringList names;
+    for (const QString &game : tdb::supportedGames())
+        if (gameFilter_.contains(game))
+            names << T::gameName(game);
+    const bool on = !names.isEmpty();
+    const int h = qMax(T::px(35), T::BUTTON_H);
+    filterBtn->setText(on ? QStringLiteral("Filter · %1").arg(names.size()) : QString("Filter"));
+    filterBtn->setStyleSheet(on ? T::pillQss(true, h) : T::buttonQss("secondary", h));
+    T::setButtonIcon(filterBtn, "funnel", T::TEXT);
+    filterBtn->setToolTip(on ? "Showing players who have played " + names.join(" or ") : QString("Filter players by game"));
+    filterBtn->setAccessibleName(on ? "Filter players by game, on: " + names.join(", ") : QString("Filter players by game, all games"));
+}
+
+// A small panel under the button with one box for "All games" and one per supported game.
+// It is an ordinary popup of real checkboxes: Tab and Space work in it, a screen reader reads
+// each box, and it stays open while boxes are ticked so several games can be chosen in one go.
+// Escape or a click elsewhere closes it.
+void PlayersScreen::openFilterMenu()
+{
+    if (filterMenu_) {
+        filterMenu_->close();
+        return;
+    }
+    auto *menu = new QFrame(this, Qt::Popup);
+    filterMenu_ = menu;
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    menu->setAttribute(Qt::WA_TranslucentBackground, false);    // opaque in both themes
+    menu->setObjectName("gameFilterMenu");
+    menu->setAccessibleName("Filter players by game");
+    menu->setStyleSheet("#gameFilterMenu{background:" + T::SURFACE2 + ";border:" + QString::number(T::LINE) + "px solid "
+                        + T::BORDER2 + ";}"
+                        "#gameFilterMenu QCheckBox{background:transparent;padding:0 " + T::P(10) + "px;border:2px solid transparent;"
+                        "border-radius:" + QString::number(T::RADIUS_SM - 3) + "px;}"
+                        "#gameFilterMenu QCheckBox:hover{background:" + T::SELECTED + ";}"
+                        "#gameFilterMenu QCheckBox:focus{border-color:" + T::FOCUS + ";}");
+    auto *v = new QVBoxLayout(menu);
+    v->setContentsMargins(T::px(8), T::px(8), T::px(8), T::px(8));
+    v->setSpacing(2);
+    const auto sync = [this, menu] {
+        for (QCheckBox *box : menu->findChildren<QCheckBox *>()) {
+            const QString game = box->property("game").toString();
+            box->setChecked(game.isEmpty() ? gameFilter_.isEmpty() : gameFilter_.contains(game));
+        }
+    };
+    const auto add = [&](const QString &label, const QString &game) {
+        auto *box = new QCheckBox(label);
+        box->setProperty("game", game);
+        box->setMinimumWidth(T::px(200));
+        v->addWidget(box);
+        connect(box, &QCheckBox::clicked, this, [this, game, sync](bool on) {
+            setGameChecked(game, on);
+            sync();
+        });
+    };
+    add("All games", QString());
+    for (const QString &game : tdb::supportedGames())
+        add(T::gameName(game), game);
+    sync();
+    connect(menu, &QObject::destroyed, filterBtn, [this] { filterBtn->setFocus(); });
+    menu->adjustSize();
+    // under the button, moved left if it would run off the window's right edge
+    QPoint at = filterBtn->mapToGlobal(QPoint(0, filterBtn->height() + 4));
+    const int right = window()->mapToGlobal(QPoint(window()->width(), 0)).x();
+    at.setX(qMax(window()->mapToGlobal(QPoint(0, 0)).x(), qMin(at.x(), right - menu->width())));
+    menu->move(at);
+    menu->show();
+    menu->findChild<QCheckBox *>()->setFocus();
+}
+
+void PlayersScreen::populate(const db::Rows &players, int outOf)
+{
+    T::ScrollKeeper keep(this);         // filtering or searching rebuilds the list without moving the page
     T::clear(list_);
-    countLabel->setText(QStringLiteral("%1 player%2").arg(players.size()).arg(players.size() == 1 ? "" : "s"));
-    if (players.isEmpty())
-        list_->addWidget(T::lbl("No players found.", T::MUTED, 13));
+    const bool filtered = !gameFilter_.isEmpty();
+    countLabel->setText(filtered ? QStringLiteral("%1 of %2 player%3").arg(players.size()).arg(outOf).arg(outOf == 1 ? "" : "s")
+                                 : QStringLiteral("%1 player%2").arg(players.size()).arg(players.size() == 1 ? "" : "s"));
+    if (players.isEmpty()) {
+        QString message = "No players found.";
+        if (filtered) {
+            QStringList names;
+            for (const QString &game : tdb::supportedGames())
+                if (gameFilter_.contains(game))
+                    names << T::gameName(game);
+            const QString text = searchBox->text().trimmed();
+            message = (text.isEmpty() ? QString("No players have played ")
+                                      : QStringLiteral("No players matching “%1” have played ").arg(text))
+                      + names.join(" or ") + ". Choose All games in Filter to see everyone.";
+        }
+        QLabel *empty = T::lbl(message, T::MUTED, 13, 400, true);
+        empty->setObjectName("noPlayers");
+        list_->addWidget(empty);
+    }
     // one query for everybody's game history, not one per row
     const QHash<qint64, QStringList> played = pdb::gamesPlayed();
+    // which names need their id is decided from the whole directory, before the search and
+    // the game filter narrowed this list, so hiding one namesake never hides the other's id
+    const QSet<qint64> shared = pdb::directoryDuplicates();
 
     const int tagArea = tagArea_ = tagAreaWidth();
-    const int gap = 20;                                  // between the tag area and the name
+    const int gap = 20;                                  // between the name and the tag area
 
     for (const db::Row &p : players) {
         const qint64 pid = p["player_id"].toLongLong();
-        const QString name = p["display_name"].toString();
+        const QString name = pdb::label(p["display_name"].toString(), pid, shared);
         auto *row = new QFrame;
         row->setObjectName("pr");
         row->setStyleSheet("#pr{background:" + T::SURFACE2 + ";border:" + QString::number(T::LINE) + "px solid " + T::BORDER2
@@ -994,18 +1249,18 @@ void PlayersScreen::populate(const db::Rows &players)
         outer->setContentsMargins(14, 4, 10, 4);
         row->setLayout(outer);
 
-        auto *lead = new QHBoxLayout;                   // tags left, name right — at every window size
+        auto *lead = new QHBoxLayout;                   // name left, tags right — at every window size
         lead->setSpacing(gap);
+        lead->addWidget(new T::NameScroll(name), 1, Qt::AlignVCenter);
         auto *tags = new T::TagStrip(played.value(pid));
         tags->setFixedWidth(tagArea);
         lead->addWidget(tags, 0, Qt::AlignVCenter);
-        lead->addWidget(new T::NameScroll(name), 1, Qt::AlignVCenter);
         outer->addLayout(lead, 1);
 
         QPushButton *view = T::button("View profile");
         view->setAccessibleName("View profile of " + name);
         connect(view, &QPushButton::clicked, this, [this, pid, name] {
-            mw_->navigateTo("player_profile", {{"player_id", pid}, {"player_name", name}});
+            mw_->navigateTo("player_profile", {{"player_id", pid}});
         });
         outer->addWidget(view, 0, Qt::AlignVCenter);
         list_->addWidget(row);
@@ -1013,12 +1268,12 @@ void PlayersScreen::populate(const db::Rows &players)
     list_->addStretch();
 }
 
-// The tag area is the same width in every row, so every name starts at the same place.
+// The tag area is the same width in every row, so the tags line up in a column right of the names.
 // It is wide enough for every game side by side when there is room; when there is not, it
 // takes a share of the row and scrolls sideways instead of wrapping or pushing the name.
 int PlayersScreen::tagAreaWidth() const
 {
-    T::TagStrip probe({"POKEMON", "ONEPIECE", "MTG"});
+    T::TagStrip probe(tdb::supportedGames());
     const int allTags = probe.contentWidth();
     const int side = tiny ? 14 : (narrow ? 20 : 36);
     const int rowRoom = width() - 2 * side - 28 - 10 - (tiny ? 0 : T::px(150));
@@ -1042,18 +1297,29 @@ PlayerProfileScreen::PlayerProfileScreen(MainWindow *mw, qint64 playerId) : mw_(
     playerName_ = pdb::playerById(playerId)["display_name"].toString();
 
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body));
+    root->addWidget(page(&body));
 
     QBoxLayout *hdr = flip(T::row(12));
+    // the name, with the player's permanent id beside it in small muted text
+    auto *nameRow = new QHBoxLayout;
+    nameRow->setSpacing(10);
     nameLabel_ = T::lbl(playerName_, T::TEXT, 26, 700, true);
-    hdr->addWidget(nameLabel_, 1);
+    T::hugText(nameLabel_);
+    nameRow->addWidget(nameLabel_, 100);
+    idLabel_ = T::lbl(pdb::formatId(playerId_), T::MUTED, 13, 600);
+    idLabel_->setObjectName("playerId");
+    idLabel_->setToolTip("Player ID. It never changes, even if the name does.");
+    idLabel_->setAccessibleName("Player ID " + pdb::formatId(playerId_));
+    nameRow->addWidget(idLabel_, 0, Qt::AlignVCenter);
+    nameRow->addStretch(1);
+    hdr->addLayout(nameRow, 1);
     auto *actions = new QWidget;
     auto *al = new T::FlowLayout(actions, 8);
-    QPushButton *edit = T::button("Edit name");
+    QPushButton *edit = T::button("Edit name", "secondary", "pencil");
     connect(edit, &QPushButton::clicked, this, [this] { editName(); });
-    QPushButton *del = T::button("Delete player", "danger");
+    QPushButton *del = T::button("Remove player", "danger", "trash-2");
     connect(del, &QPushButton::clicked, this, [this] { deletePlayer(); });
-    QPushButton *back = T::button("Back", "ghost");
+    QPushButton *back = T::button("Back", "ghost", "arrow-left");
     connect(back, &QPushButton::clicked, this, [this] { mw_->goBack(); });
     for (QPushButton *b : {edit, del, back})
         al->addWidget(b);
@@ -1084,7 +1350,11 @@ PlayerProfileScreen::PlayerProfileScreen(MainWindow *mw, qint64 playerId) : mw_(
     body->addWidget(filters);
     body->addSpacing(12);
 
-    body->addWidget(T::caps("Tournament history"));
+    auto *historyHead = new QHBoxLayout;
+    historyHead->setSpacing(8);
+    historyHead->addWidget(T::iconLabel("history", T::MUTED, 16));
+    historyHead->addWidget(T::caps("Tournament history"), 1);
+    body->addLayout(historyHead);
     body->addSpacing(8);
     feed_ = new QVBoxLayout;
     feed_->setSpacing(10);
@@ -1183,6 +1453,8 @@ QWidget *PlayerProfileScreen::historyCard(const db::Row &entry)
         fmt << entry["tournament_date"].toString().left(10);
     title->addWidget(T::lbl(fmt.join(QStringLiteral("  ·  ")), color, 12, 400, true));
     hl->addLayout(title, 1);
+    if (entry["status"].toString() == tdb::TERMINATED)
+        hl->addWidget(T::pill("Terminated", T::RED, false));
     hl->addWidget(T::lbl(QStringLiteral("%1W / %2L").arg(entry["match_wins"].toInt()).arg(entry["match_losses"].toInt()), T::MUTED, 13));
     if (entry["final_placement"].toInt())
         hl->addWidget(T::lbl(QStringLiteral("#%1").arg(entry["final_placement"].toInt()), color, 13, 700));
@@ -1261,24 +1533,35 @@ void PlayerProfileScreen::editName()
         warn(this, "Invalid Name", "Name cannot be empty.");
         return;
     }
-    pdb::renamePlayer(playerId_, name);
+    try {
+        pdb::renamePlayer(playerId_, name);     // the id stays the same; only the name changes
+    } catch (const std::exception &e) {
+        warn(this, "Name not changed", QString::fromUtf8(e.what()));
+        return;
+    }
     playerName_ = name;
     nameLabel_->setText(T::breakable(name));
+    T::hugText(nameLabel_);
     inform(this, "Saved", "Name updated to: " + name);
 }
 
+// Removes the player from the directory.  Their records are not touched (see pdb::removePlayer),
+// and the page only changes once that has been saved.
 void PlayerProfileScreen::deletePlayer()
 {
-    if (!confirm(this, "Delete Player",
-                 "Permanently delete " + playerName_ + "?\n\nTheir enrollment and match records will be removed.\n"
-                 "Completed tournament results will be preserved."))
+    const QString shown = pdb::label(playerName_, playerId_, pdb::directoryDuplicates());
+    if (!confirmRemovePlayer(this, shown))
         return;
     try {
-        pdb::deletePlayer(playerId_);
-    } catch (const db::Error &e) {
-        warn(this, "Could not delete", playerName_ + " could not be deleted.\n\n" + e.message);
+        pdb::removePlayer(playerId_);           // false when already removed: the result is the same
+    } catch (const pdb::StillPlaying &e) {
+        warn(this, "Player not removed",
+             shown + " is still part of a tournament, so nothing was changed.\n\n" + e.reasons.join("\n\n"));
+        return;
+    } catch (const std::exception &e) {
+        warn(this, "Player not removed", shown + " could not be removed, and nothing was changed.\n\n" + QString::fromUtf8(e.what()));
         return;
     }
-    inform(this, "Deleted", playerName_ + " has been deleted.");
+    mw_->notify(shown + " was removed from the player directory. Their tournament results remain in history.", 10);
     mw_->navigateTo("players");
 }

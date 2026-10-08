@@ -23,6 +23,13 @@ QWidget *makeScreen(const QString &requested, MainWindow *mw, QVariantMap args)
     }
     const qint64 tid = args.value("tournament_id").toLongLong();
     const int roundNumber = args.value("round_number").toInt();
+    // A removed player has no profile, however it is asked for (a remembered page, Back):
+    // the directory is shown instead.  Their name stays, as plain text, in tournament history.
+    if (name == "player_profile") {
+        const db::Row player = pdb::playerById(args.value("player_id").toLongLong());
+        if (player.isEmpty() || !player["deleted_at"].isNull())
+            name = "players";
+    }
 
     // Commander events have their own multiplayer screens
     if (tid && (name == "registration" || name == "round" || name == "standings" || name == "round_select")
@@ -123,10 +130,10 @@ static QPixmap bannerPixmap(const QString &image, const QString &color)
 HomeScreen::HomeScreen(MainWindow *mw) : mw_(mw)
 {
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body));
+    root->addWidget(page(&body));
 
     body->addSpacing(34);
-    auto *badge = new QLabel(QStringLiteral("⚔  v%1").arg(prefs::VERSION));
+    auto *badge = new QLabel(QStringLiteral("v%1").arg(prefs::VERSION));
     badge->setFont(T::font(12, 500));
     badge->setStyleSheet("color:" + T::PURPLE_LT + ";background:" + T::PURPLE_DIM + ";border:1px solid " + T::PURPLE_BDR
                          + ";border-radius:" + T::P(11) + "px;padding:" + T::P(4) + "px " + T::P(14) + "px;");
@@ -159,24 +166,7 @@ HomeScreen::HomeScreen(MainWindow *mw) : mw_(mw)
     QLabel *about = T::lbl(DESCRIPTION, T::MUTED, 13, 400, true);
     about->setAlignment(Qt::AlignHCenter);
     body->addWidget(about);
-    body->addSpacing(4);
-    auto *foot = new QWidget;
-    auto *fl = new T::FlowLayout(foot, 16, true);
-    if (!prefs::founders().isEmpty())
-        fl->addWidget(T::lbl("Founded by " + prefs::founders().join(", "), T::DIM, 11));
-    auto *issue = new QPushButton(QStringLiteral("Report an issue ↗"));
-    issue->setMinimumHeight(T::MIN_HIT);
-    issue->setCursor(QCursor(Qt::PointingHandCursor));
-    issue->setToolTip(prefs::issuesUrl());
-    issue->setAccessibleDescription("Opens the project's GitHub issues page in your browser");
-    issue->setStyleSheet("QPushButton{background:transparent;color:" + T::MUTED + ";border:2px solid transparent;border-radius:"
-                         + QString::number(T::RADIUS_SM) + "px;font-size:" + T::P(12) + "px;text-decoration:underline;padding:0 "
-                         + T::P(12) + "px;min-height:" + QString::number(T::MIN_HIT - 4) + "px;}"
-                         "QPushButton:hover{color:" + T::PURPLE_LT + ";}"
-                         "QPushButton:focus{border-color:" + T::FOCUS + ";color:" + T::PURPLE_LT + ";}");
-    connect(issue, &QPushButton::clicked, this, [] { QDesktopServices::openUrl(QUrl(prefs::issuesUrl())); });
-    fl->addWidget(issue);
-    body->addWidget(foot);
+    // the bug-report link and the credit are in the footer every page shares (T::pageFooter)
 }
 
 QWidget *HomeScreen::card(const QString &game, const QString &image, const QString &tag, const QString &name,
@@ -217,7 +207,7 @@ QWidget *HomeScreen::card(const QString &game, const QString &image, const QStri
     bl->addSpacing(4);
     bl->addWidget(T::lbl(subtitle, T::MUTED, 12, 400, true));
     bl->addSpacing(18);
-    QPushButton *cta = T::button(QStringLiteral("Open Hub  →"), "ghost");
+    QPushButton *cta = T::button("Open Hub", "ghost", "arrow-right", true);
     connect(cta, &QPushButton::clicked, this, [this, screen] { mw_->navigateTo(screen); });
     bl->addWidget(cta);
     vl->addLayout(bl);
@@ -241,10 +231,23 @@ HubScreen::HubScreen(MainWindow *mw, const QString &game) : mw_(mw), game_(game)
     clockTimer_.start();
 }
 
+// The row clocks only tick while the hub is the page being shown.
+void HubScreen::hideEvent(QHideEvent *e)
+{
+    T::Screen::hideEvent(e);
+    clockTimer_.stop();
+}
+
+void HubScreen::showEvent(QShowEvent *e)
+{
+    T::Screen::showEvent(e);
+    clockTimer_.start();
+}
+
 void HubScreen::build()
 {
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body));      // the whole hub scrolls, so a short window never hides anything
+    root->addWidget(page(&body));      // the whole hub scrolls, so a short window never hides anything
 
     QBoxLayout *cols = flip(T::row(28));
     auto *left = new QVBoxLayout;
@@ -256,7 +259,7 @@ void HubScreen::build()
     tv->addWidget(T::lbl("Tournaments", T::TEXT, 24, 700, true));
     tv->addWidget(T::lbl(T::gameLabel(game_) + QStringLiteral("  ·  Most recent first"), T::MUTED, 13, 400, true));
     top->addLayout(tv, 1);
-    QPushButton *create = T::button("+  New Tournament", "primary");
+    QPushButton *create = T::button("New Tournament", "primary", "plus");
     connect(create, &QPushButton::clicked, this, [this] { mw_->navigateTo("tournament_setup", {{"game", game_}}); });
     top->addWidget(create, 0, Qt::AlignTop);
     left->addLayout(top);
@@ -268,7 +271,7 @@ void HubScreen::build()
     activeBox_->setSpacing(10);
     left->addLayout(activeBox_);
     left->addSpacing(26);
-    left->addWidget(T::caps("Completed"));
+    left->addWidget(T::caps("History"));
     left->addSpacing(12);
     doneBox_ = new QVBoxLayout;
     doneBox_->setSpacing(10);
@@ -337,8 +340,8 @@ void HubScreen::load()
             active << t;
         else if (status == "PENDING")
             pending << t;
-        else if (status == "COMPLETED")
-            done << t;
+        else if (status == "COMPLETED" || status == tdb::TERMINATED)
+            done << t;          // history: finished, or ended early and marked "Terminated"
     }
 
     clocks_.clear();
@@ -352,7 +355,7 @@ void HubScreen::load()
     for (const db::Row &t : done)
         doneBox_->addWidget(tournamentRow(t));
     if (done.isEmpty())
-        doneBox_->addWidget(T::lbl("No completed tournaments yet", T::MUTED, 13));
+        doneBox_->addWidget(T::lbl("No finished tournaments yet", T::MUTED, 13));
 
     const tdb::GameStats stats = tdb::gameStats(game_);
     const db::Rows &top = stats.topPlayers;
@@ -381,7 +384,8 @@ QWidget *HubScreen::tournamentRow(const db::Row &t)
     const QString name = t["name"].toString();
     const bool commander = t["format"].toString() == cdb::FORMAT;
     const bool inProgress = status == "IN_PROGRESS";
-    const live::RoundStatus round = inProgress ? live::roundStatus(tid) : live::RoundStatus();
+    const bool terminated = status == tdb::TERMINATED;
+    const live::RoundStatus round = inProgress || terminated ? live::roundStatus(tid) : live::RoundStatus();
     const QString accent = round.playing ? T::LIVE : T::BORDER2;
 
     auto *row = new T::ClickFrame("tr");
@@ -405,6 +409,9 @@ QWidget *HubScreen::tournamentRow(const db::Row &t)
         prog = round.playing ? QStringLiteral("Round %1 of %2").arg(round.roundNumber).arg(total) : QString("Not started");
     } else if (status == "PENDING") {
         prog = "Not started";
+    } else if (terminated) {
+        prog = round.roundId ? QStringLiteral("Ended early in round %1 of %2").arg(round.roundNumber).arg(total)
+                             : QString("Ended early before round 1");
     } else {
         prog = QStringLiteral("%1 round%2").arg(total).arg(total == 1 ? "" : "s");
     }
@@ -426,6 +433,7 @@ QWidget *HubScreen::tournamentRow(const db::Row &t)
         Clock c;
         c.value = T::lbl("--:--", T::TEXT, 14, 600, false, true);
         c.caption = T::lbl("", T::MUTED, 12);
+        c.icon = T::iconLabel("timer", T::MUTED, 15);
         c.kind = round.kind;
         c.roundId = round.roundId;
         c.reading = timerdb::read(c.kind, c.roundId);
@@ -433,6 +441,7 @@ QWidget *HubScreen::tournamentRow(const db::Row &t)
         clocks_.append(c);
         auto *clock = new QHBoxLayout;
         clock->setSpacing(8);
+        clock->addWidget(c.icon);
         clock->addWidget(c.value);
         clock->addWidget(c.caption);
         clock->addStretch();
@@ -443,12 +452,15 @@ QWidget *HubScreen::tournamentRow(const db::Row &t)
                       0, Qt::AlignLeft);
     } else if (status == "PENDING") {
         sl->addWidget(T::pill("Not started", T::PURPLE_LT), 0, Qt::AlignLeft);
+    } else if (terminated) {
+        sl->addWidget(T::pill("Terminated", T::RED), 0, Qt::AlignLeft);
     } else {
         sl->addWidget(T::pill("Completed", T::GREY), 0, Qt::AlignLeft);
     }
     hl->addWidget(state, 0, Qt::AlignVCenter);
 
-    const QString target = status == "PENDING" ? "registration" : status == "COMPLETED" ? "round_select" : "round";
+    const QString target = status == "PENDING" ? "registration"
+                           : status == "COMPLETED" || terminated ? "round_select" : "round";
     const QString game = game_;
     MainWindow *mw = mw_;
     connect(row, &T::ClickFrame::clicked, this, [mw, target, tid, name, game] {
@@ -462,15 +474,25 @@ void HubScreen::showClock(const Clock &c)
     if (!c.reading.valid() || !c.value || !c.caption)
         return;
     const int left = c.reading.secondsLeft();
-    c.value->setText(timerdb::clockText(left));
-    c.caption->setText(left <= 0 ? "Time expired" : c.reading.state() == timerdb::State::Running ? "remaining"
+    const bool running = c.reading.state() == timerdb::State::Running;
+    c.value->setText(timerdb::clockText(left));       // 00:00 once the time is up
+    c.caption->setText(left <= 0 ? "Time expired" : running ? "remaining"
                        : c.reading.state() == timerdb::State::Paused ? "clock paused" : "clock not started");
+    // green while counting down, red at zero, neutral otherwise; the caption says it in words too
+    const QString color = left <= 0 ? T::RED : running ? T::GREEN : T::MUTED;
+    if (c.value->property("clockColor").toString() == color)
+        return;                 // the colours change with the clock's state, not on every tick
+    c.value->setProperty("clockColor", color);
+    c.value->setStyleSheet("color:" + (left > 0 && !running ? T::TEXT : color) + ";background:transparent;border:none;");
+    c.caption->setStyleSheet("color:" + color + ";background:transparent;border:none;");
+    if (c.icon)
+        c.icon->setPixmap(T::iconPixmap("timer", color, 15));
 }
 
 TournamentSetupScreen::TournamentSetupScreen(MainWindow *mw, const QString &initialGame) : mw_(mw)
 {
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body), 1);
+    root->addWidget(page(&body), 1);
 
     body->addWidget(T::lbl(initialGame.isEmpty() ? QString("New Tournament")
                                                  : QStringLiteral("New %1 Tournament").arg(T::gameLabel(initialGame)),
@@ -496,6 +518,7 @@ TournamentSetupScreen::TournamentSetupScreen(MainWindow *mw, const QString &init
     nameInput = new QLineEdit;
     nameInput->setPlaceholderText("e.g. Friday Night Commander");
     nameInput->setAccessibleName("Tournament name");
+    nameInput->setMaxLength(tdb::MAX_NAME_LENGTH);
     form->addWidget(nameInput);
     form->addSpacing(12);
 
@@ -561,10 +584,10 @@ TournamentSetupScreen::TournamentSetupScreen(MainWindow *mw, const QString &init
     root->addSpacing(12);
     auto *bottom = new QWidget;
     auto *bl = new T::FlowLayout(bottom, 10);
-    QPushButton *back = T::button(QStringLiteral("← Back"), "ghost");
+    QPushButton *back = T::button("Back", "ghost", "arrow-left");
     connect(back, &QPushButton::clicked, this, [this] { mw_->navigateTo("hub", {{"game", game()}}); });
     bl->addWidget(back);
-    QPushButton *create = T::button(QStringLiteral("Create && register players  →"), "primary");
+    QPushButton *create = T::button("Create && register players", "primary", "arrow-right", true);
     connect(create, &QPushButton::clicked, this, [this] { createTournament(); });
     bl->addWidget(create);
     root->addWidget(bottom);

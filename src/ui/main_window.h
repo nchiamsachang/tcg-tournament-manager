@@ -44,9 +44,14 @@ public:
     void addTournamentTab(qint64 tournamentId, const QString &game, const QString &name);
     void updateTournamentTab(qint64 tournamentId);
     void removeTournamentTab(qint64 tournamentId);
+    // A tournament was renamed: its pill, and the pages remembered for Back, take the new name.
+    void renameTournamentTab(qint64 tournamentId, const QString &name);
     int liveTabCount() const { return int(tabOrder_.size()); }
     QString tabText(qint64 tournamentId) const;     // what the tournament's pill in the top area says
     QPushButton *tabButton(qint64 tournamentId) const { return tabButtons_.value(tournamentId); }
+    // The colour of the clock part of that pill: green while it runs, red once expired, and
+    // empty (the pill's own text colour) while it is paused, not started or absent.
+    QString tabClockColor(qint64 tournamentId) const { return tabLabel(tournamentId).tailColor; }
 
     QStackedWidget *stack = nullptr;
     QPushButton *themeBtn = nullptr, *gearBtn = nullptr, *backBtn = nullptr;
@@ -63,6 +68,12 @@ private:
         live::RoundStatus round;        // as last read from the database
         timerdb::Reading clock;         // the saved clock of the round being played
     };
+    struct TabLabel {                   // a pill's wording: name and round, then the clock or status
+        QString head, sep, tail;
+        QString tailColor;              // empty: the pill's own text colour
+        bool clock = false;             // the tail is a round clock (drawn with the timer icon)
+    };
+    TabLabel tabLabel(qint64 tournamentId) const;
     void loadTabClock(qint64 tournamentId);
     void showTab(qint64 tournamentId);
     void refreshTabs(bool reload);

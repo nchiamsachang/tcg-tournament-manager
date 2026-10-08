@@ -11,8 +11,10 @@
 #include <QFrame>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
 #include <QList>
 #include <QMap>
+#include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
@@ -64,15 +66,34 @@ QFont font(int size = 13, int weight = 400, bool mono = false, double spacing = 
 QLabel *lbl(const QString &text = {}, const QString &color = {}, int size = 13, int weight = 400, bool wrap = false,
             bool mono = false, double spacing = 0.0);
 QLabel *caps(const QString &text, const QString &color = {}, int size = 11);     // small uppercase section label
+// Lets a wrapping heading be no wider than its text, so a control placed after it sits right
+// beside the words instead of at the far end of the row.  Call again after changing the text.
+void hugText(QLabel *label);
 QLabel *pill(const QString &text, const QString &color, bool dot = true, const QString &bg = {});
 // Small rounded tag naming a game, in that game's tag colour (the name is always written out).
 QLabel *gameTag(const QString &game);
 QString gameName(const QString &game);          // "One Piece", "Pokémon", "Magic: The Gathering"
 QString gameTagName(const QString &game);       // the short form on a tag: "One Piece", "Pokémon", "Magic"
 QFrame *hline(const QString &color = {});
-// Pill-shaped button.  kind: primary | secondary | danger | ghost.
-QPushButton *button(const QString &text, const QString &kind = "secondary");
-QPushButton *roundButton(const QString &text, const QString &tooltip);            // circular icon control
+// Lucide icons (https://lucide.dev), built in from assets/icons/<name>.svg and drawn in one
+// colour.  `size` is in logical pixels and follows the text-size preference.  To use
+// another icon, copy its .svg into assets/icons and list it in assets/assets.qrc.
+QPixmap iconPixmap(const QString &name, const QString &color, int size = 18);
+// An icon beside a heading or a status.  Decorative: it has no accessible name, so screen
+// readers announce only the text next to it.
+QLabel *iconLabel(const QString &name, const QString &color, int size = 18);
+// Puts an icon on a button, 8px before its label (or after it), in the label's colour.
+// A disabled button shows it dimmed.  With no label the icon is centred.
+void setButtonIcon(QAbstractButton *b, const QString &name, const QString &color, bool after = false, int size = 18);
+void setFieldIcon(QLineEdit *field, const QString &name);       // inside a text field, on the left
+QString labelColor(const QString &kind);        // the label colour of a button kind
+// Pill-shaped button.  kind: primary | secondary | danger | ghost.  `icon` names a Lucide icon.
+QPushButton *button(const QString &text, const QString &kind = "secondary", const QString &icon = {},
+                    bool iconAfter = false);
+QPushButton *roundButton(const QString &icon, const QString &tooltip);            // circular icon-only control
+// A quiet icon-only button for beside a heading (no outline until it is hovered or focused).
+// The tooltip is also its name for screen readers.
+QPushButton *iconButton(const QString &icon, const QString &tooltip);
 // A checkable pill for "choose one" groups.  Checked: 3px purple outline, tint and a tick.
 QPushButton *choicePill(const QString &text);
 QString pillQss(bool selected, int height);     // shared by tabs and choice pills
@@ -151,6 +172,9 @@ class Screen : public QWidget {
 public:
     Screen();
     QBoxLayout *flip(QBoxLayout *layout, bool atTiny = false);
+    // The scrolling part of a page; `body` receives its content layout.  The shared footer
+    // ("Report a bug" and the credit) follows whatever the page puts there.
+    QScrollArea *page(QVBoxLayout **body);
     bool narrow = false, tiny = false;
     QVBoxLayout *root = nullptr;
 
@@ -165,8 +189,12 @@ private:
 
 // Transparent vertical scroll area; `box` receives its content layout.  When the
 // scrollbar appears, the content is inset by the same amount on the other side,
-// so it stays centred in the column instead of shifting left.
-QScrollArea *scrollArea(QVBoxLayout **box);
+// so it stays centred in the column instead of shifting left.  With `footer`, the page
+// footer is placed after the content (screens use Screen::page for that).
+QScrollArea *scrollArea(QVBoxLayout **box, bool footer = false);
+// Small, quiet line for the end of every main page: a "Report a bug" link to the project's
+// issue page (opened in the browser) and who produced the app.
+QWidget *pageFooter();
 
 // Keeps the page where it is while part of it is rebuilt.
 //

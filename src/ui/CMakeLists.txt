@@ -7,7 +7,7 @@ add_library(tcgui STATIC
     screens.h screens_basic.cpp screens_modern.cpp screens_commander.cpp
 )
 target_include_directories(tcgui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(tcgui PUBLIC tcgcore Qt6::Widgets Qt6::PrintSupport)
+target_link_libraries(tcgui PUBLIC tcgcore Qt6::Widgets Qt6::PrintSupport Qt6::Svg)
 
 
 set(TCG_ASSETS ${CMAKE_SOURCE_DIR}/assets/assets.qrc)

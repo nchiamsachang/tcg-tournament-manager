@@ -48,9 +48,10 @@ QList<QPair<QString, QString>> tiebreakColumns(const QString &game)
     return {{"omw_pct", "OMW%"}, {"gw_pct", "GW%"}, {"ogw_pct", "OGW%"}};      // MTG
 }
 
-void calculateTiebreakers(qint64 tournamentId, const QString &game)
+// Every player's record and tiebreakers, worked out from the saved matches.  Nothing is written.
+static QHash<qint64, QVariantMap> figuresFromMatches(qint64 tournamentId, const QString &game)
 {
-    db::Tx tx;      // every player's figures are replaced together
+    QHash<qint64, QVariantMap> out;
     const double floor = omwFloor(game);
     const Rows matches = tdb::allMatches(tournamentId);
     const Rows players = tdb::enrolledPlayers(tournamentId, true);
@@ -118,18 +119,26 @@ void calculateTiebreakers(qint64 tournamentId, const QString &game)
                 ogw = sum / opp.size();
             }
         }
-        tdb::updateEnrollmentStats(tournamentId, id, {
+        out.insert(id, {
             {"match_points", wins[id] * pts.win + draws[id] * pts.draw},
             {"match_wins", wins[id]}, {"match_losses", losses[id]}, {"match_draws", draws[id]},
             {"omw_pct", db::roundTo(omw, 4)}, {"gw_pct", db::roundTo(gw, 4)}, {"ogw_pct", db::roundTo(ogw, 4)},
         });
     }
+    return out;
+}
+
+void calculateTiebreakers(qint64 tournamentId, const QString &game)
+{
+    db::Tx tx;      // every player's figures are replaced together
+    const QHash<qint64, QVariantMap> figures = figuresFromMatches(tournamentId, game);
+    for (auto it = figures.begin(); it != figures.end(); ++it)
+        tdb::updateEnrollmentStats(tournamentId, it.key(), it.value());
     tx.commit();
 }
 
-Rows standings(qint64 tournamentId, const QString &game)
+static Rows ranked(Rows players, const QString &game)
 {
-    Rows players = tdb::enrolledPlayers(tournamentId, true);
     auto key = [&](const Row &p) {
         const double third = game == "POKEMON" ? p["ogw_pct"].toDouble() : p["gw_pct"].toDouble();
         const double fourth = game == "MTG" ? p["ogw_pct"].toDouble() : 0.0;
@@ -139,6 +148,40 @@ Rows standings(qint64 tournamentId, const QString &game)
     for (int i = 0; i < players.size(); ++i)
         players[i]["standing"] = i + 1;
     return players;
+}
+
+Rows standings(qint64 tournamentId, const QString &game)
+{
+    return ranked(tdb::enrolledPlayers(tournamentId, true), game);
+}
+
+Rows viewStandings(qint64 tournamentId, const QString &game)
+{
+    db::Tx tx;      // one consistent read; nothing is written, so there is nothing to commit
+    Rows players = tdb::enrolledPlayers(tournamentId, true);
+    if (tdb::tournamentById(tournamentId)["status"].toString() == tdb::COMPLETED) {
+        // finished: the figures and placings saved when it was finalized are the result
+        Rows table = ranked(players, game);
+        bool placed = !table.isEmpty();
+        for (const Row &p : table)
+            placed = placed && p["final_placement"].toInt() > 0;
+        if (placed) {
+            std::stable_sort(table.begin(), table.end(), [](const Row &a, const Row &b) {
+                return a["final_placement"].toInt() < b["final_placement"].toInt();
+            });
+            for (Row &p : table)
+                p["standing"] = p["final_placement"];
+        }
+        return table;
+    }
+    // still being played (or ended early): today's standings from the matches, in memory only
+    const QHash<qint64, QVariantMap> figures = figuresFromMatches(tournamentId, game);
+    for (Row &p : players) {
+        const QVariantMap f = figures.value(p["player_id"].toLongLong());
+        for (auto it = f.begin(); it != f.end(); ++it)
+            p[it.key()] = it.value();
+    }
+    return ranked(players, game);
 }
 
 Rows currentStandings(qint64 tournamentId, const QString &game)
@@ -153,6 +196,8 @@ Rows currentStandings(qint64 tournamentId, const QString &game)
 qint64 generatePairings(qint64 tournamentId, int roundNumber)
 {
     db::Tx tx;      // the round and all of its matches, or nothing
+    if (tdb::isTerminated(tournamentId))
+        throw RuleError("This tournament was ended early; no further round can be paired.");
     Rows players = tdb::enrolledPlayers(tournamentId, false);
     if (players.isEmpty())
         throw std::runtime_error("No active players to pair.");
@@ -274,6 +319,8 @@ Rows finalizeTournament(qint64 tournamentId, const QString &game)
     const Row t = requireTournament(tournamentId);
     if (t["status"].toString() == tdb::COMPLETED)
         return standings(tournamentId, game);       // already finished: the saved placings stand
+    if (t["status"].toString() == tdb::TERMINATED)
+        throw RuleError("This tournament was ended early; it has no final standings to save.");
     const Row current = tdb::currentRound(tournamentId);
     if (!current.isEmpty())
         requireAllReported(current["round_id"].toLongLong(), current["round_number"].toInt());

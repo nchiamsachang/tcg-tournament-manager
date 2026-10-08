@@ -1120,7 +1120,7 @@ private slots:
         QCOMPARE(pdb::matchHistory(winner, tid)[0]["result"].toString(), QString("WIN"));
         QCOMPARE(pdb::tournamentHistory(winner)[0]["final_placement"].toInt(), 1);
         QCOMPARE(pdb::lifetimeStats(winner)[0]["championships"].toInt(), 1);
-        pdb::deletePlayer(pdb::addPlayer("temp"));
+        pdb::removePlayer(pdb::addPlayer("temp"));
         QCOMPARE(pdb::allPlayers().size(), 2);
     }
 
@@ -1173,7 +1173,7 @@ private slots:
                 tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(poke, "POKEMON");
         played = pdb::gamesPlayed();
-        QCOMPARE(played.value(p[0]), (QStringList{"POKEMON", "ONEPIECE", "MTG"}));
+        QCOMPARE(played.value(p[0]), (QStringList{"ONEPIECE", "POKEMON", "MTG"}));      // tdb::supportedGames() order
         QCOMPARE(played.value(p[5]), QStringList{"ONEPIECE"});
         restart();
         QCOMPARE(pdb::gamesPlayed(), played);           // read from saved history, nothing kept in memory
@@ -1192,8 +1192,10 @@ private slots:
         db::exec("INSERT INTO enrollments (tournament_id, player_id, match_points) VALUES (1, 1, 9)");
         restart();
         const Rows versions = db::query("SELECT version, name FROM schema_migrations ORDER BY version");
-        QCOMPARE(versions.size(), 3);
+        QCOMPARE(versions.size(), 5);
+        QCOMPARE(versions[4]["name"].toString(), QString("player_removed"));
         QCOMPARE(versions[2]["name"].toString(), QString("commander_fixed_rounds"));
+        QCOMPARE(versions[3]["name"].toString(), QString("tournament_terminated"));
         QSet<QString> triggers;
         for (const Row &r : db::query("SELECT name FROM sqlite_master WHERE type = 'trigger'"))
             triggers.insert(r["name"].toString());
@@ -1462,34 +1464,348 @@ private slots:
         again.commit();
     }
 
-    void deletingAPlayerRemovesEverythingOrNothing()
-    {
-        const QList<qint64> p = addPlayers(4, "D");
-        const qint64 modern = tdb::createTournament("Modern", "MTG", 1, "Modern");
-        tdb::enrollPlayer(modern, p[0]);
-        tdb::enrollPlayer(modern, p[1]);
-        swiss::startTournament(modern);
+    // Player ids, names that repeat, and removing a player from the directory
 
-        // p[0] also sat in a Commander pod, which keeps a reference to the player
-        const qint64 cmd = cdb::createCommanderTournament("Cmd", 4, 1, {}, 3);
+    void playerIdsArePermanentAndNamesMayRepeat()
+    {
+        const qint64 a = pdb::addPlayer("Alex Smith"), b = pdb::addPlayer("Alex Smith");
+        const qint64 jones = pdb::addPlayer("Alex Jones"), jordan = pdb::addPlayer("Jordan Smith");
+        const qint64 spaced = pdb::addPlayer("alex   SMITH");
+        QVERIFY(a > 0 && b > a && jones > b && jordan > jones && spaced > jordan);     // each new player a new id
+        // shown with at least four digits; more when the number needs them
+        QCOMPARE(pdb::formatId(1), QString("#0001"));
+        QCOMPARE(pdb::formatId(42), QString("#0042"));
+        QCOMPARE(pdb::formatId(9999), QString("#9999"));
+        QCOMPARE(pdb::formatId(10000), QString("#10000"));
+        QCOMPARE(pdb::formatId(123456), QString("#123456"));
+        // names are compared whole: case and spacing aside, exactly
+        QCOMPARE(pdb::normalizedName("  Alex   SMITH "), pdb::normalizedName("alex smith"));
+        QVERIFY(pdb::normalizedName("Alex Smith") != pdb::normalizedName("Alex Smyth"));
+        QVERIFY(pdb::normalizedName("Alex Smith") != pdb::normalizedName("AlexSmith"));
+        QCOMPARE(pdb::directoryDuplicates(), (QSet<qint64>{a, b, spaced}));     // a shared first or last name alone is not a match
+        const QSet<qint64> shared = pdb::directoryDuplicates();
+        QCOMPARE(pdb::label("Alex Smith", a, shared), QStringLiteral("Alex Smith · ") + pdb::formatId(a));
+        QCOMPARE(pdb::label("alex   SMITH", spaced, shared), QStringLiteral("alex   SMITH · ") + pdb::formatId(spaced));   // spelling kept
+        QCOMPARE(pdb::label("Alex Jones", jones, shared), QString("Alex Jones"));
+        QCOMPARE(pdb::label("Jordan Smith", jordan, shared), QString("Jordan Smith"));
+        QCOMPARE(pdb::playersNamed(" ALEX smith ").size(), 3);
+        QVERIFY(pdb::playersNamed("Alex").isEmpty() && pdb::playersNamed("Smith").isEmpty());
+        // a search narrows the list, but which names need an id was decided from everybody
+        const Rows found = pdb::searchPlayers("SMITH");
+        QCOMPARE(found.size(), 4);
+        QCOMPARE(pdb::searchPlayers("alex   s").size(), 1);
+        QVERIFY(pdb::sharedNameIds(pdb::searchPlayers("alex   s")).isEmpty());   // judged from the results alone it would be missed
+        QVERIFY(shared.contains(pdb::searchPlayers("alex   s").first()["player_id"].toLongLong()));
+
+        // renaming changes the name and the labels, never the id
+        pdb::renamePlayer(b, "  Alexander Smith ");
+        QCOMPARE(pdb::playerById(b)["display_name"].toString(), QString("Alexander Smith"));
+        QCOMPARE(pdb::playerById(b)["player_id"].toLongLong(), b);
+        QCOMPARE(pdb::directoryDuplicates(), (QSet<qint64>{a, spaced}));
+        pdb::renamePlayer(spaced, "Sam Lee");
+        QVERIFY(pdb::directoryDuplicates().isEmpty());
+        pdb::renamePlayer(b, "Alex Smith");
+        QCOMPARE(pdb::directoryDuplicates(), (QSet<qint64>{a, b}));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::renamePlayer(b, "   "));
+
+        // a removed player's id is never given to anyone else, also after a restart
+        QVERIFY(pdb::removePlayer(spaced));
+        const qint64 next = pdb::addPlayer("Sam Lee");
+        QVERIFY(next > spaced);
+        restart();
+        const qint64 later = pdb::addPlayer("Alex Smith");
+        QVERIFY(later > next);
+        QCOMPARE(pdb::playerById(spaced)["display_name"].toString(), QString("Sam Lee"));     // the removed record is still its own
+        QCOMPARE(pdb::playersNamed("sam lee").size(), 1);                 // removed players are not offered as a match
+        QCOMPARE(pdb::playersNamed("sam lee").first()["player_id"].toLongLong(), next);
+        QCOMPARE(db::value("SELECT COUNT(DISTINCT player_id) FROM players").toInt(), 7);
+    }
+
+    void removingAPlayerHidesThemAndKeepsEveryRecord()
+    {
+        // a finished one-on-one tournament (one match and a bye) and a finished Commander event
+        const QList<qint64> p = addPlayers(8, "R");
+        const qint64 target = p[0];
+        const qint64 swissTid = tdb::createTournament("Old Cup", "POKEMON", 1, "Standard");
+        for (int i : {0, 1, 2})
+            tdb::enrollPlayer(swissTid, p[i]);
+        swiss::startTournament(swissTid);
+        const qint64 rid = tdb::currentRound(swissTid)["round_id"].toLongLong();
+        qint64 opponent = 0;
+        for (const Row &m : tdb::roundPairings(rid)) {
+            if (m["player2_id"].isNull())
+                continue;
+            tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+            if (m["player1_id"].toLongLong() == target || m["player2_id"].toLongLong() == target)
+                opponent = m["player1_id"].toLongLong() == target ? m["player2_id"].toLongLong() : m["player1_id"].toLongLong();
+        }
+        if (!opponent) {        // the target drew the bye: use the tournament again with the pairing known
+            opponent = p[1];
+        }
+        swiss::finalizeTournament(swissTid, "POKEMON");
+        const qint64 cmd = cdb::createCommanderTournament("Old Commander", 8, 1, {}, 77);
         for (qint64 id : p)
             tdb::enrollPlayer(cmd, id);
         cdb::startEvent(cmd);
-        QVERIFY_THROWS_EXCEPTION(db::Error, pdb::deletePlayer(p[0]));
-        QVERIFY(!pdb::playerById(p[0]).isEmpty());
-        QCOMPARE(count("matches", modern), 1);                  // their match was not deleted on the way
-        QCOMPARE(count("enrollments", modern), 2);
+        playRound(cmd);
+        QCOMPARE(tdb::tournamentById(cmd)["status"].toString(), tdb::COMPLETED);
 
-        // a player with one-on-one history only is removed with that history
-        const qint64 solo = pdb::addPlayer("Solo");
-        const qint64 other = tdb::createTournament("Other", "POKEMON", 1, "Standard");
-        tdb::enrollPlayer(other, solo);
-        tdb::enrollPlayer(other, p[1]);
-        swiss::startTournament(other);
-        pdb::deletePlayer(solo);
-        QVERIFY(pdb::playerById(solo).isEmpty());
-        QCOMPARE(count("matches", other), 0);
-        QCOMPARE(count("enrollments", other), 1);
+        const QStringList tables{"tournaments", "enrollments", "rounds", "matches", "commander_events", "commander_rounds",
+                                 "commander_pods", "commander_seats", "commander_byes", "commander_audit"};
+        const auto everything = [&tables] {
+            QList<Rows> out;
+            for (const QString &t : tables)
+                out << db::query(QStringLiteral("SELECT * FROM %1 ORDER BY 1, 2").arg(t));
+            out << db::query("SELECT player_id, display_name, date_joined FROM players ORDER BY player_id");
+            return out;
+        };
+        const QList<Rows> before = everything();
+        const Rows standings = swiss::viewStandings(swissTid, "POKEMON");
+        const QVariantList cmdStandings = cdb::getStandings(cmd), cmdRounds = cdb::getRounds(cmd);
+        const Rows opponentMatches = pdb::matchHistory(opponent, swissTid), opponentStats = pdb::lifetimeStats(opponent);
+        const tdb::GameStats stats = tdb::gameStats("POKEMON");
+        const QHash<qint64, QStringList> played = pdb::gamesPlayed();
+        QVERIFY(!played.value(target).isEmpty());
+
+        QVERIFY(pdb::removePlayer(target));
+        QVERIFY(!pdb::removePlayer(target));                    // a second request changes nothing
+        // gone from the directory, searches and the list of namesakes
+        QCOMPARE(pdb::allPlayers().size(), 7);
+        for (const Row &r : pdb::allPlayers())
+            QVERIFY(r["player_id"].toLongLong() != target);
+        QVERIFY(pdb::searchPlayers("R001").isEmpty());
+        QVERIFY(pdb::playersNamed("R001").isEmpty());
+        QVERIFY(pdb::isRemoved(target));
+        // still their own record: same id, same name, marked with when it was removed
+        const Row kept = pdb::playerById(target);
+        QCOMPARE(kept["display_name"].toString(), QString("R001"));
+        QVERIFY(!kept["deleted_at"].toString().isEmpty());
+
+        // nothing else changed: no match, registration, seat, bye, point, tiebreaker or placing
+        QCOMPARE(everything(), before);
+        Rows now = swiss::viewStandings(swissTid, "POKEMON");
+        for (Row &r : now)
+            r["removed"] = 0;
+        Rows then = standings;
+        for (Row &r : then)
+            r["removed"] = 0;
+        QCOMPARE(now, then);                                    // the same table, name included
+        QCOMPARE(cdb::getStandings(cmd), cmdStandings);
+        QCOMPARE(cdb::getRounds(cmd), cmdRounds);               // pods and seats, names included
+        QCOMPARE(pdb::matchHistory(opponent, swissTid), opponentMatches);
+        QCOMPARE(pdb::lifetimeStats(opponent), opponentStats);
+        QCOMPARE(tdb::gameStats("POKEMON").gamesPlayed, stats.gamesPlayed);
+        QCOMPARE(tdb::gameStats("POKEMON").players, stats.players);
+        QCOMPARE(pdb::gamesPlayed(), played);                   // history still counts them
+        // the screens can tell that this participant no longer has a profile
+        bool flagged = false;
+        for (const Row &r : swiss::viewStandings(swissTid, "POKEMON"))
+            if (r["player_id"].toLongLong() == target)
+                flagged = r["removed"].toInt() == 1 && r["display_name"].toString() == "R001";
+        QVERIFY(flagged);
+
+        // they cannot be enrolled or renamed any more
+        const qint64 fresh = tdb::createTournament("New Cup", "POKEMON", 1);
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::enrollPlayer(fresh, target));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::renamePlayer(target, "Back Again"));
+        QCOMPARE(count("enrollments", fresh), 0);
+        // a new player with the same name is somebody else: a new id and no history
+        const qint64 namesake = pdb::addPlayer("R001");
+        QVERIFY(namesake > p.last());
+        QVERIFY(pdb::tournamentHistory(namesake).isEmpty() && pdb::lifetimeStats(namesake).isEmpty());
+        QVERIFY(!pdb::gamesPlayed().contains(namesake));
+        QCOMPARE(pdb::playersNamed("R001").size(), 1);
+        QVERIFY(pdb::directoryDuplicates().isEmpty());          // the removed one is not in the directory to clash with
+        QVERIFY(tdb::enrollPlayer(fresh, namesake) > 0);
+        QCOMPARE(tdb::enrollPlayer(fresh, namesake), qint64(0));        // and never twice in one tournament
+        QCOMPARE(everything().mid(2, 8), before.mid(2, 8));     // the old tournaments' records are as they were
+
+        restart();
+        QVERIFY(pdb::isRemoved(target));
+        QCOMPARE(pdb::allPlayers().size(), 8);
+        QCOMPARE(cdb::getStandings(cmd), cmdStandings);
+        QCOMPARE(pdb::matchHistory(opponent, swissTid), opponentMatches);
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::removePlayer(987654));
+    }
+
+    void aPlayerStillInATournamentCannotBeRemoved()
+    {
+        const QList<qint64> p = addPlayers(10, "A");
+        const auto refused = [](qint64 player) -> QString {
+            try {
+                pdb::removePlayer(player);
+            } catch (const pdb::StillPlaying &e) {
+                return e.reasons.join(" | ");
+            }
+            return QString();
+        };
+        // registered for a tournament that has not started
+        const qint64 pending = tdb::createTournament("Sign-up Sunday", "ONEPIECE", 2);
+        tdb::enrollPlayer(pending, p[0]);
+        QVERIFY2(refused(p[0]).contains("Sign-up Sunday") && refused(p[0]).contains("remove them from its player list"),
+                 qPrintable(refused(p[0])));
+        QVERIFY(!pdb::isRemoved(p[0]));
+        QCOMPARE(count("enrollments", pending), 1);             // asking changed nothing
+        tdb::unenrollPlayer(pending, p[0]);
+        QVERIFY(pdb::removePlayer(p[0]));
+
+        // in a one-on-one tournament being played: first a result is outstanding, then the event itself
+        const qint64 running = tdb::createTournament("Modern Monday", "MTG", 2, "Modern");
+        tdb::enrollPlayer(running, p[1]);
+        tdb::enrollPlayer(running, p[2]);
+        swiss::startTournament(running);
+        QVERIFY2(refused(p[1]).contains("Modern Monday") && refused(p[1]).contains("not reported yet"), qPrintable(refused(p[1])));
+        const Row match = tdb::roundPairings(tdb::currentRound(running)["round_id"].toLongLong()).first();
+        QCOMPARE(match["result"], QVariant());                  // no result was invented
+        tdb::reportMatchResult(match["match_id"].toLongLong(), "PLAYER1");
+        QVERIFY2(refused(p[1]).contains("finish that tournament, or end it early"), qPrintable(refused(p[1])));
+        QVERIFY(!pdb::isRemoved(p[1]));
+        QCOMPARE(count("enrollments", running), 2);
+        tdb::terminateTournament(running);
+        QVERIFY(pdb::removePlayer(p[1]));                       // once it is over they can go; their match stays
+        QCOMPARE(count("matches", running), 1);
+
+        // in a Commander event: the round in play, then being due for the next one, then dropped
+        const qint64 cmd = cdb::createCommanderTournament("Commander Night", 8, 2, {}, 5);
+        for (int i = 2; i < 10; ++i)
+            tdb::enrollPlayer(cmd, p[i]);
+        cdb::startEvent(cmd);
+        QVERIFY2(refused(p[3]).contains("Commander Night") && refused(p[3]).contains("not finalized yet"), qPrintable(refused(p[3])));
+        playRound(cmd);
+        QVERIFY2(refused(p[3]).contains("drop them there first"), qPrintable(refused(p[3])));
+        cdb::dropPlayer(cmd, p[3]);
+        QVERIFY(pdb::removePlayer(p[3]));
+        cdb::publishNextRound(cmd, 2);
+        for (const QVariant &pod : currentRound(cmd)["pods"].toList())
+            QVERIFY(!ids(pod.toMap()["seats"].toList()).contains(p[3]));       // not paired again
+        QVERIFY(ids(cdb::getRounds(cmd).first().toMap()["pods"].toList()[0].toMap()["seats"].toList()
+                    + cdb::getRounds(cmd).first().toMap()["pods"].toList()[1].toMap()["seats"].toList()).contains(p[3]));
+        // several reasons are all given
+        const qint64 both = p[4];
+        tdb::enrollPlayer(pending, both);
+        const QString reasons = refused(both);
+        QVERIFY2(reasons.contains("Sign-up Sunday") && reasons.contains("Commander Night"), qPrintable(reasons));
+    }
+
+    void playersWithTheSameNameAreToldApartByIdWithinATournament()
+    {
+        const qint64 a = pdb::addPlayer("Alex Smith"), b = pdb::addPlayer("alex smith"), sam = pdb::addPlayer("Sam Lee");
+        const qint64 outside = pdb::addPlayer("Sam Lee");       // a namesake who is not in this tournament
+        const QString la = QStringLiteral("Alex Smith · ") + pdb::formatId(a), lb = QStringLiteral("alex smith · ") + pdb::formatId(b);
+        const qint64 tid = tdb::createTournament("Twins Cup", "MTG", 1, "Modern");
+        for (qint64 id : {a, b, sam})
+            tdb::enrollPlayer(tid, id);
+        QCOMPARE(pdb::tournamentDuplicates(tid), (QSet<qint64>{a, b}));
+        QHash<qint64, QString> shown;
+        for (const Row &r : tdb::enrolledPlayers(tid))
+            shown.insert(r["player_id"].toLongLong(), r["display_name"].toString());
+        QCOMPARE(shown.value(a), la);
+        QCOMPARE(shown.value(b), lb);
+        QCOMPARE(shown.value(sam), QString("Sam Lee"));         // his namesake is not a participant here
+        swiss::startTournament(tid);
+        QStringList names;
+        for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong())) {
+            names << m["player1_name"].toString();
+            if (!m["player2_name"].isNull()) {
+                names << m["player2_name"].toString();
+                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+            }
+        }
+        names.sort();
+        QCOMPARE(names, (QStringList{la, "Sam Lee", lb}));      // on the pairings, and so on the printed sheet
+        swiss::finalizeTournament(tid, "MTG");
+        names.clear();
+        for (const Row &r : swiss::viewStandings(tid, "MTG"))
+            names << r["display_name"].toString();
+        names.sort();
+        QCOMPARE(names, (QStringList{la, "Sam Lee", lb}));
+        for (qint64 id : {a, b, sam})
+            for (const Row &m : pdb::matchHistory(id, tid))
+                if (!m["opponent_name"].isNull())
+                    QVERIFY2(m["opponent_name"].toString() == la || m["opponent_name"].toString() == lb
+                             || m["opponent_name"].toString() == "Sam Lee", qPrintable(m["opponent_name"].toString()));
+        // removing one of them from the directory does not hide the id history needs
+        QVERIFY(pdb::removePlayer(b));
+        QCOMPARE(pdb::tournamentDuplicates(tid), (QSet<qint64>{a, b}));
+        QVERIFY(!pdb::directoryDuplicates().contains(a));       // while in the directory the remaining one is unambiguous
+        names.clear();
+        for (const Row &r : swiss::viewStandings(tid, "MTG"))
+            names << r["display_name"].toString();
+        QVERIFY(names.contains(la) && names.contains(lb));
+
+        // a shared first name or last name alone never brings out an id
+        const qint64 other = tdb::createTournament("Cousins Cup", "MTG", 1, "Modern");
+        for (qint64 id : {a, pdb::addPlayer("Alex Jones"), pdb::addPlayer("Jordan Smith")})
+            tdb::enrollPlayer(other, id);
+        QVERIFY(pdb::tournamentDuplicates(other).isEmpty());
+        for (const Row &r : tdb::enrolledPlayers(other))
+            QVERIFY(!r["display_name"].toString().contains("#"));
+
+        // Commander: seats and standings carry the id; what is saved keeps the plain name
+        const qint64 c1 = pdb::addPlayer("Robin Fox"), c2 = pdb::addPlayer("ROBIN  FOX");
+        const qint64 cmd = cdb::createCommanderTournament("Twin Pods", 4, 1, {}, 9);
+        for (qint64 id : {c1, c2, sam, outside})
+            tdb::enrollPlayer(cmd, id);
+        cdb::startEvent(cmd);
+        playRound(cmd);
+        QStringList seats, table;
+        for (const QVariant &s : cdb::getRounds(cmd).last().toMap()["pods"].toList()[0].toMap()["seats"].toList())
+            seats << s.toMap()["display_name"].toString();
+        for (const QVariant &r : cdb::getStandings(cmd))
+            table << r.toMap()["display_name"].toString();
+        for (const QStringList &list : {seats, table}) {
+            QVERIFY(list.contains(QStringLiteral("Robin Fox · ") + pdb::formatId(c1)));
+            QVERIFY(list.contains(QStringLiteral("ROBIN  FOX · ") + pdb::formatId(c2)));
+            QVERIFY(list.contains(QStringLiteral("Sam Lee · ") + pdb::formatId(sam)));          // both Sam Lees play here
+            QVERIFY(list.contains(QStringLiteral("Sam Lee · ") + pdb::formatId(outside)));
+        }
+        QVERIFY(!cdb::getEvent(cmd)["final_standings_json"].toString().contains("#"));
+    }
+
+    void lookingAtStandingsNeverChangesWhatIsSaved()
+    {
+        const QList<qint64> p = addPlayers(4, "V");
+        const qint64 tid = tdb::createTournament("View Cup", "POKEMON", 1, "Standard");
+        for (qint64 id : p)
+            tdb::enrollPlayer(tid, id);
+        swiss::startTournament(tid);
+        const Rows pairings = tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong());
+        const auto saved = [tid] { return db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}); };
+
+        // while it is played: the table follows the results, but showing it writes nothing
+        tdb::reportMatchResult(pairings[0]["match_id"].toLongLong(), "PLAYER1");
+        const Rows untouched = saved();
+        const Rows live = swiss::viewStandings(tid, "POKEMON");
+        QCOMPARE(live.first()["player_id"], pairings[0]["player1_id"]);
+        QCOMPARE(live.first()["match_points"].toInt(), swiss::points("POKEMON").win);
+        QCOMPARE(live.first()["standing"].toInt(), 1);
+        QCOMPARE(saved(), untouched);
+        swiss::viewStandings(tid, "POKEMON");
+        QCOMPARE(saved(), untouched);
+
+        // once finished: the saved figures and placings are the result, however often they are shown
+        tdb::reportMatchResult(pairings[1]["match_id"].toLongLong(), "PLAYER2");
+        const Rows final = swiss::finalizeTournament(tid, "POKEMON");
+        const Rows finished = saved();
+        const Rows shown = swiss::viewStandings(tid, "POKEMON");
+        QCOMPARE(shown.size(), 4);
+        for (int i = 0; i < shown.size(); ++i) {
+            QCOMPARE(shown[i]["player_id"], final[i]["player_id"]);
+            QCOMPARE(shown[i]["standing"].toInt(), i + 1);
+            QCOMPARE(shown[i]["final_placement"].toInt(), i + 1);
+            QCOMPARE(shown[i]["match_points"], final[i]["match_points"]);
+        }
+        QCOMPARE(saved(), finished);
+        // even if a match record is missing (as the old way of deleting a player left things),
+        // a finished tournament's table is not worked out again from what remains
+        db::exec("DELETE FROM matches WHERE match_id = ?", {pairings[0]["match_id"]});
+        const Rows after = swiss::viewStandings(tid, "POKEMON");
+        for (int i = 0; i < after.size(); ++i) {
+            QCOMPARE(after[i]["player_id"], shown[i]["player_id"]);
+            QCOMPARE(after[i]["match_points"], shown[i]["match_points"]);
+            QCOMPARE(after[i]["standing"], shown[i]["standing"]);
+        }
+        QCOMPARE(saved(), finished);
     }
 
     void tournamentDetailsAreValidatedBeforeAnythingIsSaved()
@@ -1590,7 +1906,371 @@ private slots:
         QCOMPARE(p["alert_sound"].toBool(), false);
         QVERIFY2(prefs::defaultRoundMinutes("MTG") == 65, "restoring interface defaults leaves round lengths alone");
         QCOMPARE(prefs::issuesUrl(), QString("https://github.com/nchiamsachang/tcg-tournament-manager/issues"));
-        QVERIFY(prefs::founders().isEmpty());
+        QCOMPARE(QString(prefs::PRODUCER), QString("Nathan Chiamsachang"));
+    }
+
+private:
+    // A running one-on-one tournament: 5 players, round 1 paired, one result in, the clock started.
+    qint64 runningSwiss(QList<qint64> *pids = nullptr)
+    {
+        const qint64 tid = tdb::createTournament("Cut Short Cup", "POKEMON", 3, "Standard", {}, 50);
+        const QList<qint64> players = addPlayers(5, "S");
+        for (qint64 p : players)
+            tdb::enrollPlayer(tid, p);
+        swiss::startTournament(tid);
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        for (const Row &m : tdb::roundPairings(rid)) {
+            if (!m["player2_id"].isNull()) {
+                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                break;
+            }
+        }
+        timerdb::start(timerdb::Kind::OneOnOne, rid);
+        if (pids)
+            *pids = players;
+        return tid;
+    }
+
+private slots:
+    // Ending a tournament early
+
+    void endingEarlyKeepsEveryRecordAndMarksTheTournamentTerminated()
+    {
+        QList<qint64> pids;
+        const qint64 tid = runningSwiss(&pids);
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        const Rows matches = tdb::allMatches(tid);
+        const Rows enrolled = db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid});
+        QCOMPARE(tdb::pendingMatchCount(rid), 1);
+        QCOMPARE(tdb::activeTournaments().size(), 1);
+
+        QVERIFY(tdb::terminateTournament(tid));
+        const Row t = tdb::tournamentById(tid);
+        QCOMPARE(t["status"].toString(), tdb::TERMINATED);
+        QVERIFY(!t["terminated_at"].toString().isEmpty());
+        QVERIFY(tdb::isTerminated(tid));
+        QVERIFY(tdb::activeTournaments().isEmpty());                    // gone from the active list
+        QCOMPARE(tdb::tournamentsByGame("POKEMON").size(), 1);          // still on record
+        // nothing was invented or removed: same matches, the unreported one still unreported, no placings
+        QCOMPARE(tdb::allMatches(tid), matches);
+        QCOMPARE(db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}), enrolled);
+        QCOMPARE(tdb::pendingMatchCount(rid), 1);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM enrollments WHERE tournament_id = ? AND final_placement IS NOT NULL", {tid}).toInt(), 0);
+        QVERIFY(pdb::lifetimeStats(pids[0]).isEmpty());                 // not counted as a completed tournament
+        QCOMPARE(pdb::tournamentHistory(pids[0]).first()["status"].toString(), tdb::TERMINATED);
+        QCOMPARE(pdb::gamesPlayed().value(pids[0]), QStringList{"POKEMON"});   // they did play
+
+        // a second request changes nothing, and so does a restart
+        const QString when = t["terminated_at"].toString();
+        QVERIFY(!tdb::terminateTournament(tid));
+        restart();
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::TERMINATED);
+        QCOMPARE(tdb::tournamentById(tid)["terminated_at"].toString(), when);
+        QCOMPARE(tdb::allMatches(tid), matches);
+    }
+
+    void aTerminatedTournamentRefusesFurtherChanges()
+    {
+        const qint64 tid = runningSwiss();
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        qint64 open = 0, reported = 0;
+        for (const Row &m : tdb::roundPairings(rid)) {
+            if (m["player2_id"].isNull())
+                continue;
+            (m["result"].isNull() ? open : reported) = m["match_id"].toLongLong();
+        }
+        QVERIFY(open && reported);
+        tdb::terminateTournament(tid);
+        const Rows matches = tdb::allMatches(tid);
+        const qint64 late = pdb::addPlayer("Latecomer");
+
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(open, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(reported, {}));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::enrollPlayer(tid, late));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(tid, late));
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::advanceToNextRound(tid, 1));
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::generatePairings(tid, 2));
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::finalizeTournament(tid, "POKEMON"));
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::startTournament(tid));
+        QCOMPARE(tdb::allMatches(tid), matches);
+        QCOMPARE(tdb::rounds(tid).size(), 1);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::TERMINATED);
+
+        // only a running or not-yet-started tournament can be ended early
+        const qint64 done = tdb::createTournament("Finished Cup", "POKEMON", 1);
+        for (qint64 p : addPlayers(2, "F"))
+            tdb::enrollPlayer(done, p);
+        swiss::startTournament(done);
+        tdb::reportMatchResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::finalizeTournament(done, "POKEMON");
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::terminateTournament(done));
+        QCOMPARE(tdb::tournamentById(done)["status"].toString(), tdb::COMPLETED);
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::terminateTournament(987654));
+    }
+
+    void endingEarlyStopsTheClockForGood()
+    {
+        for (timerdb::Kind kind : {timerdb::Kind::OneOnOne, timerdb::Kind::Commander}) {
+            qint64 tid = 0, rid = 0;
+            if (kind == timerdb::Kind::OneOnOne) {
+                tid = runningSwiss();
+                rid = tdb::currentRound(tid)["round_id"].toLongLong();
+            } else {
+                tid = makeEvent(8, 2).first;
+                rid = currentRound(tid)["round_id"].toLongLong();
+                timerdb::start(kind, rid);
+            }
+            QVERIFY(timerdb::get(kind, rid).state == timerdb::State::Running);
+            QVERIFY(!timerdb::get(kind, rid).closed);
+            QVERIFY(live::roundStatus(tid).playing);
+
+            tdb::terminateTournament(tid);
+            timerdb::Timer t = timerdb::get(kind, rid);
+            QVERIFY(t.valid && t.closed);
+            QVERIFY(t.state == timerdb::State::Stopped && !t.hasStart);
+            const double left = timerdb::remaining(t, t.now);
+            QVERIFY(left > 0 && left <= t.limit);
+            QCOMPARE(timerdb::remaining(t, t.now + 3600), left);        // an hour later: not a second less
+            // Start, Pause and Reset no longer do anything
+            QVERIFY(timerdb::start(kind, rid).state == timerdb::State::Stopped);
+            timerdb::pause(kind, rid);
+            timerdb::reset(kind, rid);
+            t = timerdb::get(kind, rid);
+            QVERIFY(t.closed && t.state == timerdb::State::Stopped);
+            QCOMPARE(timerdb::remaining(t, t.now), left);
+            // nothing is "being played" any more, so no pill, row or alert follows this clock
+            const live::RoundStatus status = live::roundStatus(tid);
+            QVERIFY(status.terminated && !status.playing);
+            QCOMPARE(status.roundId, rid);
+        }
+        // finishing a tournament the normal way closes its clock too
+        const qint64 done = tdb::createTournament("Finished Cup", "POKEMON", 1);
+        for (qint64 p : addPlayers(2, "F"))
+            tdb::enrollPlayer(done, p);
+        swiss::startTournament(done);
+        const qint64 rid = tdb::currentRound(done)["round_id"].toLongLong();
+        timerdb::start(timerdb::Kind::OneOnOne, rid);
+        tdb::reportMatchResult(tdb::roundPairings(rid).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::finalizeTournament(done, "POKEMON");
+        QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, rid).closed);
+        QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, rid).state == timerdb::State::Stopped);
+    }
+
+    void endingACommanderEventEarlyLeavesItUnfinishedAndReadOnly()
+    {
+        auto [tid, pids] = makeEvent(8, 3);
+        const QVariantMap rnd = currentRound(tid);
+        const QVariantMap pod0 = podAt(rnd, 0), pod1 = podAt(rnd, 1);
+        cdb::reportPodResult(podId(pod0), "WIN", seatPlayer(pod0, 0));
+        const QVariantList standings = cdb::getStandings(tid);
+
+        QVERIFY(tdb::terminateTournament(tid));
+        QVariantMap state = cdb::getState(tid);
+        QVERIFY(state["terminated"].toBool());
+        QCOMPARE(state["next"].toString(), QString("NONE"));
+        const QVariantMap ev = state["event"].toMap();
+        QCOMPARE(ev["stage"].toString(), QString("SWISS"));             // not completed
+        QVERIFY(ev["champion_player_id"].isNull());                     // nobody is declared the winner
+        QVERIFY(ev["final_standings_json"].isNull());
+        QVERIFY(state["final_standings"].isNull());
+        QCOMPARE(state["rounds"].toList().size(), 1);
+        QCOMPARE(state["rounds"].toList()[0].toMap()["pending"].toInt(), 1);     // the unreported pod stays unreported
+        QCOMPARE(cdb::getStandings(tid), standings);
+        QVERIFY(auditActions(tid).contains("EVENT_TERMINATED"));
+        QVERIFY(!cdb::progress(tid)["active"].toBool());
+        QVERIFY(cdb::progress(tid)["long"].toString().startsWith("Ended early"));
+
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(podId(pod1), "WIN", seatPlayer(pod1, 0)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::clearPodResult(podId(pod0)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(podId(pod0), "WIN", seatPlayer(pod0, 1)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finalizeRound(rnd["round_id"].toLongLong()));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finishTournament(tid));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::publishNextRound(tid, 2));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::dropPlayer(tid, pids[0]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::endSwissEarly(tid));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::setCheckedIn(tid, pids[0], false));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::updateEventConfig(tid, 5));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::enrollPlayer(tid, pdb::addPlayer("Latecomer")));
+        restart();
+        state = cdb::getState(tid);
+        QVERIFY(state["terminated"].toBool());
+        QCOMPARE(state["rounds"].toList().size(), 1);
+        QCOMPARE(state["event"].toMap()["stage"].toString(), QString("SWISS"));
+        QCOMPARE(cdb::getStandings(tid), standings);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::TERMINATED);
+    }
+
+    void repeatedAndSimultaneousRequestsEndATournamentOnce()
+    {
+        const qint64 tid = runningSwiss();
+        const Race r = race([tid](int) { return tdb::terminateTournament(tid) ? 1 : 0; });
+        QCOMPARE(r.other + r.refusals + r.conflicts, 0);
+        QCOMPARE(r.results.count(1), 1);                // exactly one of them did it
+        QCOMPARE(r.results.count(0), 7);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::TERMINATED);
+    }
+
+    void upgradeAddsTheTerminatedStatusWithoutTouchingAnyRecord()
+    {
+        // tournaments of both kinds, with rounds, results and a clock
+        const qint64 swissTid = runningSwiss();
+        const qint64 cmdTid = makeEvent(8, 2).first;
+        playRound(cmdTid);
+        const qint64 gone = tdb::createTournament("Deleted Later", "MTG", 1);       // the newest id, then deleted
+        db::exec("DELETE FROM tournaments WHERE tournament_id = ?", {gone});
+
+        // put the tournaments table back the way the previous version made it
+        db::exec("PRAGMA foreign_keys = OFF");
+        db::exec(R"sql(
+            CREATE TABLE tournaments_old (
+                tournament_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT    NOT NULL,
+                game            TEXT    NOT NULL CHECK (game IN ('MTG', 'ONEPIECE', 'POKEMON')),
+                format          TEXT,
+                tournament_date TEXT    NOT NULL,
+                location        TEXT,
+                total_rounds    INTEGER NOT NULL,
+                top_cut         INTEGER DEFAULT 0,
+                round_time_mins INTEGER DEFAULT 50,
+                status          TEXT    DEFAULT 'PENDING'
+                                CHECK (status IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')),
+                notes           TEXT
+            )
+        )sql");
+        db::exec("INSERT INTO tournaments_old SELECT tournament_id, name, game, format, tournament_date, location, "
+                 "total_rounds, top_cut, round_time_mins, status, notes FROM tournaments");
+        db::exec("DROP TABLE tournaments");
+        db::exec("ALTER TABLE tournaments_old RENAME TO tournaments");
+        db::exec("CREATE INDEX idx_tournaments_game ON tournaments(game)");
+        db::exec("CREATE INDEX idx_tournaments_date ON tournaments(tournament_date)");
+        db::exec("UPDATE sqlite_sequence SET seq = ? WHERE name = 'tournaments'", {gone});
+        db::exec("DELETE FROM schema_migrations WHERE version = 4");
+        db::exec("PRAGMA foreign_keys = ON");
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE tournaments SET status = 'TERMINATED' WHERE tournament_id = ?", {swissTid}));
+
+        const QStringList tables{"players", "enrollments", "rounds", "matches", "commander_events", "commander_rounds",
+                                 "commander_pods", "commander_seats", "commander_byes", "commander_audit"};
+        const auto everything = [&tables] {
+            QList<Rows> out;
+            for (const QString &t : tables)
+                out << db::query(QStringLiteral("SELECT * FROM %1 ORDER BY 1, 2").arg(t));
+            return out;
+        };
+        const QString oldColumns = "SELECT tournament_id, name, game, format, tournament_date, location, total_rounds, "
+                                   "top_cut, round_time_mins, status, notes FROM tournaments ORDER BY tournament_id";
+        const QList<Rows> before = everything();
+        const Rows tournaments = db::query(oldColumns);
+        const QString cmdState = stateJson(cmdTid);
+
+        restart();          // the upgrade runs
+        QCOMPARE(everything(), before);                                 // not one row of any other table changed
+        QCOMPARE(db::query(oldColumns), tournaments);
+        QCOMPARE(stateJson(cmdTid), cmdState);
+        QVERIFY(db::query("PRAGMA foreign_key_check").isEmpty());
+        QCOMPARE(db::value("PRAGMA integrity_check").toString(), QString("ok"));
+        QCOMPARE(db::value("PRAGMA foreign_keys").toInt(), 1);          // switched back on afterwards
+        QCOMPARE(db::value("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tournaments' "
+                           "AND name LIKE 'idx_tournaments_%'").toInt(), 2);
+        QVERIFY(!db::value("SELECT 1 FROM sqlite_master WHERE name = 'tournaments_rebuild'").isValid());
+        QVERIFY(db::value("SELECT 1 FROM schema_migrations WHERE version = 4").isValid());
+        // a backup of the database as it was is saved first
+        QCOMPARE(QDir(db::dataDir() + "/backups").entryList({"*.db"}, QDir::Files).size(), 1);
+
+        // the new status is accepted, and ids are not reused
+        QVERIFY(tdb::terminateTournament(swissTid));
+        QCOMPARE(tdb::tournamentById(swissTid)["status"].toString(), tdb::TERMINATED);
+        QVERIFY(tdb::createTournament("Next One", "MTG", 1) > gone);
+        // other tables still point at their tournaments: deleting one removes only its own rounds
+        const int otherRounds = db::value("SELECT COUNT(*) FROM commander_rounds WHERE tournament_id = ?", {cmdTid}).toInt();
+        QVERIFY(otherRounds > 0);
+        QVERIFY(db::value("SELECT COUNT(*) FROM rounds WHERE tournament_id = ?", {swissTid}).toInt() > 0);
+        db::exec("DELETE FROM matches WHERE tournament_id = ?", {swissTid});
+        db::exec("DELETE FROM tournaments WHERE tournament_id = ?", {swissTid});
+        QCOMPARE(db::value("SELECT COUNT(*) FROM rounds WHERE tournament_id = ?", {swissTid}).toInt(), 0);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_rounds WHERE tournament_id = ?", {cmdTid}).toInt(), otherRounds);
+        restart();          // nothing left to do the second time
+        QCOMPARE(QDir(db::dataDir() + "/backups").entryList({"*.db"}, QDir::Files).size(), 1);
+    }
+
+    // Renaming a tournament
+
+    void renamingChangesOnlyTheNameInEveryState()
+    {
+        // one tournament in each state: registering, running, completed, ended early, and a Commander event
+        const qint64 pending = tdb::createTournament("Pending Cup", "ONEPIECE", 2);
+        tdb::enrollPlayer(pending, pdb::addPlayer("Waiting"));
+        const qint64 running = runningSwiss();
+        const qint64 done = tdb::createTournament("Finished Cup", "POKEMON", 1);
+        for (qint64 p : addPlayers(2, "F"))
+            tdb::enrollPlayer(done, p);
+        swiss::startTournament(done);
+        tdb::reportMatchResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::finalizeTournament(done, "POKEMON");
+        const qint64 ended = runningSwiss();
+        tdb::terminateTournament(ended);
+        const qint64 cmd = makeEvent(8, 1).first;
+        playRound(cmd);                                  // one round: finalizing it completes the event
+        QCOMPARE(tdb::tournamentById(cmd)["status"].toString(), tdb::COMPLETED);
+
+        const QStringList tables{"players", "enrollments", "rounds", "matches", "commander_events", "commander_rounds",
+                                 "commander_pods", "commander_seats", "commander_byes"};
+        const auto everything = [&tables] {
+            QList<Rows> out;
+            for (const QString &t : tables)
+                out << db::query(QStringLiteral("SELECT * FROM %1 ORDER BY 1, 2").arg(t));
+            // every tournament column except the name
+            out << db::query("SELECT tournament_id, game, format, tournament_date, location, total_rounds, top_cut, "
+                             "round_time_mins, status, notes, terminated_at FROM tournaments ORDER BY tournament_id");
+            return out;
+        };
+        const QList<Rows> before = everything();
+        const int count = db::value("SELECT COUNT(*) FROM tournaments").toInt();
+        const QVariantList standings = cdb::getStandings(cmd);
+
+        int n = 0;
+        for (qint64 tid : {pending, running, done, ended, cmd}) {
+            const QString name = QStringLiteral("Demo Event %1").arg(++n);
+            QVERIFY(tdb::renameTournament(tid, "   " + name + "  "));      // spaces around it are removed
+            QCOMPARE(tdb::tournamentById(tid)["name"].toString(), name);
+            QVERIFY(!tdb::renameTournament(tid, name));                     // already its name: nothing to do
+            QVERIFY(!tdb::renameTournament(tid, " " + name + " "));
+        }
+        QCOMPARE(everything(), before);                                     // nothing else changed anywhere
+        QCOMPARE(db::value("SELECT COUNT(*) FROM tournaments").toInt(), count);     // no tournament was created
+        QCOMPARE(cdb::getStandings(cmd), standings);
+        QCOMPARE(cdb::getEvent(cmd)["name"].toString(), QString("Demo Event 5"));
+        QVERIFY(auditActions(cmd).contains("EVENT_RENAMED"));
+        // a finished or ended tournament is still closed: renaming did not reopen it
+        QCOMPARE(tdb::tournamentById(done)["status"].toString(), tdb::COMPLETED);
+        QCOMPARE(tdb::tournamentById(ended)["status"].toString(), tdb::TERMINATED);
+        const qint64 anyMatch = tdb::allMatches(ended).first()["match_id"].toLongLong();
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(anyMatch, "PLAYER2"));
+        QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, tdb::currentRound(ended)["round_id"].toLongLong()).closed);
+        QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, tdb::currentRound(running)["round_id"].toLongLong()).state
+                == timerdb::State::Running);                                // the running clock kept running
+
+        // names that are refused leave the old one in place
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::renameTournament(done, ""));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::renameTournament(done, "    "));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::renameTournament(done, QString(tdb::MAX_NAME_LENGTH + 1, 'x')));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::renameTournament(987654, "Nobody"));
+        QCOMPARE(tdb::tournamentById(done)["name"].toString(), QString("Demo Event 3"));
+        QVERIFY(tdb::renameTournament(done, QString(tdb::MAX_NAME_LENGTH, 'x')));      // the limit itself is allowed
+        QVERIFY(tdb::renameTournament(done, "Demo Event 3"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::createTournament(QString(tdb::MAX_NAME_LENGTH + 1, 'x'), "MTG", 1));
+
+        restart();
+        n = 0;
+        for (qint64 tid : {pending, running, done, ended, cmd})
+            QCOMPARE(tdb::tournamentById(tid)["name"].toString(), QStringLiteral("Demo Event %1").arg(++n));
+        QCOMPARE(everything(), before);
+    }
+
+    void gamesAreListedInOnePlaceAndInOneOrder()
+    {
+        QCOMPARE(tdb::supportedGames(), (QStringList{"ONEPIECE", "POKEMON", "MTG"}));
+        for (const QString &game : tdb::supportedGames())               // each is a game the schema accepts
+            QVERIFY(tdb::createTournament("Any " + game, game, 1) > 0);
     }
 
     // Where the data lives

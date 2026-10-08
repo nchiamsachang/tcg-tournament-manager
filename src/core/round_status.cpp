@@ -8,7 +8,9 @@ namespace live {
 RoundStatus roundStatus(qint64 tournamentId)
 {
     RoundStatus status;
-    status.totalRounds = tdb::tournamentById(tournamentId)["total_rounds"].toInt();
+    const db::Row tournament = tdb::tournamentById(tournamentId);
+    status.totalRounds = tournament["total_rounds"].toInt();
+    status.terminated = tournament["status"].toString() == tdb::TERMINATED;
 
     if (cdb::isCommander(tournamentId)) {
         const QVariantMap progress = cdb::progress(tournamentId);
@@ -24,7 +26,7 @@ RoundStatus roundStatus(qint64 tournamentId)
     const db::Row current = tdb::currentRound(tournamentId);
     if (current.isEmpty())
         return status;
-    status.playing = true;
+    status.playing = !status.terminated;
     status.roundId = current["round_id"].toLongLong();
     status.roundNumber = current["round_number"].toInt();
     return status;

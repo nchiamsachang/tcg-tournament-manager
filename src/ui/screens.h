@@ -36,10 +36,12 @@ public:
 
 protected:
     void reflow() override;
+    void hideEvent(QHideEvent *e) override;
+    void showEvent(QShowEvent *e) override;
 
 private:
     struct Clock {              // the countdown shown on one tournament row
-        QPointer<QLabel> value, caption;
+        QPointer<QLabel> value, caption, icon;
         timerdb::Kind kind = timerdb::Kind::OneOnOne;
         qint64 roundId = 0;
         timerdb::Reading reading;
@@ -89,9 +91,10 @@ public:
     virtual void confirmStart();
     qint64 tournamentId;
     QString game, tName;
-    QLabel *enrolledCountLabel = nullptr;
+    QLabel *enrolledCountLabel = nullptr, *titleLabel = nullptr;
     QLineEdit *searchBox = nullptr, *newNameBox = nullptr;
-    QPushButton *startBtn = nullptr, *addBtn = nullptr;
+    QPushButton *startBtn = nullptr, *addBtn = nullptr, *renameBtn = nullptr;
+    void rename();                          // the pencil beside the title
 
 protected:
     virtual void buildUi();
@@ -145,6 +148,9 @@ public:
     qint64 tournamentId, currentRoundId = 0;
     int currentRoundNum = 0, totalRounds = 3;
     QPushButton *printBtn = nullptr, *standingsBtn = nullptr, *nextRoundBtn = nullptr, *finalizeBtn = nullptr;
+    QPushButton *endEarlyBtn = nullptr;     // only while the tournament is running
+    QPushButton *renameBtn = nullptr;       // the pencil beside the title, in every state
+    void rename();
     QLabel *roundLabel = nullptr, *subLabel = nullptr;
 
 private:
@@ -184,6 +190,8 @@ class RoundSelectScreen : public T::Screen {
 public:
     RoundSelectScreen(MainWindow *mw, qint64 tournamentId);
     QFrame *panel = nullptr;            // the centred results panel
+    QLabel *nameLabel = nullptr;
+    QPushButton *renameBtn = nullptr;   // the pencil beside the name
 };
 
 class PlayersScreen : public T::Screen {
@@ -192,6 +200,15 @@ public:
     explicit PlayersScreen(MainWindow *mw);
     QLineEdit *searchBox = nullptr;
     QLabel *countLabel = nullptr;
+    QPushButton *filterBtn = nullptr;
+    // The game filter: the ids of the ticked games; empty means "All games" (everybody,
+    // including players who have not played yet).  A player is shown when they have played
+    // any ticked game.  Passing an empty id is the "All games" box, which clears the others;
+    // unticking the last game goes back to it.
+    QSet<QString> gameFilter() const { return gameFilter_; }
+    void setGameChecked(const QString &game, bool on);
+    void openFilterMenu();
+    QFrame *filterMenu() const { return filterMenu_; }       // the open panel of checkboxes, if any
 
 protected:
     void resizeEvent(QResizeEvent *e) override;
@@ -199,11 +216,14 @@ protected:
 private:
     int tagAreaWidth() const;
     int tagArea_ = 0;
-    void populate(const db::Rows &players);
+    void populate(const db::Rows &players, int outOf);
     void runSearch();
+    void showFilterState();
     MainWindow *mw_;
     QVBoxLayout *list_ = nullptr;
     QTimer searchTimer_;
+    QSet<QString> gameFilter_;
+    QPointer<QFrame> filterMenu_;
 };
 
 class PlayerProfileScreen : public T::Screen {
@@ -223,7 +243,7 @@ private:
     qint64 playerId_;
     QString playerName_, filter_ = "ALL";
     QSet<qint64> expanded_;
-    QLabel *nameLabel_ = nullptr;
+    QLabel *nameLabel_ = nullptr, *idLabel_ = nullptr;
     T::FlowLayout *statsLayout_ = nullptr;
     QVBoxLayout *feed_ = nullptr;
     QHash<QString, QPushButton *> filterButtons_;
@@ -260,6 +280,9 @@ public:
     QVariantMap state;
     QLabel *title = nullptr, *sub = nullptr;
     QPushButton *printBtn = nullptr;
+    QPointer<QPushButton> endEarlyBtn;      // only while the event is running; rebuilt with the page
+    QPushButton *renameBtn = nullptr;       // the pencil beside the title, in every state
+    void rename();
 
 protected:
     void reflow() override;
@@ -268,7 +291,7 @@ private:
     QVariantMap currentRound() const;       // empty when no round exists
     void buildStrip();
     QPushButton *chipButton(const QString &text, bool selected, const QString &color, bool enabled);
-    QWidget *banner(const QString &text, const QString &color);
+    QWidget *banner(const QString &text, const QString &color, const QString &icon = {});
     void buildLegacyNotice();
     void buildRound(const QVariantMap &round);
     QWidget *podCard(const QVariantMap &pod, const QVariantMap &round, const QHash<qint64, int> &points);

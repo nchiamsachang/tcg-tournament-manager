@@ -9,9 +9,9 @@
 #include <QMessageBox>
 #include <QTextStream>
 
-static QPushButton *smallButton(const QString &text, bool danger = false)
+static QPushButton *smallButton(const QString &text, bool danger = false, const QString &icon = {})
 {
-    return T::button(text, danger ? "danger" : "ghost");
+    return T::button(text, danger ? "danger" : "ghost", icon);
 }
 
 static QList<qint64> seatIds(const QVariantMap &pod)
@@ -117,13 +117,20 @@ CommanderEventScreen::CommanderEventScreen(MainWindow *mw, qint64 tournamentId, 
     : mw_(mw), tournamentId_(tournamentId), view_(viewRound)
 {
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body), 1);   // header and pods scroll together; actions stay put
+    root->addWidget(page(&body), 1);   // header and pods scroll together; actions stay put
     QBoxLayout *top = flip(T::row(12));
     auto *info = new QVBoxLayout;
     info->setSpacing(3);
     title = T::lbl("", T::TEXT, 24, 700, true);
     sub = T::lbl("", T::MUTED, 13, 400, true);
-    info->addWidget(title);
+    auto *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(6);
+    titleRow->addWidget(title, 100);
+    renameBtn = editNameButton();
+    connect(renameBtn, &QPushButton::clicked, this, [this] { rename(); });
+    titleRow->addWidget(renameBtn, 0, Qt::AlignTop);
+    titleRow->addStretch(1);
+    info->addLayout(titleRow);
     info->addWidget(sub);
     top->addLayout(info, 1);
     timerSlot_ = new QVBoxLayout;
@@ -133,7 +140,7 @@ CommanderEventScreen::CommanderEventScreen(MainWindow *mw, qint64 tournamentId, 
 
     auto *tools = new QWidget;                   // wraps onto more lines instead of running off the edge
     auto *tl = new T::FlowLayout(tools, 8);
-    printBtn = smallButton(QStringLiteral("🖨  Print"));
+    printBtn = smallButton("Print", false, "printer");
     printBtn->setToolTip(QStringLiteral("Print this round’s pairings or pod signs"));
     connect(printBtn, &QPushButton::clicked, this, [this] {
         const QVariantMap rnd = currentRound();
@@ -143,13 +150,13 @@ CommanderEventScreen::CommanderEventScreen(MainWindow *mw, qint64 tournamentId, 
                                                                  cdb::stageLabel(rnd), rnd)).exec();
     });
     tl->addWidget(printBtn);
-    QPushButton *standings = smallButton("Standings");
+    QPushButton *standings = smallButton("Standings", false, "trophy");
     connect(standings, &QPushButton::clicked, this, [this] { mw_->navigateTo("standings", {{"tournament_id", tournamentId_}}); });
     QPushButton *drops = smallButton("Players && drops");
     connect(drops, &QPushButton::clicked, this, [this] { openDrops(); });
-    QPushButton *rules = smallButton("Rules");
+    QPushButton *rules = smallButton("Rules", false, "circle-help");
     connect(rules, &QPushButton::clicked, this, [this] { showText(this, "Event rules", cdb::rulesText(state["event"].toMap())); });
-    QPushButton *history = smallButton("History");
+    QPushButton *history = smallButton("History", false, "history");
     connect(history, &QPushButton::clicked, this, [this] { openHistory(); });
     for (QPushButton *b : {standings, drops, rules, history})
         tl->addWidget(b);
@@ -171,6 +178,18 @@ CommanderEventScreen::CommanderEventScreen(MainWindow *mw, qint64 tournamentId, 
     footer_ = new T::FlowLayout(footerHolder_, 10);
     root->addWidget(footerHolder_);
 
+    refresh();
+}
+
+// refresh() re-reads the event, so the heading, the clock's notice and the next printout take
+// the new name; it keeps the scroll position, and nothing about the event itself changes.
+void CommanderEventScreen::rename()
+{
+    const QString name = editTournamentName(mw_, this, tournamentId_);
+    renameBtn->setFocus();
+    if (name.isEmpty())
+        return;
+    timerRound_ = -1;                   // the clock widget is rebuilt so its notice names the event correctly
     refresh();
 }
 
@@ -201,6 +220,7 @@ void CommanderEventScreen::refresh()
         state = cdb::getState(tournamentId_);
     } catch (const cdb::CommanderError &e) {
         title->setText(e.message);
+        T::hugText(title);
         return;
     }
     const QVariantMap ev = state["event"].toMap();
@@ -213,14 +233,17 @@ void CommanderEventScreen::refresh()
         if (!r.toMap()["legacy"].toBool() && r.toMap()["status"].toString() == "FINALIZED")
             ++done;
     const int total = state["total_rounds"].toInt();
+    const bool terminated = state["terminated"].toBool();
     sub->setText(QStringLiteral("Commander  ·  %1 active players  ·  %2 of %3 round%4 complete")
-                     .arg(state["active_count"].toInt()).arg(done).arg(total).arg(total == 1 ? "" : "s"));
+                     .arg(state["active_count"].toInt()).arg(done).arg(total).arg(total == 1 ? "" : "s")
+                 + (terminated ? QStringLiteral("  ·  Terminated") : QString()));
     title->setText(T::breakable(current.isEmpty() ? name : cdb::stageLabel(current) + QStringLiteral(" — ") + name));
+    T::hugText(title);
     printBtn->setEnabled(!current.isEmpty());
 
     // the clock belongs to the round in play and is saved with it
     const bool active = !current.isEmpty() && current["status"].toString() == "ACTIVE" && !current["legacy"].toBool()
-                        && stage == "SWISS";
+                        && stage == "SWISS" && !terminated;
     const qint64 wanted = active ? current["round_id"].toLongLong() : 0;
     if (wanted != timerRound_) {
         T::clear(timerSlot_);
@@ -240,25 +263,39 @@ void CommanderEventScreen::refresh()
     T::clear(footer_);
     if (stage == "COMPLETE") {
         const QString first = ev["champion_name"].toString();
-        body_->addWidget(banner(QStringLiteral("🏆  Tournament complete.") + (first.isEmpty() ? QString() : "  1st place: " + first),
-                                T::GOLD));
+        body_->addWidget(banner("Tournament complete." + (first.isEmpty() ? QString() : "  1st place: " + first),
+                                T::GOLD, "trophy"));
     }
-    if (state["legacy"].toMap()["flagged"].toBool())
+    if (terminated)
+        body_->addWidget(terminatedNotice(tdb::tournamentById(tournamentId_)["terminated_at"].toString()));
+    else if (state["legacy"].toMap()["flagged"].toBool())
         buildLegacyNotice();
     if (!current.isEmpty())
         buildRound(current);
+    if (!terminated && stage != "COMPLETE" && stage != "REGISTRATION") {
+        // apart from the round's routine actions in the bar below, so it is not pressed by accident
+        auto *apart = new QWidget;
+        auto *av = new QVBoxLayout(apart);
+        av->setContentsMargins(0, 16, 0, 0);
+        av->setSpacing(12);
+        av->addWidget(T::hline());
+        endEarlyBtn = endEarlyButton();
+        connect(endEarlyBtn, &QPushButton::clicked, this, [this] { endTournamentEarly(mw_, this, tournamentId_); });
+        av->addWidget(endEarlyBtn, 0, Qt::AlignLeft);
+        body_->addWidget(apart);
+    }
     if (stage == "COMPLETE") {
-        QPushButton *results = T::button(QStringLiteral("View final standings  →"), "primary");
+        QPushButton *results = T::button("View final standings", "primary", "trophy");
         connect(results, &QPushButton::clicked, this, [this] { mw_->navigateTo("standings", {{"tournament_id", tournamentId_}}); });
         footer_->addWidget(results);
     }
     footerHolder_->setVisible(footer_->count() > 0);
 
-    if (!rounds.isEmpty() && stage != "COMPLETE") {
+    if (terminated || stage == "COMPLETE") {
+        mw_->removeTournamentTab(tournamentId_);
+    } else if (!rounds.isEmpty()) {
         mw_->addTournamentTab(tournamentId_, "MTG", name);
         mw_->updateTournamentTab(tournamentId_);
-    } else if (stage == "COMPLETE") {
-        mw_->removeTournamentTab(tournamentId_);
     }
 }
 
@@ -336,12 +373,15 @@ QPushButton *CommanderEventScreen::chipButton(const QString &text, bool selected
     return b;
 }
 
-QWidget *CommanderEventScreen::banner(const QString &text, const QString &color)
+QWidget *CommanderEventScreen::banner(const QString &text, const QString &color, const QString &icon)
 {
     QFrame *f = T::panel("bn", color, 2);
     auto *h = new QHBoxLayout(f);
     h->setContentsMargins(18, 12, 18, 12);
-    h->addWidget(T::lbl(text, color, 15, 700, true));
+    h->setSpacing(8);
+    if (!icon.isEmpty())
+        h->addWidget(T::iconLabel(icon, color, 20));
+    h->addWidget(T::lbl(text, color, 15, 700, true), 1);
     return f;
 }
 
@@ -393,7 +433,8 @@ void CommanderEventScreen::buildRound(const QVariantMap &rnd)
             latestNumber = r.toMap()["round_number"].toInt();
     const int n = rnd["round_number"].toInt();
     const bool latest = !legacy && n == latestNumber;
-    const bool active = rnd["status"].toString() == "ACTIVE" && !legacy && ev["stage"].toString() == "SWISS";
+    const bool terminated = state["terminated"].toBool();
+    const bool active = rnd["status"].toString() == "ACTIVE" && !legacy && ev["stage"].toString() == "SWISS" && !terminated;
     const QVariantList pods = rnd["pods"].toList();
     const int total = int(pods.size());
     const int pending = rnd["pending"].toInt();
@@ -410,8 +451,10 @@ void CommanderEventScreen::buildRound(const QVariantMap &rnd)
     if (legacy)
         bar->addWidget(T::lbl(QStringLiteral("Read-only record · not counted"), T::GREY, 12));
     else
-        bar->addWidget(T::lbl(active ? QStringLiteral("%1 / %2 pods reported").arg(done).arg(total) : QString("Results final"),
-                              active ? T::MUTED : T::GREEN, 12));
+        bar->addWidget(T::lbl(active ? QStringLiteral("%1 / %2 pods reported").arg(done).arg(total)
+                              : terminated && pending ? QStringLiteral("%1 / %2 pods reported · round not finished").arg(done).arg(total)
+                              : QString("Results final"),
+                              active || (terminated && pending) ? T::MUTED : T::GREEN, 12));
     body_->addLayout(bar);
 
     QHash<qint64, int> points;
@@ -448,7 +491,7 @@ void CommanderEventScreen::buildRound(const QVariantMap &rnd)
             connect(fin, &QPushButton::clicked, this, [this, rnd] { finish(rnd); });
         } else {
             body_->addWidget(T::lbl("Results are provisional until the round is finalized.", T::MUTED, 12, 400, true));
-            fin = T::button(QStringLiteral("Finalize Round %1  →").arg(n), "primary");
+            fin = T::button(QStringLiteral("Finalize Round %1").arg(n), "primary", "arrow-right", true);
             connect(fin, &QPushButton::clicked, this, [this, rnd] { finalizeRound(rnd); });
         }
         fin->setEnabled(ready);
@@ -458,7 +501,7 @@ void CommanderEventScreen::buildRound(const QVariantMap &rnd)
         if (state["can_pair"].toBool()) {
             body_->addWidget(T::lbl(QStringLiteral("Round %1 is final. Drops made now apply to Round %2.").arg(n).arg(n + 1),
                                     T::MUTED, 12, 400, true));
-            QPushButton *next = T::button(QStringLiteral("Start Round %1  →").arg(n + 1), "primary");
+            QPushButton *next = T::button(QStringLiteral("Start Round %1").arg(n + 1), "primary", "play");
             next->setToolTip(QStringLiteral("Generates and publishes the Round %1 pods").arg(n + 1));
             connect(next, &QPushButton::clicked, this, [this, n] { publish(n + 1); });
             footer_->addWidget(next);
@@ -481,7 +524,8 @@ QWidget *CommanderEventScreen::podCard(const QVariantMap &pod, const QVariantMap
     const QString outcome = pod["outcome"].toString();
     const bool legacy = rnd["legacy"].toBool();
     const QVariantMap ev = state["event"].toMap();
-    const bool editable = rnd["status"].toString() == "ACTIVE" && !legacy && ev["stage"].toString() == "SWISS";
+    const bool terminated = state["terminated"].toBool();
+    const bool editable = rnd["status"].toString() == "ACTIVE" && !legacy && ev["stage"].toString() == "SWISS" && !terminated;
     const QVariantList seats = pod["seats"].toList();
     const int podNumber = pod["pod_number"].toInt();
 
@@ -554,8 +598,8 @@ QWidget *CommanderEventScreen::podCard(const QVariantMap &pod, const QVariantMap
         v->addLayout(row);
     }
 
-    if (legacy)
-        return card;
+    if (legacy || terminated)
+        return card;        // a read-only record: nothing can be reported or corrected
     auto *acts = new QWidget;
     auto *al = new T::FlowLayout(acts, 8);
     if (editable && !reported) {
@@ -564,7 +608,7 @@ QWidget *CommanderEventScreen::podCard(const QVariantMap &pod, const QVariantMap
         connect(draw, &QPushButton::clicked, this, [this, pod] { dialogReport(pod, true); });
         al->addWidget(draw);
     } else if (editable) {
-        QPushButton *change = smallButton("Change");
+        QPushButton *change = smallButton("Change", false, "pencil");
         change->setAccessibleName(QStringLiteral("Change the result of pod %1").arg(podNumber));
         connect(change, &QPushButton::clicked, this, [this, pod] { dialogReport(pod, false); });
         QPushButton *clearBtn = smallButton("Clear", true);
@@ -575,7 +619,7 @@ QWidget *CommanderEventScreen::podCard(const QVariantMap &pod, const QVariantMap
         al->addWidget(change);
         al->addWidget(clearBtn);
     } else if (reported) {
-        QPushButton *fix = smallButton(QStringLiteral("Correct result…"));
+        QPushButton *fix = smallButton(QStringLiteral("Correct result…"), false, "pencil");
         fix->setAccessibleName(QStringLiteral("Correct the result of pod %1").arg(podNumber));
         connect(fix, &QPushButton::clicked, this, [this, pod] { correct(pod); });
         al->addWidget(fix);
@@ -725,7 +769,7 @@ void CommanderEventScreen::openDrops()
     std::function<void()> fill = [&] {
         T::ScrollKeeper keep(&d);
         T::clear(rows);
-        const bool open = cdb::getEvent(tid)["stage"].toString() == "SWISS";
+        const bool open = cdb::getEvent(tid)["stage"].toString() == "SWISS" && !tdb::isTerminated(tid);
         for (const QVariant &rv : cdb::getStandings(tid)) {
             const QVariantMap r = rv.toMap();
             const qint64 pid = r["player_id"].toLongLong();
@@ -783,7 +827,7 @@ CommanderStandingsScreen::CommanderStandingsScreen(MainWindow *mw, qint64 tourna
     const bool hasPlayoff = !legacy["playoff_rounds"].toList().isEmpty();
 
     QVBoxLayout *body = nullptr;
-    root->addWidget(T::scrollArea(&body));       // the whole page scrolls; the table also scrolls sideways
+    root->addWidget(page(&body));       // the whole page scrolls; the table also scrolls sideways
     QBoxLayout *top = flip(T::row(12));
     auto *tv = new QVBoxLayout;
     tv->setSpacing(3);
@@ -799,13 +843,15 @@ CommanderStandingsScreen::CommanderStandingsScreen(MainWindow *mw, qint64 tourna
                            : QStringLiteral("%1 of %2 round%3 complete").arg(done).arg(total).arg(total == 1 ? "" : "s"));
     if (final && !ev["champion_name"].toString().isEmpty())
         sub += QStringLiteral("  ·  1st place: ") + ev["champion_name"].toString();
+    if (state["terminated"].toBool())
+        sub += QStringLiteral("  ·  Terminated");
     tv->addWidget(T::lbl(sub, T::MUTED, 13, 400, true));
     top->addLayout(tv, 1);
     auto *actions = new QWidget;
     auto *al = new T::FlowLayout(actions, 8);
     QPushButton *roundsBtn = T::button("Rounds && pods");
     connect(roundsBtn, &QPushButton::clicked, this, [this] { mw_->navigateTo("round", {{"tournament_id", tournamentId_}}); });
-    QPushButton *rulesBtn = T::button("Rules");
+    QPushButton *rulesBtn = T::button("Rules", "secondary", "circle-help");
     connect(rulesBtn, &QPushButton::clicked, this, [this] { showText(this, "Event rules", cdb::rulesText(state["event"].toMap())); });
     QPushButton *csvBtn = T::button("Export CSV");
     connect(csvBtn, &QPushButton::clicked, this, [this] { exportCsv(); });
@@ -814,7 +860,12 @@ CommanderStandingsScreen::CommanderStandingsScreen(MainWindow *mw, qint64 tourna
     top->addWidget(actions);
     body->addLayout(top);
     body->addSpacing(8);
-    QString order = QStringLiteral("Order: points, opponents' match-win % (OMW), own match-win % (MW). %1% floor; a bye "
+    if (state["terminated"].toBool()) {
+        // not final placings: the standings as they stood when the event was ended
+        body->addWidget(terminatedNotice(tdb::tournamentById(tournamentId)["terminated_at"].toString()));
+        body->addSpacing(8);
+    }
+    QString order =QStringLiteral("Order: points, opponents' match-win % (OMW), own match-win % (MW). %1% floor; a bye "
                                    "counts as a win.").arg(qRound(ev["settings"].toMap()["tiebreak_floor"].toDouble() * 100));
     if (hasPlayoff)
         order += " Placings here include a playoff played in an earlier version; the points and percentages are from "

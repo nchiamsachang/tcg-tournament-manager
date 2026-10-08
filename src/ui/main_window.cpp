@@ -13,8 +13,73 @@
 #include <QHBoxLayout>
 #include <QPalette>
 #include <QStyleHints>
+#include <QStyleOptionButton>
+#include <QStylePainter>
 #include <QVBoxLayout>
 #include <QtDebug>
+
+// A tournament's pill in the bar under the navigation.  It is an ordinary button (its text is
+// the whole label), drawn in two parts so the clock can have its own colour and a timer icon.
+class TabPill : public QPushButton {
+public:
+    void setParts(const QString &head, const QString &tail, const QString &tailColor, bool clock, bool selected)
+    {
+        if (head == head_ && tail == tail_ && tailColor == tailColor_ && clock == clock_ && selected == selected_)
+            return;
+        const bool resized = clock != clock_;
+        head_ = head;
+        tail_ = tail;
+        tailColor_ = tailColor;
+        clock_ = clock;
+        selected_ = selected;
+        if (resized)
+            updateGeometry();
+        update();
+    }
+    QSize sizeHint() const override
+    {
+        QSize s = QPushButton::sizeHint();
+        if (clock_)
+            s.rwidth() += iconRoom();
+        return s;
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+    QString tailColor() const { return tailColor_; }
+    bool showsClock() const { return clock_; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QStylePainter p(this);
+        QStyleOptionButton o;
+        initStyleOption(&o);
+        o.text.clear();                 // the style draws the pill; the label is drawn below
+        p.drawControl(QStyle::CE_PushButton, o);
+        const QFontMetrics fm(font());
+        const int headW = fm.horizontalAdvance(head_), tailW = fm.horizontalAdvance(tail_);
+        const int room = clock_ ? iconRoom() : 0;
+        int x = (width() - headW - room - tailW) / 2;
+        const QColor base(!isEnabled() ? T::DIM : (selected_ || underMouse() || hasFocus()) ? T::TEXT : T::MUTED);
+        const QColor accent = tailColor_.isEmpty() ? base : QColor(tailColor_);
+        p.setFont(font());
+        p.setPen(base);
+        p.drawText(QRect(x, 0, headW + 2, height()), Qt::AlignVCenter | Qt::AlignLeft, head_);
+        x += headW;
+        if (clock_) {
+            const int side = T::px(ICON);
+            p.drawPixmap(x, (height() - side) / 2, T::iconPixmap("timer", accent.name(), ICON));
+            x += room;
+        }
+        p.setPen(accent);
+        p.drawText(QRect(x, 0, tailW + 2, height()), Qt::AlignVCenter | Qt::AlignLeft, tail_);
+    }
+
+private:
+    static constexpr int ICON = 15;
+    static int iconRoom() { return T::px(ICON) + 6; }
+    QString head_, tail_, tailColor_;
+    bool clock_ = false, selected_ = false;
+};
 
 MainWindow::MainWindow()
 {
@@ -135,14 +200,15 @@ void MainWindow::buildChrome()
     nh->setSpacing(6);
     navStyled_ = false;
 
-    logo = new QLabel(QStringLiteral("⚔"));
-    logo->setFixedSize(30, 30);
+    logo = new QLabel;
+    logo->setPixmap(T::iconPixmap("swords", "#ffffff", 19));
+    logo->setFixedSize(36, 36);
     logo->setAlignment(Qt::AlignCenter);
-    logo->setStyleSheet("background:" + T::PURPLE + ";border-radius:15px;color:#ffffff;font-size:14px;");
+    logo->setStyleSheet("background:" + T::PURPLE + ";border-radius:18px;");
     nh->addWidget(logo);
-    appLabel = T::lbl("TCG Manager", T::TEXT, 15, 700);
-    appLabel->setFont(T::font(15, 700, false, 0.0, 1));
-    appLabel->setContentsMargins(6, 0, 14, 0);
+    appLabel = T::lbl("TCG Manager", T::TEXT, 18, 700);
+    appLabel->setFont(T::font(18, 700, false, 0.0, 1));
+    appLabel->setContentsMargins(7, 0, 14, 0);
     nh->addWidget(appLabel);
 
     navButtons.clear();
@@ -151,6 +217,7 @@ void MainWindow::buildChrome()
         b->setMinimumHeight(T::MIN_HIT);
         b->setCursor(QCursor(Qt::PointingHandCursor));
         b->setProperty("label", item.first);
+        b->setProperty("iconName", item.second == "home" ? "house" : "users");
         styleNav(b, false);
         const QString screen = item.second;
         connect(b, &QPushButton::clicked, this, [this, screen] { navigateTo(screen); });
@@ -168,11 +235,11 @@ void MainWindow::buildChrome()
     nh->addWidget(livePill);
 
     const bool dark = effectiveMode() == "dark";
-    themeBtn = T::roundButton(dark ? QStringLiteral("☀") : QStringLiteral("☾"),
-                              dark ? "Switch to light mode" : "Switch to dark mode");
+    // the icon shows what pressing it does: a sun switches to light, a moon to dark
+    themeBtn = T::roundButton(dark ? "sun" : "moon", dark ? "Switch to light mode" : "Switch to dark mode");
     connect(themeBtn, &QPushButton::clicked, this, [this] { toggleTheme(); });
     nh->addWidget(themeBtn);
-    gearBtn = T::roundButton(QStringLiteral("⚙"), "Settings");
+    gearBtn = T::roundButton("settings", "Settings");
     gearBtn->setAccessibleDescription("Appearance, text size and round-end alerts");
     connect(gearBtn, &QPushButton::clicked, this, [this] { openSettings(); });
     nh->addWidget(gearBtn);
@@ -184,15 +251,16 @@ void MainWindow::buildChrome()
     tbar->setObjectName("tbar");
     tbar->setStyleSheet("#tbar{background:" + T::SURFACE + ";border-bottom:1px solid " + T::BORDER + ";}");
     auto *th = new QHBoxLayout(tbar);
-    th->setContentsMargins(16, 6, 16, 6);
-    th->setSpacing(8);
-    backBtn = new QPushButton(QStringLiteral("←"));
-    backBtn->setFixedSize(T::MIN_HIT, T::MIN_HIT);
+    th->setContentsMargins(12, 6, 16, 6);       // 44px Back button in the room the 40px one had
+    th->setSpacing(6);
+    backBtn = new QPushButton;
+    backBtn->setFixedSize(44, 44);
+    T::setButtonIcon(backBtn, "arrow-left", T::MUTED, false, 20);
     backBtn->setToolTip("Back");
     backBtn->setAccessibleName("Back");
     backBtn->setCursor(QCursor(Qt::PointingHandCursor));
     backBtn->setStyleSheet("QPushButton{background:transparent;color:" + T::MUTED + ";border:2px solid transparent;border-radius:"
-                           + QString::number(T::MIN_HIT / 2) + "px;font-size:" + QString::number(18) + "px;padding:0;}"
+                           "22px;padding:0;min-width:40px;min-height:40px;}"      // 44 with the 2px border
                            "QPushButton:hover{background:" + T::SURFACE3 + ";color:" + T::TEXT + ";border-color:" + T::BORDER2 + ";}"
                            "QPushButton:focus{border-color:" + T::FOCUS + ";}");
     connect(backBtn, &QPushButton::clicked, this, [this] { goBack(); });
@@ -232,11 +300,12 @@ void MainWindow::fitChrome()
     if (!appLabel)
         return;
     const int w = width();
-    logo->setVisible(w >= 420);
-    appLabel->setVisible(w >= 600);
+    const int roomy = T::px(365);                   // 420 at the standard text size, more at Large
+    logo->setVisible(w >= roomy);
+    appLabel->setVisible(w >= T::px(520) + 2);      // 600 at the standard text size; it needs more room at Large
     livePill->setVisible(w >= 980 && !tabOrder_.isEmpty());
     // in a very narrow window the navigation keeps every label by giving up padding, not text
-    const bool compact = w < 420;
+    const bool compact = w < roomy;
     if (compact != compactNav_ || !navStyled_) {
         compactNav_ = compact;
         navStyled_ = true;
@@ -324,7 +393,7 @@ void MainWindow::addTournamentTab(qint64 tournamentId, const QString &game, cons
 void MainWindow::addTabButton(qint64 tournamentId)
 {
     const TabMeta meta = tabMeta_.value(tournamentId);
-    auto *btn = new QPushButton;
+    auto *btn = new TabPill;
     btn->setCursor(QCursor(Qt::PointingHandCursor));
     connect(btn, &QPushButton::clicked, this, [this, tournamentId, meta] {
         navigateTo("round", {{"tournament_id", tournamentId}, {"game", meta.game}, {"tournament_name", meta.name}});
@@ -342,6 +411,21 @@ void MainWindow::updateTournamentTab(qint64 tournamentId)
         return;
     loadTabClock(tournamentId);
     showTab(tournamentId);
+}
+
+void MainWindow::renameTournamentTab(qint64 tournamentId, const QString &name)
+{
+    for (auto &page : history)
+        if (page.second.value("tournament_id").toLongLong() == tournamentId && page.second.contains("tournament_name"))
+            page.second["tournament_name"] = name;
+    if (!tabMeta_.contains(tournamentId))
+        return;
+    tabMeta_[tournamentId].name = name;
+    if (QPushButton *btn = tabButtons_.value(tournamentId))
+        btn->setText(QString());        // so the tooltip and accessible name are rewritten even if the visible text is the same
+    showTab(tournamentId);
+    if (tabArea_)
+        tabArea_->invalidate();
 }
 
 void MainWindow::removeTournamentTab(qint64 tournamentId)
@@ -372,8 +456,11 @@ void MainWindow::loadTabClock(qint64 tournamentId)
     }
 }
 
-// "Commander Night · Round 2 of 3 · 24:18 remaining", from the saved clock.
-QString MainWindow::tabText(qint64 tournamentId) const
+// "Commander Night · Round 2 of 3 · 24:18 remaining", from the saved clock.  The name and
+// round are one part and the clock the other, so only the clock takes a colour: green while
+// it counts down, red once the time is up, and the pill's own colour while it is paused or
+// has not been started.
+MainWindow::TabLabel MainWindow::tabLabel(qint64 tournamentId) const
 {
     const TabMeta m = tabMeta_.value(tournamentId);
     // the pill never has to be wider than the window: in a narrow window the name is cut
@@ -382,37 +469,51 @@ QString MainWindow::tabText(qint64 tournamentId) const
     const int perChar = qMax(6, T::px(8));
     const bool tight = room < 46 * perChar;
     const int nameMax = qBound(6, room / perChar - (tight ? 22 : 34), 22);
-    QStringList parts{m.name.size() > nameMax ? m.name.left(nameMax).trimmed() + QStringLiteral("…") : m.name};
+    TabLabel label;
+    label.sep = tight ? QStringLiteral(" · ") : QStringLiteral("  ·  ");
+    label.head = m.name.size() > nameMax ? m.name.left(nameMax).trimmed() + QStringLiteral("…") : m.name;
     const int number = m.round.roundNumber, total = m.round.totalRounds;
     if (tight)
-        parts << (total ? QStringLiteral("R%1/%2").arg(number).arg(total) : QStringLiteral("R%1").arg(number));
+        label.head += label.sep + (total ? QStringLiteral("R%1/%2").arg(number).arg(total) : QStringLiteral("R%1").arg(number));
     else
-        parts << (total ? QStringLiteral("Round %1 of %2").arg(number).arg(total) : QStringLiteral("Round %1").arg(number));
+        label.head += label.sep + (total ? QStringLiteral("Round %1 of %2").arg(number).arg(total)
+                                         : QStringLiteral("Round %1").arg(number));
     if (m.round.playing && m.clock.valid()) {
         const int left = m.clock.secondsLeft();
         const QString clock = timerdb::clockText(left);
-        if (left <= 0)
-            parts << "Time expired";
-        else if (m.clock.state() == timerdb::State::Running)
-            parts << clock + (tight ? " left" : " remaining");
-        else if (m.clock.state() == timerdb::State::Paused)
-            parts << (tight ? "Paused " : "Paused at ") + clock;
-        else
-            parts << "Not started";
+        label.clock = !tight;           // a narrow window keeps the wording and the colour, and gives up the icon
+        if (left <= 0) {
+            label.tail = "Time expired";
+            label.tailColor = T::RED;
+        } else if (m.clock.state() == timerdb::State::Running) {
+            label.tail = clock + (tight ? " left" : " remaining");
+            label.tailColor = T::GREEN;
+        } else if (m.clock.state() == timerdb::State::Paused) {
+            label.tail = (tight ? "Paused " : "Paused at ") + clock;
+        } else {
+            label.tail = "Not started";
+        }
     } else if (m.round.needsFinish) {
-        parts << "Needs finishing";
+        label.tail = "Needs finishing";
     } else if (m.round.kind == timerdb::Kind::Commander && !m.round.playing) {
-        parts << "Between rounds";
+        label.tail = "Between rounds";
     }
-    return parts.join(tight ? QStringLiteral(" · ") : QStringLiteral("  ·  "));
+    return label;
+}
+
+QString MainWindow::tabText(qint64 tournamentId) const
+{
+    const TabLabel label = tabLabel(tournamentId);
+    return label.tail.isEmpty() ? label.head : label.head + label.sep + label.tail;
 }
 
 void MainWindow::showTab(qint64 tournamentId)
 {
-    QPushButton *btn = tabButtons_.value(tournamentId);
+    auto *btn = static_cast<TabPill *>(tabButtons_.value(tournamentId));
     if (!btn)
         return;
-    const QString text = tabText(tournamentId);
+    const TabLabel label = tabLabel(tournamentId);
+    const QString text = label.tail.isEmpty() ? label.head : label.head + label.sep + label.tail;
     const bool selected = tournamentId == currentTid_;
     const int h = qMax(T::px(33), T::MIN_HIT);
     if (btn->text() != text) {
@@ -421,6 +522,7 @@ void MainWindow::showTab(qint64 tournamentId)
                                + (selected ? ", open now" : ""));
         btn->setToolTip(tabMeta_.value(tournamentId).name + QStringLiteral(" — open this tournament"));
     }
+    btn->setParts(label.head + (label.tail.isEmpty() ? QString() : label.sep), label.tail, label.tailColor, label.clock, selected);
     const QString style = T::pillQss(selected, h);
     if (btn->property("pill").toString() != style) {
         btn->setProperty("pill", style);
@@ -431,11 +533,17 @@ void MainWindow::showTab(qint64 tournamentId)
 
 void MainWindow::refreshTabs(bool reload)
 {
+    QList<qint64> ended;
     for (qint64 tid : tabOrder_) {
         if (reload)
             loadTabClock(tid);
-        showTab(tid);
+        if (tabMeta_.value(tid).round.terminated)
+            ended << tid;       // ended early (here or in another window): no longer an active tournament
+        else
+            showTab(tid);
     }
+    for (qint64 tid : ended)
+        removeTournamentTab(tid);
 }
 
 void MainWindow::refreshLivePill()
@@ -467,6 +575,10 @@ void MainWindow::styleNav(QPushButton *button, bool active)
     if (compactNav_)
         style.replace("padding:0 " + QString::number(T::px(16) - (active ? T::LINE_STRONG - T::LINE : 0)) + "px", "padding:0 6px");
     button->setStyleSheet(style);
+    if (compactNav_)
+        button->setIcon(QIcon());       // a very narrow window keeps the labels and gives up the icons
+    else
+        T::setButtonIcon(button, button->property("iconName").toString(), active ? T::TEXT : T::MUTED);
     button->setAccessibleName(button->property("label").toString() + (active ? ", current page" : ""));
 }
 

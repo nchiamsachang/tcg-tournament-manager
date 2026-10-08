@@ -13,14 +13,11 @@ const char *const VERSION = TCG_VERSION;       // set in the top-level CMakeList
 // verified from this project's Git remote (origin)
 const char *const REPO_URL = "https://github.com/nchiamsachang/tcg-tournament-manager";
 
+const char *const PRODUCER = "Nathan Chiamsachang";
+
 QString issuesUrl()
 {
     return QString::fromLatin1(REPO_URL) + "/issues";
-}
-
-QStringList founders()
-{
-    return {};      // founder credits are shown in the home footer only when names are listed here
 }
 
 static QJsonObject interfaceDefaults()

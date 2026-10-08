@@ -1,6 +1,10 @@
 #include "theme.h"
 
+#include "prefs.h"
+
 #include <QApplication>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QColor>
 #include <QTimer>
 #include <QDir>
@@ -8,10 +12,13 @@
 #include <QPainter>
 #include <QCoreApplication>
 #include <QFontDatabase>
+#include <QHash>
+#include <QSvgRenderer>
 #include <QWheelEvent>
 #include <QCursor>
 #include <QEvent>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QListView>
 #include <QMouseEvent>
 #include <QScrollBar>
@@ -169,6 +176,12 @@ QLabel *lbl(const QString &text, const QString &color, int size, int weight, boo
     return l;
 }
 
+void hugText(QLabel *label)
+{
+    const QString text = label->text().remove(QChar(0x200B));
+    label->setMaximumWidth(QFontMetrics(label->font()).horizontalAdvance(text) + 6);
+}
+
 QLabel *caps(const QString &text, const QString &color, int size)
 {
     return lbl(text.toUpper(), color.isEmpty() ? MUTED : color, size, 600, false, false, 0.8);
@@ -250,7 +263,82 @@ QString buttonQss(const QString &kind, int height)
            "QPushButton:disabled{background:transparent;color:" + DIM + ";border:" + line + BORDER + ";}";
 }
 
-QPushButton *button(const QString &text, const QString &kind)
+QPixmap iconPixmap(const QString &name, const QString &color, int size)
+{
+    static QHash<QString, QPixmap> cache;
+    const qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
+    const int side = px(size);
+    const QString key = QStringLiteral("%1|%2|%3|%4").arg(name, color).arg(side).arg(dpr);
+    const auto found = cache.constFind(key);
+    if (found != cache.constEnd())
+        return *found;
+    QPixmap pm;
+    QFile file(QStringLiteral(":/assets/icons/%1.svg").arg(name));
+    if (file.open(QIODevice::ReadOnly)) {
+        // the icons are drawn in "currentColor"; here that is the colour asked for
+        QByteArray svg = file.readAll();
+        svg.replace("currentColor", color.toLatin1());
+        QSvgRenderer renderer(svg);
+        pm = QPixmap(QSize(side, side) * dpr);
+        pm.setDevicePixelRatio(dpr);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        renderer.render(&p, QRectF(0, 0, side, side));
+    }
+    cache.insert(key, pm);
+    return pm;
+}
+
+QLabel *iconLabel(const QString &name, const QString &color, int size)
+{
+    auto *l = new QLabel;
+    l->setPixmap(iconPixmap(name, color, size));
+    l->setFixedSize(px(size), px(size));
+    l->setStyleSheet("background:transparent;border:none;");
+    return l;
+}
+
+void setButtonIcon(QAbstractButton *b, const QString &name, const QString &color, bool after, int size)
+{
+    // The style leaves 4px between an icon and a label; 4 more are added here, on the label's side.
+    const int side = px(size), gap = b->text().isEmpty() ? 0 : 4;
+    const auto padded = [&](const QString &c) {
+        const QPixmap src = iconPixmap(name, c, size);
+        QPixmap pm(QSize(side + gap, side) * src.devicePixelRatio());
+        pm.setDevicePixelRatio(src.devicePixelRatio());
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.drawPixmap(after ? gap : 0, 0, src);
+        return pm;
+    };
+    QIcon icon;
+    icon.addPixmap(padded(color), QIcon::Normal);
+    icon.addPixmap(padded(DIM), QIcon::Disabled);
+    b->setIcon(icon);
+    b->setIconSize(QSize(side + gap, side));
+    b->setLayoutDirection(after ? Qt::RightToLeft : Qt::LeftToRight);      // a button draws its icon first
+}
+
+void setFieldIcon(QLineEdit *field, const QString &name)
+{
+    // A picture laid over the field's left edge, with the text moved clear of it.  It is not a
+    // button: clicks pass through to the field, and it adds nothing for the keyboard or a
+    // screen reader.
+    QLabel *icon = iconLabel(name, MUTED, 18);
+    icon->setAttribute(Qt::WA_TransparentForMouseEvents);
+    auto *lay = new QHBoxLayout(field);
+    lay->setContentsMargins(px(12), 0, 0, 0);
+    lay->addWidget(icon);
+    lay->addStretch();
+    field->setTextMargins(px(18) + 8, 0, 0, 0);
+}
+
+QString labelColor(const QString &kind)
+{
+    return kind == "primary" ? QStringLiteral("#ffffff") : kind == "danger" ? RED : TEXT;
+}
+
+QPushButton *button(const QString &text, const QString &kind, const QString &icon, bool iconAfter)
 {
     auto *b = new QPushButton(text);
     const int h = qMax(px(35), BUTTON_H);
@@ -258,22 +346,41 @@ QPushButton *button(const QString &text, const QString &kind)
     b->setCursor(QCursor(Qt::PointingHandCursor));
     b->setStyleSheet(buttonQss(kind, h));
     b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    if (!icon.isEmpty())
+        setButtonIcon(b, icon, labelColor(kind), iconAfter);
     return b;
 }
 
-QPushButton *roundButton(const QString &text, const QString &tooltip)
+QPushButton *roundButton(const QString &icon, const QString &tooltip)
 {
-    auto *b = new QPushButton(text);
+    auto *b = new QPushButton;
     const int size = 44;
     b->setFixedSize(size, size);
+    setButtonIcon(b, icon, TEXT, false, 22);
     b->setCursor(QCursor(Qt::PointingHandCursor));
     b->setToolTip(tooltip);
     b->setAccessibleName(tooltip);
     b->setStyleSheet("QPushButton{background:" + SURFACE2 + ";color:" + TEXT + ";border:" + QString::number(LINE) + "px solid " + BORDER2
-                     + ";border-radius:" + QString::number(size / 2) + "px;font-size:" + QString::number(18) + "px;padding:0;}"
+                     + ";border-radius:" + QString::number(size / 2) + "px;padding:0;}"
                      "QPushButton:hover{border-color:" + PURPLE_LT + ";background:" + SELECTED + ";}"
                      "QPushButton:pressed{background:" + PURPLE_DIM + ";}"
                      "QPushButton:focus{border:" + QString::number(LINE_STRONG) + "px solid " + FOCUS + ";}");
+    return b;
+}
+
+QPushButton *iconButton(const QString &icon, const QString &tooltip)
+{
+    auto *b = new QPushButton;
+    b->setFixedSize(44, 44);
+    setButtonIcon(b, icon, MUTED, false, 18);
+    b->setCursor(QCursor(Qt::PointingHandCursor));
+    b->setToolTip(tooltip);
+    b->setAccessibleName(tooltip);
+    b->setStyleSheet("QPushButton{background:transparent;border:2px solid transparent;border-radius:22px;padding:0;"
+                     "min-width:40px;min-height:40px;}"
+                     "QPushButton:hover{background:" + SURFACE3 + ";border-color:" + BORDER2 + ";}"
+                     "QPushButton:pressed{background:" + SELECTED + ";}"
+                     "QPushButton:focus{border-color:" + FOCUS + ";}");
     return b;
 }
 
@@ -651,7 +758,40 @@ void Screen::resizeEvent(QResizeEvent *e)
     reflow();
 }
 
-QScrollArea *scrollArea(QVBoxLayout **box)
+QWidget *pageFooter()
+{
+    auto *footer = new QWidget;
+    footer->setObjectName("pageFooter");
+    auto *row = new FlowLayout(footer, px(14), true);
+    row->setContentsMargins(0, 4, 0, 0);
+    const int h = MIN_HIT;          // small text, but the link is as easy to hit as any other control
+
+    auto *bug = new QPushButton("Report a bug");
+    setButtonIcon(bug, "bug", MUTED, false, 13);
+    bug->setCursor(QCursor(Qt::PointingHandCursor));
+    bug->setToolTip(prefs::issuesUrl());
+    bug->setAccessibleDescription("Opens the project's GitHub issues page in your browser");
+    bug->setStyleSheet("QPushButton{background:transparent;color:" + MUTED + ";border:2px solid transparent;border-radius:8px;"
+                       "font-family:'" + FONT + "';font-size:" + P(11) + "px;font-weight:400;text-decoration:underline;"
+                       "padding:0 6px;min-height:" + QString::number(h - 4)
+                       + "px;}"
+                       "QPushButton:hover{color:" + PURPLE_LT + ";}"
+                       "QPushButton:focus{border-color:" + FOCUS + ";color:" + PURPLE_LT + ";}");
+    QObject::connect(bug, &QPushButton::clicked, bug, [] { QDesktopServices::openUrl(QUrl(prefs::issuesUrl())); });
+    row->addWidget(bug);
+
+    QLabel *credit = lbl(QStringLiteral("Produced by %1").arg(prefs::PRODUCER), MUTED, 11);
+    credit->setMinimumHeight(h);
+    row->addWidget(credit);
+    return footer;
+}
+
+QScrollArea *Screen::page(QVBoxLayout **body)
+{
+    return scrollArea(body, true);
+}
+
+QScrollArea *scrollArea(QVBoxLayout **box, bool footer)
 {
     auto *area = new QScrollArea;
     area->setWidgetResizable(true);
@@ -674,7 +814,17 @@ QScrollArea *scrollArea(QVBoxLayout **box)
         if (layout->contentsMargins().left() != inset)
             layout->setContentsMargins(inset, 0, 0, 0);
     });
-    *box = layout;
+    if (footer) {
+        // the page's own content, then the footer: at the bottom of a short page, after the
+        // content of a long one, and never on top of anything
+        auto *content = new QVBoxLayout;
+        content->setSpacing(0);
+        layout->addLayout(content, 1);
+        layout->addWidget(pageFooter());
+        *box = content;
+    } else {
+        *box = layout;
+    }
     return area;
 }
 

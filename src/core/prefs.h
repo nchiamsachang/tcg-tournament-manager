@@ -8,8 +8,8 @@ namespace prefs {
 
 extern const char *const VERSION;
 extern const char *const REPO_URL;
+extern const char *const PRODUCER;      // the "Produced by" credit in the page footer
 QString issuesUrl();
-QStringList founders();             // credits are shown only when names are listed
 
 QString filePath();
 QJsonObject load();                 // always complete: missing or invalid entries come back as defaults

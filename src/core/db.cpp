@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QMutex>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
@@ -471,14 +472,82 @@ static void migration003CommanderFixedRounds()
     )sql");
 }
 
+// A tournament can be ended early: status 'TERMINATED', with the moment it happened.
+// SQLite cannot change a CHECK rule in place, so the tournaments table is rebuilt the way
+// its documentation prescribes: a new table with the wider rule, every row copied across
+// unchanged, the old table dropped and the new one given its name.  Foreign keys are off
+// while this runs (see runMigrations), so no other table's rows are touched.
+static void migration004TournamentTerminated()
+{
+    const QString sql = value("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tournaments'").toString();
+    if (!sql.contains("'TERMINATED'")) {
+        static const QRegularExpression head(QStringLiteral("^CREATE TABLE\\s+\"?tournaments\"?"));
+        QString wider = sql;
+        wider.replace(head, QStringLiteral("CREATE TABLE tournaments_rebuild"));
+        wider.replace(QStringLiteral("'CANCELLED'"), QStringLiteral("'CANCELLED', 'TERMINATED'"));
+        if (sql.count("'CANCELLED'") != 1 || !wider.startsWith("CREATE TABLE tournaments_rebuild"))
+            throw Error(QStringLiteral("The tournaments table is not in the expected form, so it was left unchanged."), false);
+
+        // indexes (and any triggers) on the table go with it when it is dropped: put them back afterwards
+        const Rows attached = query("SELECT sql FROM sqlite_master WHERE tbl_name = 'tournaments' "
+                                    "AND type IN ('index', 'trigger') AND sql IS NOT NULL");
+        const QVariant sequence = value("SELECT seq FROM sqlite_sequence WHERE name = 'tournaments'");
+        const int before = value("SELECT COUNT(*) FROM tournaments").toInt();
+
+        exec("DROP TABLE IF EXISTS tournaments_rebuild");
+        exec(wider);
+        exec("INSERT INTO tournaments_rebuild SELECT * FROM tournaments");
+        if (value("SELECT COUNT(*) FROM tournaments_rebuild").toInt() != before)
+            throw Error(QStringLiteral("Not every tournament could be copied, so the table was left unchanged."), false);
+        exec("DROP TABLE tournaments");
+        exec("ALTER TABLE tournaments_rebuild RENAME TO tournaments");
+        for (const Row &r : attached)
+            exec(r["sql"].toString());
+        // ids are never reused, even when the newest tournament had been deleted
+        if (sequence.isValid())
+            exec("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'tournaments'", {sequence});
+    }
+    if (!columns("tournaments").contains("terminated_at"))
+        exec("ALTER TABLE tournaments ADD COLUMN terminated_at TEXT");
+}
+
+// A player can be removed from the directory without being erased: deleted_at records when.
+// Their id, name and every tournament record stay, so history is unchanged.
+static void migration005PlayerRemoved()
+{
+    if (!columns("players").contains("deleted_at"))
+        exec("ALTER TABLE players ADD COLUMN deleted_at TEXT");
+}
+
 const QList<Migration> &migrations()
 {
     static const QList<Migration> list = {
         {1, "commander_multiplayer", migration001Commander},
         {2, "commander_round_timer", migration002CommanderRoundTimer},
         {3, "commander_fixed_rounds", migration003CommanderFixedRounds},
+        {4, "tournament_terminated", migration004TournamentTerminated, true},
+        {5, "player_removed", migration005PlayerRemoved},
     };
     return list;
+}
+
+// Applies one migration and records it, all or nothing.
+static void applyMigration(const Migration &m)
+{
+    Tx tx;
+    // another connection may have applied it while we waited for the lock
+    if (value("SELECT 1 FROM schema_migrations WHERE version = ?", {m.version}).isValid())
+        return;
+    m.apply();
+    if (m.rebuildsTable) {
+        // every record that refers to a tournament must still find it
+        for (const Row &r : query("PRAGMA foreign_key_check"))
+            if (r["parent"].toString() == "tournaments")
+                throw Error(QStringLiteral("Update %1 would leave records without their tournament, so it was not applied.")
+                                .arg(m.version), false);
+    }
+    exec("INSERT INTO schema_migrations (version, name) VALUES (?, ?)", {m.version, QString::fromLatin1(m.name)});
+    tx.commit();
 }
 
 QString backupBeforeUpdate()
@@ -517,13 +586,22 @@ static void runMigrations(bool hadData)
             backupBeforeUpdate();
             backedUp = true;
         }
-        Tx tx;
-        // another connection may have applied it while we waited for the lock
-        if (value("SELECT 1 FROM schema_migrations WHERE version = ?", {m.version}).isValid())
+        if (!m.rebuildsTable) {
+            applyMigration(m);
             continue;
-        m.apply();
-        exec("INSERT INTO schema_migrations (version, name) VALUES (?, ?)", {m.version, QString::fromLatin1(m.name)});
-        tx.commit();
+        }
+        // Dropping a table deletes the rows that refer to it unless foreign keys are off, and
+        // that setting can only change outside a transaction.  If it did not take, stop.
+        exec("PRAGMA foreign_keys = OFF");
+        try {
+            if (t_txDepth > 0 || value("PRAGMA foreign_keys").toInt() != 0)
+                throw Error(QStringLiteral("Update %1 cannot run inside another change.").arg(m.version), false);
+            applyMigration(m);
+        } catch (...) {
+            exec("PRAGMA foreign_keys = ON");
+            throw;
+        }
+        exec("PRAGMA foreign_keys = ON");
     }
 }
 
@@ -557,7 +635,7 @@ void initialize()
             top_cut         INTEGER DEFAULT 0,
             round_time_mins INTEGER DEFAULT 50,
             status          TEXT    DEFAULT 'PENDING'
-                            CHECK (status IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')),
+                            CHECK (status IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'TERMINATED')),
             notes           TEXT
         )
     )sql");

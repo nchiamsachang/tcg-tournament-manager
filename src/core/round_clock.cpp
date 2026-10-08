@@ -67,7 +67,7 @@ static bool hasValue(const QVariant &v)
 Timer get(Kind kind, qint64 roundId)
 {
     const Row row = db::one(
-        QStringLiteral("SELECT r.timer_state, r.timer_elapsed_secs, r.timer_started_at, t.round_time_mins, %1 AS now "
+        QStringLiteral("SELECT r.timer_state, r.timer_elapsed_secs, r.timer_started_at, t.round_time_mins, t.status, %1 AS now "
                        "FROM %2 r JOIN tournaments t ON t.tournament_id = r.tournament_id WHERE r.round_id = ?")
             .arg(DB_NOW, tableFor(kind)),
         {roundId});
@@ -82,6 +82,13 @@ Timer get(Kind kind, qint64 roundId)
     const int mins = row["round_time_mins"].toInt();
     t.limit = (mins ? mins : tdb::DEFAULT_ROUND_MINUTES) * 60;
     t.now = row["now"].toDouble();
+    // a tournament that is finished or was ended early has no clock running, whatever was saved
+    const QString status = row["status"].toString();
+    if (status == tdb::COMPLETED || status == tdb::TERMINATED) {
+        t.closed = true;
+        t.state = State::Stopped;
+        t.hasStart = false;
+    }
     return t;
 }
 
@@ -93,7 +100,7 @@ static Timer change(Kind kind, qint64 roundId, Change what)
 {
     db::Tx tx;
     Timer t = get(kind, roundId);
-    if (!t.valid)
+    if (!t.valid || t.closed)
         return t;
     const bool running = t.state == State::Running && t.hasStart;
     switch (what) {

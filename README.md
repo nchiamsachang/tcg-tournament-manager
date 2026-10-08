@@ -11,6 +11,7 @@ Magic: The Gathering — Modern and Commander), written in C++17 on Qt 6
 |---|---|
 | `src/core/` | No user interface. `db` (connection, schema, migrations, transactions), `tournaments` (tournament, registration, round and match records), `players` (directory and history), `swiss` (one-on-one scoring, pairing and event flow), `commander` (multiplayer rules and pairing, no database), `commander_db` (Commander event flow), `round_clock` (countdowns saved as timestamps), `round_status` (which round is in play, for any format), `prefs` (settings file). `store.h` includes the non-Commander headers in one line. |
 | `src/ui/` | `theme` (colours and shared widgets), `main_window`, `screens_*` (every screen), `dialogs` (round clock, settings), `printing`. |
+| `assets/` | Game logos and `icons/`: the [Lucide](https://lucide.dev) icons the app uses, as SVG files built into the program (`assets.qrc`). `T::button`, `T::setButtonIcon` and `T::iconLabel` in `theme` draw them in the theme's colours. To add one, copy its `.svg` into `assets/icons` and list it in `assets.qrc`. |
 | `tests/` | `test_core.cpp`, `test_ui.cpp`, and `fixtures/reference.json`. |
 
 ## Building
@@ -59,6 +60,48 @@ were, and nothing in the user folder is ever overwritten.
 
 Before a new version changes the database format, it saves a copy of the
 database in `backups`.
+
+## Players: ids, same names and removal
+
+A player is the row's `player_id`, a number the database assigns once and
+never reuses, not the name. Registrations, matches, pod seats and byes all
+refer to that id, so two people can have the same name and a rename changes
+nothing else. Ids are shown as `#0042` (at least four digits).
+
+The id is always on a player's profile. Elsewhere it appears only when it is
+needed: a name is shown as `Alex Smith · #0042` when another player being
+shown has the same name. Names are stored in one field, so "the same name"
+means the whole name matches exactly once case and extra spaces are ignored
+(`pdb::normalizedName`); a shared first or last name alone is not a match.
+The comparison uses the full set (the whole directory, or everyone who took
+part in a tournament, removed or not) before any search or filter.
+
+Adding a name that a player in the directory already has asks which player
+is meant, or whether this is a different person; nothing is merged.
+
+"Remove player" sets `deleted_at` (migration 5) and nothing else. The player
+leaves the directory, searches and new registrations, and their profile can
+no longer be opened; every tournament record keeps their id and name. A
+player who is registered for a tournament that has not started, or is still
+in one being played, has to be resolved there first.
+
+Standings shown or printed never write to the database
+(`swiss::viewStandings`): a finished tournament shows the figures and
+placings saved when it was finalized.
+
+## Ending a tournament early
+
+"End tournament early" on a round screen saves the tournament as `TERMINATED`
+(`tdb::terminateTournament`): its status and `terminated_at` are set and its
+round clocks are stopped in one transaction. Nothing is deleted or invented:
+players, pairings and reported results stay, unreported matches stay
+unreported, and no placings or winner are saved. It leaves the active list and
+is shown under History, marked "Terminated", as a read-only record; the
+functions that enrol, pair and save results refuse to change it.
+
+Migration 4 widens the status rule on the `tournaments` table to allow this.
+SQLite cannot alter such a rule in place, so the table is rebuilt with every
+row copied across unchanged, after the usual backup.
 
 ## Reproducible pairings
 

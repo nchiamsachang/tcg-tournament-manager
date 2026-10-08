@@ -3,5 +3,31 @@
         <file>mtg.png</file>
         <file>optcg_logo.png</file>
         <file>pokemon.png</file>
+        <file>icons/arrow-left.svg</file>
+        <file>icons/arrow-right.svg</file>
+        <file>icons/bug.svg</file>
+        <file>icons/check.svg</file>
+        <file>icons/circle-check.svg</file>
+        <file>icons/circle-help.svg</file>
+        <file>icons/funnel.svg</file>
+        <file>icons/history.svg</file>
+        <file>icons/house.svg</file>
+        <file>icons/moon.svg</file>
+        <file>icons/octagon-x.svg</file>
+        <file>icons/pause.svg</file>
+        <file>icons/pencil.svg</file>
+        <file>icons/play.svg</file>
+        <file>icons/plus.svg</file>
+        <file>icons/printer.svg</file>
+        <file>icons/search.svg</file>
+        <file>icons/settings.svg</file>
+        <file>icons/sun.svg</file>
+        <file>icons/swords.svg</file>
+        <file>icons/timer.svg</file>
+        <file>icons/trash-2.svg</file>
+        <file>icons/triangle-alert.svg</file>
+        <file>icons/trophy.svg</file>
+        <file>icons/user-plus.svg</file>
+        <file>icons/users.svg</file>
     </qresource>
 </RCC>

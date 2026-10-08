@@ -1,6 +1,10 @@
 #include "tournaments.h"
 
+#include "players.h"
+
 #include <QDate>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <stdexcept>
 
 using db::Row;
@@ -12,6 +16,13 @@ const QString PENDING = QStringLiteral("PENDING");
 const QString IN_PROGRESS = QStringLiteral("IN_PROGRESS");
 const QString COMPLETED = QStringLiteral("COMPLETED");
 const QString CANCELLED = QStringLiteral("CANCELLED");
+const QString TERMINATED = QStringLiteral("TERMINATED");
+
+const QStringList &supportedGames()
+{
+    static const QStringList games{"ONEPIECE", "POKEMON", "MTG"};
+    return games;
+}
 
 bool isValidRoundMinutes(int minutes)
 {
@@ -23,6 +34,8 @@ qint64 createTournament(const QString &name, const QString &game, int totalRound
 {
     if (name.trimmed().isEmpty())
         throw std::invalid_argument("A tournament needs a name.");
+    if (name.size() > MAX_NAME_LENGTH)
+        throw std::invalid_argument("A tournament name can be at most 100 characters.");
     if (totalRounds < 1)
         throw std::invalid_argument("A tournament needs at least one round.");
     if (!isValidRoundMinutes(roundTimeMins))
@@ -60,6 +73,75 @@ void updateTournamentStatus(qint64 tournamentId, const QString &status)
     db::exec("UPDATE tournaments SET status = ? WHERE tournament_id = ?", {status, tournamentId});
 }
 
+bool renameTournament(qint64 tournamentId, const QString &name)
+{
+    const QString wanted = name.trimmed();
+    if (wanted.isEmpty())
+        throw std::invalid_argument("A tournament needs a name.");
+    if (wanted.size() > MAX_NAME_LENGTH)
+        throw std::invalid_argument("A tournament name can be at most 100 characters.");
+    db::Tx tx;
+    const Row t = db::one("SELECT name FROM tournaments WHERE tournament_id = ?", {tournamentId});
+    if (t.isEmpty())
+        throw std::invalid_argument("That tournament does not exist.");
+    const QString previous = t["name"].toString();
+    if (previous == wanted)
+        return false;
+    db::exec("UPDATE tournaments SET name = ? WHERE tournament_id = ?", {wanted, tournamentId});
+    // Commander events keep an audit trail; other formats have none
+    const QString detail = QString::fromUtf8(
+        QJsonDocument(QJsonObject{{"from", previous}, {"to", wanted}}).toJson(QJsonDocument::Compact));
+    db::exec("INSERT INTO commander_audit (tournament_id, action, actor, detail_json) "
+             "SELECT tournament_id, 'EVENT_RENAMED', 'organizer', ? FROM commander_events WHERE tournament_id = ?",
+             {detail, tournamentId});
+    tx.commit();
+    return true;
+}
+
+static const char *ENDED_EARLY = "This tournament was ended early. Its rounds and results are a read-only record.";
+
+bool isTerminated(qint64 tournamentId)
+{
+    return db::value("SELECT status FROM tournaments WHERE tournament_id = ?", {tournamentId}).toString() == TERMINATED;
+}
+
+void requireNotTerminated(qint64 tournamentId)
+{
+    if (isTerminated(tournamentId))
+        throw std::logic_error(ENDED_EARLY);
+}
+
+bool terminateTournament(qint64 tournamentId)
+{
+    db::Tx tx;      // the status, the time and the clocks change together or not at all
+    const QString status = db::value("SELECT status FROM tournaments WHERE tournament_id = ?", {tournamentId}).toString();
+    if (status.isEmpty())
+        throw std::invalid_argument("That tournament does not exist.");
+    if (status == TERMINATED)
+        return false;       // a second click, or another window got there first
+    if (status == COMPLETED)
+        throw std::logic_error("This tournament is already finished.");
+
+    // a running clock keeps the seconds it had run; no clock of this tournament runs again
+    static const char *DB_NOW = "(julianday('now') - 2440587.5) * 86400.0";
+    for (const char *table : {"rounds", "commander_rounds"}) {
+        db::exec(QStringLiteral("UPDATE %1 SET timer_elapsed_secs = COALESCE(timer_elapsed_secs, 0) "
+                                "+ CAST(ROUND(MAX(0, %2 - timer_started_at)) AS INTEGER) "
+                                "WHERE tournament_id = ? AND timer_state = 'RUNNING' AND timer_started_at IS NOT NULL")
+                     .arg(table, DB_NOW), {tournamentId});
+        db::exec(QStringLiteral("UPDATE %1 SET timer_state = 'ENDED', timer_started_at = NULL WHERE tournament_id = ?")
+                     .arg(table), {tournamentId});
+    }
+    db::exec("UPDATE tournaments SET status = 'TERMINATED', terminated_at = DATETIME('now') WHERE tournament_id = ?",
+             {tournamentId});
+    // Commander events keep an audit trail; other formats have none
+    db::exec("INSERT INTO commander_audit (tournament_id, action, actor, detail_json) "
+             "SELECT tournament_id, 'EVENT_TERMINATED', 'organizer', '{\"stage\": \"' || stage || '\"}' "
+             "FROM commander_events WHERE tournament_id = ?", {tournamentId});
+    tx.commit();
+    return true;
+}
+
 GameStats gameStats(const QString &game)
 {
     GameStats stats;
@@ -72,15 +154,22 @@ GameStats gameStats(const QString &game)
                                    "JOIN tournaments t ON t.tournament_id = p.tournament_id "
                                    "WHERE t.game = ? AND p.status = 'REPORTED'", {game}).toInt();
     stats.topPlayers = db::query(
-        "SELECT p.display_name, SUM(e.match_wins) AS wins FROM enrollments e "
+        "SELECT p.player_id, p.display_name, SUM(e.match_wins) AS wins FROM enrollments e "
         "JOIN tournaments t ON t.tournament_id = e.tournament_id JOIN players p ON p.player_id = e.player_id "
         "WHERE t.game = ? GROUP BY e.player_id HAVING wins > 0 ORDER BY wins DESC, p.display_name COLLATE NOCASE LIMIT 4",
         {game});
+    // two leaders with the same name are told apart by id
+    const QSet<qint64> shared = pdb::sharedNameIds(stats.topPlayers);
+    for (Row &r : stats.topPlayers)
+        r["display_name"] = pdb::label(r["display_name"].toString(), r["player_id"].toLongLong(), shared);
     return stats;
 }
 
 qint64 enrollPlayer(qint64 tournamentId, qint64 playerId)
 {
+    requireNotTerminated(tournamentId);
+    if (pdb::isRemoved(playerId))
+        throw std::logic_error("This player was removed from the directory and cannot be registered.");
     try {
         return db::exec("INSERT INTO enrollments (tournament_id, player_id, deck_name) VALUES (?, ?, NULL)",
                         {tournamentId, playerId}).lastId;
@@ -91,19 +180,27 @@ qint64 enrollPlayer(qint64 tournamentId, qint64 playerId)
 
 void unenrollPlayer(qint64 tournamentId, qint64 playerId)
 {
+    requireNotTerminated(tournamentId);
     db::exec("DELETE FROM enrollments WHERE tournament_id = ? AND player_id = ?", {tournamentId, playerId});
 }
 
 Rows enrolledPlayers(qint64 tournamentId, bool includeDropped)
 {
-    return db::query(
+    Rows rows = db::query(
         QStringLiteral(
-            "SELECT p.player_id, p.display_name, e.enrollment_id, e.deck_name, e.match_points, e.match_wins, "
+            "SELECT p.player_id, p.display_name, p.deleted_at IS NOT NULL AS removed, e.enrollment_id, e.deck_name, "
+            "e.match_points, e.match_wins, "
             "e.match_losses, e.match_draws, e.omw_pct, e.gw_pct, e.ogw_pct, e.final_placement, e.dropped, e.drop_round "
             "FROM enrollments e JOIN players p ON p.player_id = e.player_id WHERE e.tournament_id = ? %1 "
             "ORDER BY e.match_points DESC, e.omw_pct DESC, p.display_name COLLATE NOCASE")
             .arg(includeDropped ? "" : "AND e.dropped = 0"),
         {tournamentId});
+    // the name as shown: with the id when another participant has the same name
+    const QSet<qint64> shared = pdb::tournamentDuplicates(tournamentId);
+    if (!shared.isEmpty())
+        for (Row &r : rows)
+            r["display_name"] = pdb::label(r["display_name"].toString(), r["player_id"].toLongLong(), shared);
+    return rows;
 }
 
 void updateEnrollmentStats(qint64 tournamentId, qint64 playerId, const QVariantMap &stats)
@@ -158,13 +255,19 @@ qint64 createMatch(qint64 roundId, qint64 tournamentId, qint64 player1, const QV
 Rows roundPairings(qint64 roundId)
 {
     Rows rows = db::query(
-        "SELECT m.match_id, m.table_number, m.player1_id, m.player2_id, m.winner, m.player1_game_wins, "
-        "m.player2_game_wins, p1.display_name AS player1_name, p2.display_name AS player2_name "
+        "SELECT m.match_id, m.tournament_id, m.table_number, m.player1_id, m.player2_id, m.winner, m.player1_game_wins, "
+        "m.player2_game_wins, p1.display_name AS player1_name, p2.display_name AS player2_name, "
+        "p1.deleted_at IS NOT NULL AS player1_removed, p2.deleted_at IS NOT NULL AS player2_removed "
         "FROM matches m JOIN players p1 ON p1.player_id = m.player1_id "
         "LEFT JOIN players p2 ON p2.player_id = m.player2_id WHERE m.round_id = ? ORDER BY m.table_number ASC",
         {roundId});
-    for (Row &r : rows)
+    const QSet<qint64> shared = rows.isEmpty() ? QSet<qint64>() : pdb::tournamentDuplicates(rows.first()["tournament_id"].toLongLong());
+    for (Row &r : rows) {
         r["result"] = r["winner"].toString() == "PENDING" ? QVariant() : r["winner"];
+        r["player1_name"] = pdb::label(r["player1_name"].toString(), r["player1_id"].toLongLong(), shared);
+        if (!r["player2_name"].isNull())
+            r["player2_name"] = pdb::label(r["player2_name"].toString(), r["player2_id"].toLongLong(), shared);
+    }
     return rows;
 }
 
@@ -186,6 +289,8 @@ void reportMatchResult(qint64 matchId, const QString &result)
         throw std::logic_error("A bye has no result to report.");
     if (match["status"].toString() == COMPLETED)
         throw std::logic_error("This tournament is finished; its results can no longer be changed.");
+    if (match["status"].toString() == TERMINATED)
+        throw std::logic_error(ENDED_EARLY);
     if (match["round_id"] != match["latest_round"])
         throw std::logic_error("Only results in the current round can be changed.");
     db::exec("UPDATE matches SET winner = ? WHERE match_id = ?",

@@ -14,6 +14,7 @@ struct RoundStatus {
     int roundNumber = 1;
     int totalRounds = 0;        // the configured number of rounds, which is the whole tournament
     bool needsFinish = false;   // every round is played but the event was never closed (earlier-version playoffs)
+    bool terminated = false;    // ended early: nothing is being played and no clock applies
 };
 
 RoundStatus roundStatus(qint64 tournamentId);

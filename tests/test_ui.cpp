@@ -10,6 +10,8 @@
 
 #include <QCryptographicHash>
 #include <QListView>
+#include <QMessageBox>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QWheelEvent>
 #include <QScreen>
@@ -55,6 +57,36 @@ QByteArray databaseFingerprint()
     if (!f.open(QIODevice::ReadOnly))
         return {};
     return QCryptographicHash::hash(f.readAll(), QCryptographicHash::Sha256);
+}
+
+// Answers the dialog that the next click opens: presses the button with that label, or Escape
+// for "<esc>", or Enter for "<enter>".  `seen` receives the dialog's title and text.
+void answerNextDialog(const QString &answer, QString *seen = nullptr)
+{
+    QTimer::singleShot(200, qApp, [answer, seen] {
+        QWidget *dlg = QApplication::activeModalWidget();
+        if (!dlg)
+            return;
+        if (seen) {
+            QStringList text{dlg->windowTitle()};
+            for (QLabel *l : dlg->findChildren<QLabel *>())
+                text << l->text().remove(QChar(0x200B));
+            *seen = text.join(" | ");
+        }
+        if (answer == "<esc>") {
+            QTest::keyClick(dlg, Qt::Key_Escape);
+        } else if (answer == "<enter>") {
+            QTest::keyClick(dlg, Qt::Key_Return);
+        } else {
+            for (QPushButton *b : dlg->findChildren<QPushButton *>()) {
+                if (b->text() == answer) {
+                    b->click();
+                    return;
+                }
+            }
+            dlg->close();
+        }
+    });
 }
 
 } // namespace
@@ -202,14 +234,15 @@ private slots:
         QVERIFY(w_->themeBtn->accessibleName().contains("mode"));
         // a circular gear in the top-right corner, with a tooltip, a name for screen readers and keyboard focus
         QCOMPARE(w_->gearBtn->size(), QSize(44, 44));
-        QCOMPARE(w_->gearBtn->text(), QStringLiteral("⚙"));
+        QVERIFY2(w_->gearBtn->text().isEmpty() && !w_->gearBtn->icon().isNull(), "an icon, not a text symbol");
         QCOMPARE(w_->gearBtn->toolTip(), QString("Settings"));
         QVERIFY(w_->gearBtn->styleSheet().contains("border-radius:22px"));
         QVERIFY(w_->gearBtn->styleSheet().contains("QPushButton:focus"));
         QVERIFY(w_->gearBtn->focusPolicy() & Qt::TabFocus);
         int rightmost = 0;
-        for (QPushButton *b : buttons(w_.get()))
-            rightmost = qMax(rightmost, b->mapTo(w_.get(), QPoint(b->width(), 0)).x());
+        for (QPushButton *b : w_->findChildren<QPushButton *>())        // (icon-only buttons share an empty label)
+            if (b->isVisible())
+                rightmost = qMax(rightmost, b->mapTo(w_.get(), QPoint(b->width(), 0)).x());
         QCOMPARE(w_->gearBtn->mapTo(w_.get(), QPoint(w_->gearBtn->width(), 0)).x(), rightmost);
         QCOMPARE(w_->themeBtn->size(), QSize(44, 44));
         const QStringList texts = buttons(w_.get()).keys();
@@ -281,17 +314,123 @@ private slots:
         QVERIFY(!w_->toast->isVisible());
     }
 
-    void footerTextAndIssueLink()
+    void everyIconIsBuiltInAndTakesItsColour()
+    {
+        const QStringList names = QDir(":/assets/icons").entryList({"*.svg"});
+        QVERIFY(names.size() >= 20);
+        for (const QString &file : names) {
+            const QString name = QFileInfo(file).completeBaseName();
+            const QImage red = T::iconPixmap(name, "#ff0000", 18).toImage();
+            QVERIFY2(!red.isNull(), qPrintable(name));
+            bool drawn = false;
+            for (int y = 0; y < red.height() && !drawn; ++y)
+                for (int x = 0; x < red.width() && !drawn; ++x) {
+                    const QColor c = red.pixelColor(x, y);
+                    drawn = c.alpha() == 255 && c.red() == 255 && c.green() == 0 && c.blue() == 0;
+                }
+            QVERIFY2(drawn, qPrintable(name + " is drawn in the colour asked for"));
+        }
+        QVERIFY(T::iconPixmap("no-such-icon", "#ff0000").isNull());
+        // icon-only controls: a name and a tooltip, no text symbol, at least 44 by 44
+        go<HomeScreen>("home");
+        for (QPushButton *b : {w_->themeBtn, w_->gearBtn, w_->backBtn}) {
+            QVERIFY(b->text().isEmpty() && !b->icon().isNull());
+            QVERIFY(!b->toolTip().isEmpty() && !b->accessibleName().isEmpty());
+            QVERIFY2(b->width() >= 44 && b->height() >= 44,
+                     qPrintable(QStringLiteral("%1 is %2x%3").arg(b->accessibleName()).arg(b->width()).arg(b->height())));
+        }
+        // the theme icon shows the action: a different picture in each theme
+        const QImage before = w_->themeBtn->icon().pixmap(22).toImage();
+        w_->toggleTheme();
+        QVERIFY(w_->themeBtn->icon().pixmap(22).toImage() != before);
+        w_->toggleTheme();
+    }
+
+    void aQuietFooterEndsEveryMainPage()
     {
         HomeScreen *home = go<HomeScreen>("home");
-        const QString text = labelText(home);
-        QVERIFY(text.contains("Organize trading card tournaments, manage players, and keep every round running smoothly. "
-                              "Track pairings, standings, and results for formats including MTG Modern and Commander."));
-        QPushButton *link = buttons(home).value(QStringLiteral("Report an issue ↗"));
-        QVERIFY(link);
-        QCOMPARE(link->toolTip(), QString("https://github.com/nchiamsachang/tcg-tournament-manager/issues"));
-        for (const char *banned : {"Design notes", "Copy prompt", "Claude", "Demo data", "Founded by"})
-            QVERIFY2(!text.contains(banned), banned);
+        QVERIFY(labelText(home).contains("Organize trading card tournaments, manage players, and keep every round running smoothly. "
+                                         "Track pairings, standings, and results for formats including MTG Modern and Commander."));
+        const qint64 mod = modern();
+        const qint64 cmd = commander({"Ed", "Flo", "Gus", "Hal"}, 2);
+        const qint64 pending = modern({"Ida", "Jo"}, 45, 2, false, "Pending Modern");
+        const qint64 pid = pdb::allPlayers().first()["player_id"].toLongLong();
+        const QList<QPair<QString, QVariantMap>> pages{
+            {"home", {}}, {"mtg_hub", {}}, {"players", {}}, {"player_profile", {{"player_id", pid}}},
+            {"tournament_setup", {{"game", "MTG"}}}, {"registration", {{"tournament_id", pending}}},
+            {"round", {{"tournament_id", mod}}}, {"standings", {{"tournament_id", mod}}},
+            {"round", {{"tournament_id", cmd}}}, {"standings", {{"tournament_id", cmd}}},
+        };
+        for (const QString &mode : {QString("dark"), QString("light")}) {
+            prefs::setPref("theme", mode);
+            w_->restyle();
+            for (const QSize &size : {QSize(1180, 780), QSize(360, 480)}) {         // roomy, and narrow and short
+                w_->resize(size);
+                for (const auto &page : pages) {
+                    w_->navigateTo(page.first, page.second);
+                    settle();
+                    const QByteArray where = QStringLiteral("%1 %2 %3x%4").arg(page.first, mode).arg(size.width()).arg(size.height()).toUtf8();
+                    const QList<QWidget *> footers = w_->currentScreen()->findChildren<QWidget *>("pageFooter");
+                    QVERIFY2(footers.size() == 1, where);
+                    QWidget *footer = footers.first();
+                    QPushButton *bug = footer->findChild<QPushButton *>();
+                    QVERIFY2(bug && bug->text() == "Report a bug", where);
+                    QVERIFY2(bug->toolTip() == "https://github.com/nchiamsachang/tcg-tournament-manager/issues", where);
+                    QVERIFY2(bug->toolTip() == prefs::issuesUrl(), where);         // the address the app is configured with
+                    QVERIFY2(bug->focusPolicy() & Qt::TabFocus, where);
+                    QVERIFY2(bug->height() >= T::MIN_HIT - 1, where);
+                    QVERIFY2(bug->font().pixelSize() <= T::px(12), where);         // small text
+                    QVERIFY2(labelText(footer).contains("Produced by Nathan Chiamsachang"), where);
+                    // small: one line when there is room, never more than two short ones
+                    QVERIFY2(footer->height() <= (size.width() > 700 ? 56 : 104), where + " " + QByteArray::number(footer->height()));
+                    // it is the last thing in the page's scrolling content, below everything else there
+                    auto *area = qobject_cast<QScrollArea *>(footer->parentWidget()->parentWidget()->parentWidget());
+                    QVERIFY2(area, where);
+                    QWidget *content = area->widget();
+                    QVERIFY2(footer->mapTo(content, QPoint(0, footer->height())).y() == content->height(), where);
+                    for (QWidget *other : content->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+                        if (other != footer && other->isVisible())
+                            QVERIFY2(other->geometry().bottom() < footer->geometry().top() + 1, where + " nothing overlaps it");
+                    QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
+                }
+            }
+        }
+        // none of the old footer wording, and nothing of the kind in a dialog
+        const QString homeText = labelText(go<HomeScreen>("home"));
+        for (const char *banned : {"Design notes", "Copy prompt", "Claude", "Demo data", "Founded by", "Report an issue"})
+            QVERIFY2(!homeText.contains(banned), banned);
+        SettingsDialog settings(w_.get());
+        QVERIFY(settings.findChildren<QWidget *>("pageFooter").isEmpty());
+    }
+
+    void brandingIsLargerAndStillFits()
+    {
+        go<HomeScreen>("home");
+        QCOMPARE(w_->logo->size(), QSize(36, 36));                      // was 30: 20% larger
+        QCOMPARE(w_->logo->pixmap().deviceIndependentSize().toSize(), QSize(T::px(19), T::px(19)));     // was 16
+        QCOMPARE(w_->appLabel->font().pixelSize(), T::px(18));          // was 15
+        for (const QString &textSize : {QString("standard"), QString("large")}) {
+            prefs::setPref("text_size", textSize);
+            w_->restyle();
+            for (int width : {1180, 800, 640, 600, 480, 420, 360}) {
+                w_->resize(width, 600);
+                settle();
+                const QByteArray where = (textSize + " " + QString::number(width)).toUtf8();
+                // the name beside the logo is centred on it, and neither is cut off or runs into the tabs
+                if (w_->appLabel->isVisible()) {
+                    QVERIFY2(w_->appLabel->width() >= w_->appLabel->sizeHint().width(), where);
+                    QVERIFY2(qAbs(w_->appLabel->geometry().center().y() - w_->logo->geometry().center().y()) <= 1, where);
+                    QVERIFY2(w_->appLabel->geometry().right() < w_->navButtons["home"]->geometry().left(), where);
+                }
+                if (w_->logo->isVisible())
+                    QVERIFY2(w_->logo->parentWidget()->height() >= w_->logo->height() + 8, where);
+                for (QPushButton *b : {w_->navButtons["home"], w_->navButtons["players"], w_->themeBtn, w_->gearBtn}) {
+                    QVERIFY2(b->isVisible() && b->width() >= b->sizeHint().width(), where);
+                    QVERIFY2(b->mapTo(w_.get(), QPoint(b->width(), 0)).x() <= w_->width(), where);
+                }
+                QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
+            }
+        }
     }
 
     void everyControlIsKeyboardReachable()
@@ -426,13 +565,13 @@ private slots:
             reg->addAndEnroll();
         }
         QCOMPARE(tdb::enrolledPlayers(tid).size(), 4);
-        QVERIFY(buttons(reg).contains(QStringLiteral("Start tournament  →")));
+        QVERIFY(buttons(reg).contains(QStringLiteral("Start tournament")));
         reg->confirmStart();
         settle();
 
         auto *round = qobject_cast<RoundScreen *>(w_->currentScreen());
         QVERIFY(round);
-        QVERIFY2(buttons(round).contains(QStringLiteral("🖨  Print")), "Print is offered inside the round");
+        QVERIFY2(buttons(round).contains(QStringLiteral("Print")), "Print is offered inside the round");
         QCOMPARE(timerdb::get(timerdb::Kind::OneOnOne, round->currentRoundId).limit, 35 * 60);
         QVERIFY(!round->nextRoundBtn->isEnabled());
         for (const db::Row &m : tdb::roundPairings(round->currentRoundId))
@@ -484,7 +623,7 @@ private slots:
         settle();
         auto *ev = qobject_cast<CommanderEventScreen *>(w_->currentScreen());
         QVERIFY(ev);
-        QVERIFY(buttons(ev).contains(QStringLiteral("🖨  Print")));
+        QVERIFY(buttons(ev).contains(QStringLiteral("Print")));
         QCOMPARE(timerdb::get(timerdb::Kind::Commander, ev->state["rounds"].toList().last().toMap()["round_id"].toLongLong()).limit, 80 * 60);
 
         for (int number = 1; number <= 3; ++number) {
@@ -496,7 +635,7 @@ private slots:
                 QVERIFY2(!shown.contains(word), word);
             const bool last = buttons(ev).contains("Finish tournament");
             QVERIFY2(last == (number == 3), "Finish tournament is offered on the last round only");
-            const QString closing = last ? QString("Finish tournament") : QStringLiteral("Finalize Round %1  →").arg(number);
+            const QString closing = last ? QString("Finish tournament") : QStringLiteral("Finalize Round %1").arg(number);
             QVERIFY2(!buttons(ev).value(closing)->isEnabled(), "not until every pod has a result");
             for (const QVariant &pv : rnd["pods"].toList()) {
                 const QVariantMap pod = pv.toMap();
@@ -506,7 +645,7 @@ private slots:
                 QVERIFY(buttons(ev).value(closing)->isEnabled());
                 ev->finalizeRound(ev->state["rounds"].toList().last().toMap());
                 QVERIFY2(ev->state["rounds"].toList().size() == number, "finalizing does not create a round by itself");
-                buttons(ev).value(QStringLiteral("Start Round %1  →").arg(number + 1))->click();
+                buttons(ev).value(QStringLiteral("Start Round %1").arg(number + 1))->click();
                 settle();
                 QCOMPARE(ev->state["rounds"].toList().size(), number + 1);
             }
@@ -540,7 +679,7 @@ private slots:
         // reopening restores the finished state: read-only rounds, no way to add one
         auto *done = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
         const QStringList names = buttons(done).keys();
-        QVERIFY(names.contains(QStringLiteral("View final standings  →")));
+        QVERIFY(names.contains(QStringLiteral("View final standings")));
         for (const QString &label : names)
             QVERIFY2(!label.startsWith("Start Round") && !label.startsWith("Finalize") && !label.startsWith("Finish")
                      && label != "Wins", qPrintable(label));
@@ -588,7 +727,7 @@ private slots:
         QVERIFY(ev->title->text().startsWith("Round 2"));       // the last scheduled round, not the old final
         QHash<QString, QPushButton *> shown = buttons(ev);
         QVERIFY(shown.contains(QStringLiteral("Final pod · earlier version")));
-        QVERIFY(!shown.contains("Wins") && !shown.contains(QStringLiteral("Start Round 3  →")));
+        QVERIFY(!shown.contains("Wins") && !shown.contains(QStringLiteral("Start Round 3")));
         shown.value(QStringLiteral("Final pod · earlier version"))->click();
         shown = buttons(ev);
         QVERIFY(labelText(ev).contains(QStringLiteral("Read-only record · not counted")));
@@ -725,7 +864,7 @@ private slots:
                         w_->grab().save(qEnvironmentVariable("TCG_UI_SHOTS") + "/players_" + QString::fromUtf8(where).replace(' ', '_') + ".png");
                     QHash<QString, QStringList> tagsOf;
                     QHash<QString, QFrame *> rowOf;
-                    QSet<int> nameColumns;
+                    QSet<int> nameColumns, tagColumns;
                     for (QFrame *row : dir->findChildren<QFrame *>("pr")) {
                         if (!row->isVisible())
                             continue;           // rows from before the last re-layout, waiting to be deleted
@@ -734,12 +873,15 @@ private slots:
                         QVERIFY2(nameStrip && tagStrip, where);
                         const QString name = nameStrip->label->text();
                         QVERIFY2(nameStrip->toolTip() == name, where);                  // the full name is always available
-                        // [tags]  16-24px  [name]: the tag area is on the left, the name to its right
-                        const int tagsRight = tagStrip->mapTo(row, QPoint(tagStrip->width(), 0)).x();
+                        // [name]  16-24px  [tags]: the name is on the left, the tag area to its right
+                        const int nameRight = nameStrip->mapTo(row, QPoint(nameStrip->width(), 0)).x();
                         const int nameX = nameStrip->mapTo(row, QPoint(0, 0)).x();
-                        QVERIFY2(nameX - tagsRight >= 16 && nameX - tagsRight <= 24,
-                                 where + QStringLiteral(" gap %1").arg(nameX - tagsRight).toUtf8());
+                        const int tagsX = tagStrip->mapTo(row, QPoint(0, 0)).x();
+                        QVERIFY2(tagsX - nameRight >= 16 && tagsX - nameRight <= 24,
+                                 where + QStringLiteral(" gap %1").arg(tagsX - nameRight).toUtf8());
+                        QVERIFY2(nameX < tagsX && nameX <= 16, where + " the name starts at the row's left edge");
                         nameColumns.insert(nameX);
+                        tagColumns.insert(tagsX);
                         QStringList tags;
                         int tagY = -1;
                         for (QLabel *l : tagStrip->tags) {
@@ -764,8 +906,9 @@ private slots:
                     if (size.width() >= 1024)
                         QVERIFY2(rowOf[LONG_NAME]->findChild<T::TagStrip *>()->horizontalScrollBar()->maximum() == 0, where);
                     QVERIFY2(nameColumns.size() == 1, where + " names start at the same place in every row");
+                    QVERIFY2(tagColumns.size() == 1, where + " and so do the tags, to their right");
                     // one tag per game; two Modern events are still one Magic tag
-                    QVERIFY2(tagsOf[LONG_NAME] == (QStringList{QStringLiteral("Pokémon"), "One Piece", "Magic"}), where);
+                    QVERIFY2(tagsOf[LONG_NAME] == (QStringList{"One Piece", QStringLiteral("Pokémon"), "Magic"}), where);
                     QVERIFY2(tagsOf["Bo"] == tagsOf[LONG_NAME], where);
                     for (const QString &none : {QString("Cy"), QString("Di"), QString("Newcomer")}) {
                         QVERIFY2(tagsOf[none].isEmpty(), where);
@@ -861,7 +1004,9 @@ private slots:
                 const QByteArray where = QStringLiteral("%1 %2x%3").arg(textSize).arg(size.width()).arg(size.height()).toUtf8();
 
                 // check players in and out again from the top, the middle and the bottom of the list
-                for (double fraction : {0.12, 0.5, 0.86}) {      // (the very top of a short window shows only the search form)
+                // (the very top of a short window shows only the search form, and the very bottom the
+                // event settings and the page footer)
+                for (double fraction : {0.12, 0.5, 0.8}) {
                     const int target = int(bar->maximum() * fraction);
                     bar->setValue(target);
                     settle();
@@ -1068,7 +1213,7 @@ private slots:
                 QVERIFY2(qAbs(gaps.first - gaps.second) <= 1, where + QStringLiteral(" results panel %1/%2").arg(gaps.first).arg(gaps.second).toUtf8());
                 QVERIFY2(gaps.first >= 10, where);
                 QVERIFY2(results->panel->width() <= 760, where);
-                QVERIFY2(buttons(results).contains(QStringLiteral("View final standings  →")), where);
+                QVERIFY2(buttons(results).contains(QStringLiteral("View final standings")), where);
                 QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
 
                 // the standings tables (one-on-one and Commander), with a page long enough to scroll
@@ -1216,6 +1361,1067 @@ private slots:
         QCOMPARE(tdb::currentRound(tid)["round_number"].toInt(), 1);
         clock.resetBtn->click();
         QCOMPARE(clock.display->text(), QString("45:00"));
+    }
+
+    // The game filter on the Players page.
+
+    void playersCanBeFilteredByTheGamesTheyHavePlayed()
+    {
+        // Ana: One Piece and Pokémon.  Bo: Pokémon and Magic (Modern).  Cy: Magic (Commander).
+        // Di, Ed, Flo, Gus: in the Commander pod only.  Newcomer: registered for something, played nothing.
+        const QList<qint64> ids = players({"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus", "Newcomer"});
+        const auto played = [&](const QString &game, const QString &format, const QList<int> &who) {
+            const qint64 t = tdb::createTournament(game + " " + format, game, 1, format);
+            for (int i : who)
+                tdb::enrollPlayer(t, ids[i]);
+            swiss::startTournament(t);
+        };
+        played("ONEPIECE", "Standard", {0, 3});
+        played("POKEMON", "Standard", {0, 1});
+        played("MTG", "Modern", {1, 4});
+        const qint64 cmd = cdb::createCommanderTournament("Commander", 4, 1, {}, 5);
+        for (int i : {2, 4, 5, 6})
+            tdb::enrollPlayer(cmd, ids[i]);
+        cdb::startEvent(cmd);
+        tdb::enrollPlayer(tdb::createTournament("Not started", "POKEMON", 1, "Standard"), ids[7]);
+
+        auto *dir = go<PlayersScreen>("players");
+        const auto shown = [&] {
+            settle();
+            QStringList names;
+            for (QFrame *row : dir->findChildren<QFrame *>("pr"))
+                if (row->isVisible())
+                    names << row->findChild<T::NameScroll *>()->label->text();
+            names.sort();
+            return names;
+        };
+        const QStringList everyone{"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus", "Newcomer"};
+        // All games is the default, and includes players with no history
+        QVERIFY(dir->gameFilter().isEmpty());
+        QCOMPARE(shown(), everyone);
+        QCOMPARE(dir->filterBtn->text(), QString("Filter"));
+        QVERIFY(!dir->filterBtn->icon().isNull());
+        QCOMPARE(dir->countLabel->text(), QString("8 players"));
+        QVERIFY(dir->filterBtn->geometry().left() > dir->searchBox->geometry().left());      // beside the search field
+        QVERIFY(qAbs(dir->filterBtn->geometry().center().y() - dir->searchBox->geometry().center().y()) <= 2);
+
+        // one game
+        dir->setGameChecked("ONEPIECE", true);
+        QCOMPARE(shown(), (QStringList{"Ana", "Di"}));
+        QCOMPARE(dir->filterBtn->text(), QStringLiteral("Filter · 1"));
+        QVERIFY(dir->filterBtn->styleSheet().contains("border:3px solid " + T::PURPLE_LT));  // marked as on
+        QVERIFY(dir->filterBtn->accessibleName().contains("One Piece"));
+        QCOMPARE(dir->countLabel->text(), QString("2 of 8 players"));
+        // several games: anyone who has played ANY of them.  Modern and Commander are both Magic.
+        dir->setGameChecked("MTG", true);
+        QCOMPARE(shown(), (QStringList{"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus"}));
+        QCOMPARE(dir->filterBtn->text(), QStringLiteral("Filter · 2"));
+        dir->setGameChecked("ONEPIECE", false);
+        QCOMPARE(shown(), (QStringList{"Bo", "Cy", "Ed", "Flo", "Gus"}));
+        // with the name search
+        dir->searchBox->setText("o");
+        QTest::qWait(400);
+        QCOMPARE(shown(), (QStringList{"Bo", "Flo"}));
+        QCOMPARE(dir->countLabel->text(), QString("2 of 3 players"));       // of the three names with an "o"
+        dir->searchBox->setText("Newc");
+        QTest::qWait(400);
+        QVERIFY(shown().isEmpty());
+        QLabel *empty = dir->findChild<QLabel *>("noPlayers");
+        QVERIFY(empty && empty->isVisible());
+        const QString emptyText = empty->text().remove(QChar(0x200B));
+        QVERIFY2(emptyText.contains("Newc") && emptyText.contains("Magic: The Gathering") && emptyText.contains("All games"),
+                 qPrintable(emptyText));
+        dir->searchBox->clear();
+        QTest::qWait(400);
+        // unticking the last game goes back to All games
+        dir->setGameChecked("MTG", false);
+        QVERIFY(dir->gameFilter().isEmpty());
+        QCOMPARE(shown(), everyone);
+        QCOMPARE(dir->filterBtn->text(), QString("Filter"));
+        QVERIFY(!dir->filterBtn->styleSheet().contains("border:3px solid " + T::PURPLE_LT));
+        // ticking All games clears the games
+        dir->setGameChecked("POKEMON", true);
+        dir->setGameChecked("MTG", true);
+        dir->setGameChecked(QString(), true);
+        QVERIFY(dir->gameFilter().isEmpty());
+        QCOMPARE(shown(), everyone);
+
+        // the menu: one box for All games and one per supported game, opaque and themed, staying open while ticking
+        for (const QString &mode : {QString("dark"), QString("light")}) {
+            prefs::setPref("theme", mode);
+            w_->restyle();
+            dir = qobject_cast<PlayersScreen *>(w_->currentScreen());
+            QVERIFY(dir);
+            QStringList labels;
+            dir->filterBtn->click();
+            settle();
+            QFrame *menu = dir->filterMenu();
+            QVERIFY(menu && menu->isVisible());
+            const QList<QCheckBox *> boxes = menu->findChildren<QCheckBox *>();
+            QCOMPARE(boxes.size(), 1 + int(tdb::supportedGames().size()));      // All games, then one per supported game
+            const auto read = [&] {
+                for (QCheckBox *b : boxes)
+                    labels << b->text() + (b->isChecked() ? " [x]" : " [ ]");
+            };
+            read();
+            // opaque, in the theme's surface colour, under the button and inside the window
+            const bool checked = !menu->testAttribute(Qt::WA_TranslucentBackground)
+                                 && menu->styleSheet().contains("background:" + T::SURFACE2);
+            QVERIFY(menu->mapToGlobal(QPoint(0, 0)).y() >= dir->filterBtn->mapToGlobal(QPoint(0, dir->filterBtn->height())).y());
+            QVERIFY(menu->mapToGlobal(QPoint(menu->width(), 0)).x() <= w_->mapToGlobal(QPoint(w_->width(), 0)).x());
+            for (QCheckBox *b : boxes) {                    // real, labelled, keyboard-reachable checkboxes
+                QVERIFY(b->focusPolicy() & Qt::TabFocus);
+                QVERIFY(!b->text().isEmpty() && b->height() >= T::MIN_HIT - 1);
+            }
+            boxes[2]->click();              // Pokémon
+            boxes[3]->click();              // Magic
+            labels << "then";
+            read();
+            labels << (menu->isVisible() ? "open" : "closed");
+            QTest::keyClick(boxes[0], Qt::Key_Space);       // All games again, by keyboard
+            labels << "then";
+            read();
+            QTest::keyClick(menu, Qt::Key_Escape);
+            settle();
+            QVERIFY(!dir->filterMenu() || !dir->filterMenu()->isVisible());
+            const QStringList expected{
+                "All games [x]", "One Piece [ ]", QStringLiteral("Pokémon [ ]"), "Magic: The Gathering [ ]", "then",
+                "All games [ ]", "One Piece [ ]", QStringLiteral("Pokémon [x]"), "Magic: The Gathering [x]", "open", "then",
+                "All games [x]", "One Piece [ ]", QStringLiteral("Pokémon [ ]"), "Magic: The Gathering [ ]"};
+            QCOMPARE(labels, expected);
+            QVERIFY2(checked, "the menu is opaque and uses the theme's surface colour");
+            QVERIFY(dir->gameFilter().isEmpty());
+        }
+        // one entry per supported game, in that list's order
+        QCOMPARE(tdb::supportedGames().size(), 3);
+
+        // filtering a long list does not move the page
+        QStringList many;
+        for (int i = 0; i < 40; ++i)
+            many << QStringLiteral("Extra %1").arg(i, 2, 10, QChar('0'));
+        const QList<qint64> extra = players(many);
+        const qint64 big = tdb::createTournament("Big Pokemon", "POKEMON", 1, "Standard");
+        for (qint64 p : extra)
+            tdb::enrollPlayer(big, p);
+        swiss::startTournament(big);
+        w_->resize(900, 500);
+        dir = go<PlayersScreen>("players");
+        QScrollBar *bar = dir->findChild<QScrollArea *>()->verticalScrollBar();
+        settle();
+        QVERIFY(bar->maximum() > 400);
+        bar->setValue(300);
+        dir->setGameChecked("POKEMON", true);           // 42 of the 48 remain: the list is still longer than the window
+        settle();
+        QCOMPARE(bar->value(), 300);
+        dir->setGameChecked(QString(), true);
+        settle();
+        QCOMPARE(bar->value(), 300);
+    }
+
+    // Ending a tournament early.
+
+    void endingATournamentEarlyAsksFirstAndKeepsItAsATerminatedRecord()
+    {
+        const qint64 tid = modern({"Ana", "Bo", "Cy", "Di", "Ed"}, 45, 3, true, "Cut Short Cup");
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        for (const db::Row &m : tdb::roundPairings(rid)) {
+            if (!m["player2_id"].isNull()) {
+                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                break;
+            }
+        }
+        const qint64 playerId = tdb::enrolledPlayers(tid).first()["player_id"].toLongLong();
+        auto *round = go<RoundScreen>("round", {{"tournament_id", tid}});
+        QVERIFY(round && round->endEarlyBtn && round->endEarlyBtn->isVisible());
+        QCOMPARE(round->endEarlyBtn->text(), QString("End tournament early"));
+        QVERIFY(!round->endEarlyBtn->icon().isNull());
+        QVERIFY(round->endEarlyBtn->styleSheet().contains(T::RED));                         // the destructive style
+        // apart from the routine round actions, which are in the bar at the bottom
+        QVERIFY(round->endEarlyBtn->parentWidget() != round->nextRoundBtn->parentWidget());
+        QVERIFY(w_->tabButton(tid));
+        const db::Rows matches = tdb::allMatches(tid);
+
+        // keeping it: the button, Escape, Enter (the default) and closing the window all change nothing
+        QString seen;
+        for (const QString &answer : {QString("Keep tournament"), QString("<esc>"), QString("<enter>"), QString("no such button")}) {
+            seen.clear();
+            answerNextDialog(answer, &seen);
+            round->endEarlyBtn->click();
+            settle();
+            QVERIFY2(!seen.isEmpty(), qPrintable(answer));
+            QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::IN_PROGRESS);
+            QVERIFY(tdb::tournamentById(tid)["terminated_at"].isNull());
+            QCOMPARE(tdb::allMatches(tid), matches);
+            QVERIFY(w_->tabButton(tid));
+            QCOMPARE(w_->currentScreen(), round);
+        }
+        QVERIFY2(seen.startsWith("End this tournament early?"), qPrintable(seen));
+        QVERIFY2(seen.contains(QStringLiteral("This will end Cut Short Cup and remove it from active tournaments. Its saved rounds and "
+                                              "results will remain in History, marked \u2018Terminated.\u2019 Unreported matches "
+                                              "will remain unfinished.")), qPrintable(seen));
+        // the safe button is the default one
+        QTimer::singleShot(200, qApp, [] {
+            QWidget *dlg = QApplication::activeModalWidget();
+            QStringList defaults;
+            for (QPushButton *b : dlg->findChildren<QPushButton *>())
+                if (b->isDefault())
+                    defaults << b->text();
+            dlg->setProperty("defaults", defaults);
+            QTest::keyClick(dlg, Qt::Key_Escape);
+        });
+        setAutoConfirm(true);                           // "answer yes to everything" does not apply to this question
+        round->endEarlyBtn->click();
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::IN_PROGRESS);
+
+        // ending it
+        timerdb::start(timerdb::Kind::OneOnOne, rid);
+        answerNextDialog("End tournament");
+        round->endEarlyBtn->click();
+        settle();
+        const db::Row ended = tdb::tournamentById(tid);
+        QCOMPARE(ended["status"].toString(), tdb::TERMINATED);
+        QVERIFY(!ended["terminated_at"].toString().isEmpty());
+        QCOMPARE(tdb::allMatches(tid), matches);                // results and the unreported matches exactly as they were
+        QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, rid).closed);
+        QVERIFY(!w_->tabButton(tid));                           // no longer among the active tournaments
+        QCOMPARE(w_->liveTabCount(), 0);
+        QVERIFY(w_->toast->isVisible() && w_->toastLabel->text().remove(QChar(0x200B)).contains("ended early"));
+        auto *hub = qobject_cast<HubScreen *>(w_->currentScreen());
+        QVERIFY(hub);
+        const auto historyRow = [&](HubScreen *h) -> T::ClickFrame * {
+            for (T::ClickFrame *r : h->findChildren<T::ClickFrame *>())
+                if (r->isVisible() && r->accessibleName() == "Cut Short Cup, terminated")
+                    return r;
+            return nullptr;
+        };
+        QVERIFY(historyRow(hub));
+        QString rowText = labelText(historyRow(hub));
+        QVERIFY2(rowText.contains("Terminated") && rowText.contains("Ended early in round 1 of 3"), qPrintable(rowText));
+        QVERIFY2(!rowText.contains("remaining") && !rowText.contains("Round in progress"), qPrintable(rowText));
+        QVERIFY(labelText(hub).contains("No active tournaments"));
+
+        // after a restart it is still a terminated record, and nothing counts down
+        w_.reset();
+        db::closeThreadConnection();
+        openWindow();
+        QVERIFY(!w_->tabButton(tid));
+        QCOMPARE(w_->liveTabCount(), 0);
+        hub = go<HubScreen>("mtg_hub");
+        QVERIFY(historyRow(hub));
+        QTest::mouseClick(historyRow(hub), Qt::LeftButton);
+        settle();
+        auto *select = qobject_cast<RoundSelectScreen *>(w_->currentScreen());
+        QVERIFY(select);
+        QVERIFY(labelText(select).contains("Terminated"));
+        QVERIFY(!labelText(select).contains("Tournament complete"));
+        QVERIFY(buttons(select).contains("View standings") && buttons(select).contains("Round 1"));
+        // the round is a read-only record
+        round = go<RoundScreen>("round", {{"tournament_id", tid}, {"round_number", 1}});
+        QVERIFY(round);
+        QVERIFY(!round->endEarlyBtn);
+        QVERIFY(!round->findChild<TimerWidget *>());
+        QVERIFY(!round->nextRoundBtn->isVisible() && !round->finalizeBtn->isVisible());
+        QVERIFY(!buttons(round).contains("Undo"));
+        for (T::WrapButton *b : round->findChildren<T::WrapButton *>())
+            QVERIFY(!b->isEnabled());
+        const QString roundText = labelText(round);
+        QVERIFY2(roundText.contains("Terminated. This tournament was ended early"), qPrintable(roundText));
+        QVERIFY(roundText.contains("Awaiting result"));         // unreported matches are shown as they are
+        QVERIFY(labelText(go<StandingsScreen>("standings", {{"tournament_id", tid}})).contains("Terminated"));
+        auto *profile = go<PlayerProfileScreen>("player_profile", {{"player_id", playerId}});
+        QVERIFY(labelText(profile).contains("Terminated"));
+        QCOMPARE(tdb::allMatches(tid), matches);
+    }
+
+    void endingACommanderEventEarlyLeavesAReadOnlyRecord()
+    {
+        const qint64 tid = commander({"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus", "Hal"}, 3, true, 80, "Cut Short Commander");
+        const QVariantMap rnd = cdb::getRounds(tid).last().toMap();
+        const QVariantMap pod = rnd["pods"].toList()[0].toMap();
+        cdb::reportPodResult(pod["pod_id"].toLongLong(), "WIN", pod["seats"].toList()[0].toMap()["player_id"].toLongLong());
+        timerdb::start(timerdb::Kind::Commander, rnd["round_id"].toLongLong());
+        auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        QVERIFY(ev && ev->endEarlyBtn && ev->endEarlyBtn->isVisible());
+        QVERIFY(ev->findChild<TimerWidget *>());
+        QVERIFY(w_->tabButton(tid));
+        // reporting a result rebuilds the page; the action is still there afterwards
+        QVERIFY(buttons(ev).contains("Change") && buttons(ev).contains("Wins"));
+
+        answerNextDialog("<esc>");
+        ev->endEarlyBtn->click();
+        settle();
+        QVERIFY(!tdb::isTerminated(tid));
+        QCOMPARE(w_->currentScreen(), ev);
+
+        QString seen;
+        answerNextDialog("End tournament", &seen);
+        ev->endEarlyBtn->click();
+        settle();
+        QVERIFY(seen.contains("Cut Short Commander"));
+        QVERIFY(tdb::isTerminated(tid));
+        QVERIFY(!w_->tabButton(tid));
+        QVERIFY(qobject_cast<HubScreen *>(w_->currentScreen()));
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("SWISS"));       // not completed, no winner
+        QVERIFY(cdb::getEvent(tid)["champion_player_id"].isNull());
+
+        ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        QVERIFY(ev);
+        QVERIFY(!ev->endEarlyBtn);
+        QVERIFY(!ev->findChild<TimerWidget *>());
+        QVERIFY(!w_->tabButton(tid));                           // opening the record does not make it active again
+        const QStringList names = buttons(ev).keys();
+        for (const QString &label : names)
+            QVERIFY2(label != "Wins" && label != "Change" && label != "Clear" && !label.startsWith("Draw")
+                     && !label.startsWith("Correct") && !label.startsWith("Finalize") && !label.startsWith("Start Round")
+                     && !label.startsWith("Finish"), qPrintable(label));
+        const QString text = labelText(ev);
+        QVERIFY2(text.contains("Terminated. This tournament was ended early"), qPrintable(text));
+        QVERIFY2(text.contains("round not finished"), qPrintable(text));
+        QVERIFY(!text.contains("Tournament complete"));
+        QVERIFY(labelText(go<CommanderStandingsScreen>("standings", {{"tournament_id", tid}})).contains("Terminated"));
+    }
+
+    // Renaming a tournament.
+
+    void tournamentsCanBeRenamedFromTheirPagesInEveryState()
+    {
+        // Drives the rename dialog the next click opens: optionally types a name, then finishes with a
+        // button label, "<enter>" or "<esc>".  If the dialog refuses the name it reports the message and cancels.
+        const auto answer = [](const QString &typed, const QString &finish, QString *prefill = nullptr, QString *refusal = nullptr) {
+            QTimer::singleShot(200, qApp, [=] {
+                QWidget *dlg = QApplication::activeModalWidget();
+                if (!dlg)
+                    return;
+                auto *edit = dlg->findChild<QLineEdit *>();
+                if (prefill)
+                    *prefill = edit->text() + "|" + edit->selectedText() + "|" + dlg->windowTitle();
+                if (!typed.isNull())
+                    edit->setText(typed);
+                if (finish == "<enter>") {
+                    QTest::keyClick(edit, Qt::Key_Return);
+                } else if (finish == "<esc>") {
+                    QTest::keyClick(dlg, Qt::Key_Escape);
+                } else {
+                    for (QPushButton *b : dlg->findChildren<QPushButton *>())
+                        if (b->text() == finish)
+                            b->click();
+                }
+                if (dlg->isVisible()) {             // the name was refused and the dialog stayed open
+                    QLabel *message = dlg->findChild<QLabel *>("renameError");
+                    if (refusal)
+                        *refusal = message && message->isVisible() ? message->text().remove(QChar(0x200B)) : QString("(no message)");
+                    QTest::keyClick(dlg, Qt::Key_Escape);
+                }
+            });
+        };
+        const auto shownLabels = [&] { return labelText(w_->currentScreen()); };
+
+        // 1. while players are being registered
+        QStringList many;
+        for (int i = 0; i < 30; ++i)
+            many << QStringLiteral("Player %1").arg(i, 2, 10, QChar('0'));
+        const qint64 pending = modern(many, 45, 3, false, "Old Pending Name");
+        w_->resize(900, 520);
+        auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", pending}});
+        QVERIFY(reg && reg->renameBtn && reg->renameBtn->isVisible());
+        QCOMPARE(reg->renameBtn->toolTip(), QString("Edit tournament name"));
+        QCOMPARE(reg->renameBtn->accessibleName(), QString("Edit tournament name"));
+        QVERIFY(reg->renameBtn->text().isEmpty() && !reg->renameBtn->icon().isNull());
+        QVERIFY(reg->renameBtn->width() >= T::MIN_HIT && reg->renameBtn->height() >= T::MIN_HIT);
+        // beside the title: on its line, just to its right
+        QVERIFY(reg->renameBtn->geometry().left() >= reg->titleLabel->geometry().right());
+        QVERIFY2(reg->renameBtn->geometry().left() - reg->titleLabel->geometry().right() <= 12, "right beside the words");
+        QVERIFY(qAbs(reg->renameBtn->geometry().top() - reg->titleLabel->geometry().top()) <= 12);
+        QScrollBar *bar = reg->findChild<QScrollArea *>()->verticalScrollBar();
+        QVERIFY(bar->maximum() > 200);
+        bar->setValue(120);
+        const QByteArray untouched = databaseFingerprint();
+
+        // cancelling, however it is done, changes nothing
+        QString prefill, refusal;
+        for (const QString &way : {QString("Cancel"), QString("<esc>")}) {
+            answer("Typed But Abandoned", way, &prefill);
+            reg->renameBtn->click();
+            settle();
+            QCOMPARE(prefill, QString("Old Pending Name|Old Pending Name|Edit tournament name"));    // filled in and selected
+            QCOMPARE(databaseFingerprint(), untouched);
+            QVERIFY(reg->titleLabel->text().remove(QChar(0x200B)).endsWith("Old Pending Name"));
+        }
+        // a blank name is refused, with a message, and nothing is saved
+        for (const QString &blank : {QString(""), QString("     ")}) {
+            refusal.clear();
+            answer(blank, "Save", nullptr, &refusal);
+            reg->renameBtn->click();
+            settle();
+            QCOMPARE(refusal, QString("Enter a name for the tournament."));
+            QCOMPARE(databaseFingerprint(), untouched);
+        }
+        // Enter saves; spaces around the name are removed
+        answer("   Spring Open 2026  ", "<enter>");
+        reg->renameBtn->click();
+        settle();
+        QCOMPARE(tdb::tournamentById(pending)["name"].toString(), QString("Spring Open 2026"));
+        QCOMPARE(w_->currentScreen(), reg);                             // the same page, not a reloaded one
+        QCOMPARE(reg->titleLabel->text().remove(QChar(0x200B)), QStringLiteral("Player Registration — Spring Open 2026"));
+        QCOMPARE(bar->value(), 120);                                    // and it did not move
+        QCOMPARE(tdb::enrolledPlayers(pending).size(), 30);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM tournaments").toInt(), 1);
+        // the name is used from here on: starting it asks about, and opens, "Spring Open 2026"
+        QCOMPARE(reg->tName, QString("Spring Open 2026"));
+
+        // 2. while it is running: the heading and its pill in the top bar
+        swiss::startTournament(pending);
+        const qint64 rid = tdb::currentRound(pending)["round_id"].toLongLong();
+        timerdb::start(timerdb::Kind::OneOnOne, rid);
+        const db::Rows matches = tdb::allMatches(pending);
+        auto *round = go<RoundScreen>("round", {{"tournament_id", pending}});
+        QVERIFY(round && round->renameBtn);
+        QVERIFY(w_->tabText(pending).startsWith("Spring Open 2026"));
+        prefill.clear();
+        answer("Summer Open", "Save", &prefill);
+        round->renameBtn->click();
+        settle();
+        QVERIFY(prefill.startsWith("Spring Open 2026|Spring Open 2026|"));
+        QCOMPARE(w_->currentScreen(), round);
+        QCOMPARE(round->roundLabel->text().remove(QChar(0x200B)), QStringLiteral("Round 1 — Summer Open"));
+        QVERIFY2(w_->tabText(pending).startsWith("Summer Open"), qPrintable(w_->tabText(pending)));
+        QCOMPARE(w_->tabButton(pending)->text(), w_->tabText(pending));
+        QVERIFY(w_->tabButton(pending)->toolTip().startsWith("Summer Open"));
+        QVERIFY(w_->tabButton(pending)->accessibleName().startsWith("Summer Open"));
+        QCOMPARE(w_->liveTabCount(), 1);
+        QCOMPARE(tdb::allMatches(pending), matches);
+        QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, rid).state == timerdb::State::Running);      // the clock was not touched
+        QVERIFY(round->findChild<TimerWidget *>());
+        // the next printed sheet carries the new name
+        QCOMPARE(printing::modernRoundData(tdb::tournamentById(pending), 1, tdb::roundPairings(rid)).event, QString("Summer Open"));
+        // and so do the overview and the standings
+        QVERIFY(labelText(go<HubScreen>("mtg_hub")).contains("Summer Open"));
+        QVERIFY(!shownLabels().contains("Spring Open") && !shownLabels().contains("Old Pending Name"));
+        QVERIFY(labelText(go<StandingsScreen>("standings", {{"tournament_id", pending}})).contains("Summer Open"));
+
+        // 3. an older tournament that was ended early: still a read-only record afterwards
+        tdb::terminateTournament(pending);
+        const QString endedAt = tdb::tournamentById(pending)["terminated_at"].toString();
+        go<HubScreen>("mtg_hub");
+        round = go<RoundScreen>("round", {{"tournament_id", pending}, {"round_number", 1}});
+        QVERIFY(round->renameBtn && round->renameBtn->isVisible() && round->renameBtn->isEnabled());
+        answer("Demo Night (ended early)", "<enter>");
+        round->renameBtn->click();
+        settle();
+        QCOMPARE(tdb::tournamentById(pending)["name"].toString(), QString("Demo Night (ended early)"));
+        QCOMPARE(tdb::tournamentById(pending)["status"].toString(), tdb::TERMINATED);
+        QCOMPARE(tdb::tournamentById(pending)["terminated_at"].toString(), endedAt);
+        QVERIFY(round->roundLabel->text().remove(QChar(0x200B)).endsWith("Demo Night (ended early)"));
+        QVERIFY(!w_->tabButton(pending));                               // renaming did not make it active again
+        QVERIFY(!round->endEarlyBtn && !round->findChild<TimerWidget *>());
+        for (T::WrapButton *b : round->findChildren<T::WrapButton *>())
+            QVERIFY(!b->isEnabled());                                   // and nothing else became editable
+        QCOMPARE(tdb::allMatches(pending), matches);
+        // its history page has the pencil too
+        auto *select = go<RoundSelectScreen>("round_select", {{"tournament_id", pending}});
+        QVERIFY(select && select->renameBtn && select->renameBtn->toolTip() == "Edit tournament name");
+        QVERIFY(select->renameBtn->geometry().left() >= select->nameLabel->geometry().right());
+        QVERIFY(select->renameBtn->geometry().left() - select->nameLabel->geometry().right() <= 12);
+        // the name itself is still centred in the panel
+        QVERIFY(qAbs(select->nameLabel->geometry().center().x() - select->panel->rect().center().x()) <= 3);
+
+        // 4. an older completed tournament, from its history page
+        const qint64 done = modern({"Ana", "Bo"}, 45, 1, true, "Old Finished Name");
+        tdb::reportMatchResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::finalizeTournament(done, "MTG");
+        w_->removeTournamentTab(done);
+        const db::Rows finalStandings = swiss::standings(done, "MTG");
+        select = go<RoundSelectScreen>("round_select", {{"tournament_id", done}});
+        QVERIFY(select && select->renameBtn);
+        prefill.clear();
+        answer("Demo Final", "Save", &prefill);
+        select->renameBtn->click();
+        settle();
+        QVERIFY(prefill.startsWith("Old Finished Name|Old Finished Name|"));
+        QCOMPARE(w_->currentScreen(), select);
+        QCOMPARE(select->nameLabel->text().remove(QChar(0x200B)), QString("Demo Final"));
+        QCOMPARE(tdb::tournamentById(done)["name"].toString(), QString("Demo Final"));
+        QCOMPARE(tdb::tournamentById(done)["status"].toString(), tdb::COMPLETED);
+        QCOMPARE(swiss::standings(done, "MTG"), finalStandings);        // placings and results as they were
+        QVERIFY(!w_->tabButton(done));
+        // pages opened from here use the new name
+        buttons(select).value("View final standings")->click();
+        settle();
+        QVERIFY(shownLabels().contains("Demo Final") && !shownLabels().contains("Old Finished Name"));
+
+        // 5. a Commander event, running and then completed
+        const qint64 cmd = commander({"Ed", "Flo", "Gus", "Hal"}, 1, true, 80, "Old Commander Name");
+        auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", cmd}});
+        QVERIFY(ev && ev->renameBtn);
+        answer("Demo Commander", "<enter>");
+        ev->renameBtn->click();
+        settle();
+        QCOMPARE(w_->currentScreen(), ev);
+        QVERIFY(ev->title->text().remove(QChar(0x200B)).endsWith("Demo Commander"));
+        QVERIFY(w_->tabText(cmd).startsWith("Demo Commander"));
+        QCOMPARE(cdb::getEvent(cmd)["name"].toString(), QString("Demo Commander"));
+        QCOMPARE(printing::commanderRoundData("Demo Commander", "Round 1", cdb::getRounds(cmd).last().toMap()).event,
+                 QString("Demo Commander"));
+        const QVariantMap pod = cdb::getRounds(cmd).last().toMap()["pods"].toList()[0].toMap();
+        cdb::reportPodResult(pod["pod_id"].toLongLong(), "WIN", pod["seats"].toList()[0].toMap()["player_id"].toLongLong());
+        cdb::finishTournament(cmd);
+        ev = go<CommanderEventScreen>("round", {{"tournament_id", cmd}});
+        const QString champion = cdb::getState(cmd)["event"].toMap()["champion_name"].toString();
+        answer("Demo Commander Final", "Save");
+        ev->renameBtn->click();
+        settle();
+        QVERIFY(ev->title->text().remove(QChar(0x200B)).endsWith("Demo Commander Final"));
+        QCOMPARE(cdb::getState(cmd)["event"].toMap()["stage"].toString(), QString("COMPLETE"));
+        QCOMPARE(cdb::getState(cmd)["event"].toMap()["champion_name"].toString(), champion);
+        QVERIFY(!w_->tabButton(cmd));
+
+        // long names, both themes, large text and a small window: everything still fits
+        const QString longName = "The Extraordinarily Long Annual Invitational Championship Of Absolutely Everything, Part Two";
+        QVERIFY(longName.size() <= tdb::MAX_NAME_LENGTH);
+        tdb::renameTournament(done, longName);
+        for (const QString &mode : {QString("dark"), QString("light")}) {
+            for (const QString &textSize : {QString("standard"), QString("large")}) {
+                prefs::setPref("theme", mode);
+                prefs::setPref("text_size", textSize);
+                w_->restyle();
+                for (const QSize &size : {QSize(1180, 780), QSize(360, 640)}) {
+                    w_->resize(size);
+                    for (const auto &page : QList<QPair<QString, QVariantMap>>{
+                             {"round_select", {{"tournament_id", done}}}, {"round", {{"tournament_id", done}, {"round_number", 1}}},
+                             {"round", {{"tournament_id", cmd}}}, {"round", {{"tournament_id", pending}, {"round_number", 1}}}}) {
+                        w_->navigateTo(page.first, page.second);
+                        settle();
+                        const QByteArray where = QStringLiteral("%1 %2 %3 %4x%5").arg(page.first, mode, textSize)
+                                                     .arg(size.width()).arg(size.height()).toUtf8();
+                        QPushButton *pencil = nullptr;
+                        for (QPushButton *b : w_->currentScreen()->findChildren<QPushButton *>())
+                            if (b->toolTip() == "Edit tournament name")
+                                pencil = b;
+                        QVERIFY2(pencil && pencil->isVisible(), where);
+                        QVERIFY2(pencil->mapTo(w_.get(), QPoint(pencil->width(), 0)).x() <= w_->width(), where);
+                        QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
+                    }
+                }
+            }
+        }
+        // the dialog itself fits a small window
+        prefill.clear();
+        answer(QString(), "<esc>", &prefill);
+        qobject_cast<RoundScreen *>(w_->currentScreen())->renameBtn->click();
+        settle();
+        QVERIFY(prefill.startsWith("Demo Night (ended early)|"));
+
+        // after a restart every name is the one that was saved
+        w_.reset();
+        db::closeThreadConnection();
+        openWindow();
+        QCOMPARE(tdb::tournamentById(pending)["name"].toString(), QString("Demo Night (ended early)"));
+        QCOMPARE(tdb::tournamentById(done)["name"].toString(), longName);
+        QCOMPARE(tdb::tournamentById(cmd)["name"].toString(), QString("Demo Commander Final"));
+        const QString hubText = labelText(go<HubScreen>("mtg_hub"));
+        for (const QString &name : {QString("Demo Night (ended early)"), longName, QString("Demo Commander Final")})
+            QVERIFY2(hubText.contains(name), qPrintable(name));
+        for (const char *old : {"Old Pending Name", "Spring Open", "Summer Open", "Old Finished Name", "Old Commander Name"})
+            QVERIFY2(!hubText.contains(old), old);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM tournaments").toInt(), 3);      // none was created along the way
+    }
+
+    // Player ids, same names, and removing a player.
+
+    void playersHaveIdsThatOnlyShowWhenNamesClash()
+    {
+        const qint64 a = pdb::addPlayer("Alex Smith"), b = pdb::addPlayer("alex  SMITH");
+        const qint64 jones = pdb::addPlayer("Alex Jones"), jordan = pdb::addPlayer("Jordan Smith");
+        const QString la = QStringLiteral("Alex Smith · ") + pdb::formatId(a), lb = QStringLiteral("alex  SMITH · ") + pdb::formatId(b);
+        Q_UNUSED(jones);
+        Q_UNUSED(jordan);
+        const auto listed = [&](PlayersScreen *dir) {
+            settle();
+            QStringList names;
+            for (QFrame *row : dir->findChildren<QFrame *>("pr"))
+                if (row->isVisible())
+                    names << row->findChild<T::NameScroll *>()->label->text();
+            names.sort();
+            return names;
+        };
+        // the directory: ids only on the two records whose whole name is the same
+        auto *dir = go<PlayersScreen>("players");
+        QCOMPARE(listed(dir), (QStringList{"Alex Jones", la, "Jordan Smith", lb}));
+        // searching down to one of them keeps its id: it was decided from the whole directory
+        dir->searchBox->setText("alex  S");
+        QTest::qWait(400);
+        QCOMPARE(listed(dir), QStringList{lb});
+        dir->searchBox->setText("Jones");
+        QTest::qWait(400);
+        QCOMPARE(listed(dir), QStringList{"Alex Jones"});
+        dir->searchBox->clear();
+        QTest::qWait(400);
+        // so does the game filter
+        const qint64 cup = tdb::createTournament("Cup", "POKEMON", 1, "Standard");
+        tdb::enrollPlayer(cup, a);
+        tdb::enrollPlayer(cup, jones);
+        swiss::startTournament(cup);
+        dir->setGameChecked("POKEMON", true);
+        QCOMPARE(listed(dir), (QStringList{"Alex Jones", la}));
+        dir->setGameChecked(QString(), true);
+
+        // a profile always shows the id, small and muted, beside the name
+        for (qint64 id : {a, jones}) {
+            auto *profile = go<PlayerProfileScreen>("player_profile", {{"player_id", id}});
+            QVERIFY(profile);
+            QLabel *idLabel = profile->findChild<QLabel *>("playerId");
+            QVERIFY(idLabel && idLabel->isVisible());
+            QCOMPARE(idLabel->text(), pdb::formatId(id));
+            QVERIFY(idLabel->styleSheet().contains(T::MUTED));
+            QLabel *name = nullptr;
+            for (QLabel *l : profile->findChildren<QLabel *>())
+                if (l->text().remove(QChar(0x200B)) == pdb::playerById(id)["display_name"].toString())
+                    name = l;
+            QVERIFY(name);
+            QVERIFY(idLabel->font().pixelSize() < name->font().pixelSize() / 1.5);
+            QVERIFY(idLabel->geometry().left() >= name->geometry().right());
+            QVERIFY(idLabel->geometry().left() - name->geometry().right() <= 16);
+        }
+
+        // renaming one of the pair: the id stays, and the labels go as soon as the names differ
+        auto *profile = go<PlayerProfileScreen>("player_profile", {{"player_id", b}});
+        QTimer::singleShot(200, qApp, [] {
+            QWidget *dlg = QApplication::activeModalWidget();
+            dlg->findChild<QLineEdit *>()->setText("Alexandra Smith");
+            for (QPushButton *btn : dlg->findChildren<QPushButton *>())
+                if (btn->text() == "Save")
+                    btn->click();
+        });
+        buttons(profile).value("Edit name")->click();
+        settle();
+        QCOMPARE(pdb::playerById(b)["display_name"].toString(), QString("Alexandra Smith"));
+        QCOMPARE(profile->findChild<QLabel *>("playerId")->text(), pdb::formatId(b));
+        QCOMPARE(listed(go<PlayersScreen>("players")), (QStringList{"Alex Jones", "Alex Smith", "Alexandra Smith", "Jordan Smith"}));
+        pdb::renamePlayer(b, "alex  SMITH");
+
+        // inside a tournament: pairings, standings and the printed sheet name the two apart; others stay plain
+        const qint64 tid = modern({"Sam Lee"}, 45, 1, false, "Twins Cup");
+        tdb::enrollPlayer(tid, a);
+        tdb::enrollPlayer(tid, b);
+        tdb::enrollPlayer(tid, jordan);
+        auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", tid}});
+        QString regText = labelText(reg);
+        QVERIFY2(regText.contains(la) && regText.contains(lb) && !regText.contains("Jordan Smith ·") && !regText.contains("Sam Lee ·"),
+                 qPrintable(regText));
+        QVERIFY(buttons(reg).keys().contains("Remove"));
+        swiss::startTournament(tid);
+        auto *round = go<RoundScreen>("round", {{"tournament_id", tid}});
+        QStringList onButtons;
+        for (T::WrapButton *wb : round->findChildren<T::WrapButton *>())
+            onButtons << wb->accessibleName();
+        QVERIFY2(onButtons.contains(la) && onButtons.contains(lb) && onButtons.contains("Sam Lee") && onButtons.contains("Jordan Smith"),
+                 qPrintable(onButtons.join(", ")));
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        QStringList printed;
+        for (const printing::Group &g : printing::modernRoundData(tdb::tournamentById(tid), 1, tdb::roundPairings(rid)).groups)
+            for (const printing::Player &pl : g.players)
+                printed << pl.name;
+        QVERIFY2(printed.contains(la) && printed.contains(lb) && printed.contains("Sam Lee"), qPrintable(printed.join(", ")));
+        const QString standingsText = labelText(go<StandingsScreen>("standings", {{"tournament_id", tid}}));
+        QVERIFY2(standingsText.contains(la) && standingsText.contains(lb) && !standingsText.contains("Sam Lee ·"), qPrintable(standingsText));
+        for (const QSize &size : {QSize(1180, 780), QSize(360, 640)}) {
+            w_->resize(size);
+            for (const QString &screen : {QString("round"), QString("standings")}) {
+                w_->navigateTo(screen, {{"tournament_id", tid}});
+                settle();
+                QVERIFY2(layoutProblems().isEmpty(), qPrintable(screen + " " + layoutProblems().join("; ")));
+            }
+        }
+    }
+
+    void addingANameThatExistsAsksWhichPlayerIsMeant()
+    {
+        const qint64 a = pdb::addPlayer("Alex Smith"), b = pdb::addPlayer("Alex Smith");
+        pdb::addPlayer("Alex Jones");
+        const qint64 gone = pdb::addPlayer("Robin Fox");
+        pdb::removePlayer(gone);
+        // Presses a button of the next dialog (by label, or the first whose label starts with it) and notes what it offered.
+        const auto pick = [](const QString &label, QStringList *offered = nullptr) {
+            QTimer::singleShot(250, qApp, [=] {
+                QWidget *dlg = QApplication::activeModalWidget();
+                if (!dlg)
+                    return;
+                if (offered) {
+                    *offered << dlg->windowTitle();
+                    for (QPushButton *btn : dlg->findChildren<QPushButton *>())
+                        if (btn->isVisible())
+                            *offered << (btn->text().isEmpty() ? btn->accessibleName() : btn->text());
+                }
+                for (QPushButton *btn : dlg->findChildren<QPushButton *>())
+                    if (const QString name = btn->text().isEmpty() ? btn->accessibleName() : btn->text();
+                        name == label || (!label.isEmpty() && name.startsWith(label))) {
+                        btn->click();
+                        return;
+                    }
+                QTest::keyClick(dlg, Qt::Key_Escape);
+            });
+        };
+        // typing the name into the "New player" prompt, then answering the question that follows
+        const auto addInDirectory = [&](PlayersScreen *dir, const QString &typed, const QString &answer, QStringList *offered) {
+            QTimer::singleShot(150, qApp, [typed] {
+                QWidget *dlg = QApplication::activeModalWidget();
+                dlg->findChild<QLineEdit *>()->setText(typed);
+                for (QPushButton *btn : dlg->findChildren<QPushButton *>())
+                    if (btn->text() == "Add player")
+                        btn->click();
+            });
+            QTimer::singleShot(600, qApp, [answer, offered] {
+                QWidget *dlg = QApplication::activeModalWidget();
+                if (!dlg)
+                    return;         // no question was asked
+                *offered << dlg->windowTitle();
+                for (QPushButton *btn : dlg->findChildren<QPushButton *>())
+                    if (btn->isVisible())
+                        *offered << (btn->text().isEmpty() ? btn->accessibleName() : btn->text());
+                for (QPushButton *btn : dlg->findChildren<QPushButton *>())
+                    if (const QString name = btn->text().isEmpty() ? btn->accessibleName() : btn->text();
+                        name == answer || (!answer.isEmpty() && name.startsWith(answer))) {
+                        btn->click();
+                        return;
+                    }
+                QTest::keyClick(dlg, Qt::Key_Escape);
+            });
+            buttons(dir).value("New player")->click();
+            QTest::qWait(700);
+            settle();
+        };
+
+        // in the directory
+        auto *dir = go<PlayersScreen>("players");
+        QStringList offered;
+        addInDirectory(dir, "  alex   smith ", "Cancel", &offered);
+        QCOMPARE(offered.value(0), QString("A player with this name already exists"));
+        QVERIFY2(offered.contains(QStringLiteral("Open Alex Smith · ") + pdb::formatId(a))
+                 && offered.contains(QStringLiteral("Open Alex Smith · ") + pdb::formatId(b))
+                 && offered.contains("Create a different player with this name") && offered.contains("Cancel"),
+                 qPrintable(offered.join(" | ")));
+        QCOMPARE(pdb::allPlayers().size(), 3);                  // cancelled: nobody was added
+        offered.clear();
+        addInDirectory(qobject_cast<PlayersScreen *>(w_->currentScreen()), "Alex Smith", "Create a different", &offered);
+        QCOMPARE(pdb::allPlayers().size(), 4);                  // a third, separate Alex Smith
+        QCOMPARE(pdb::playersNamed("Alex Smith").size(), 3);
+        offered.clear();
+        addInDirectory(qobject_cast<PlayersScreen *>(w_->currentScreen()), "Alex Smith",
+                       QStringLiteral("Open Alex Smith · ") + pdb::formatId(b), &offered);
+        QCOMPARE(pdb::allPlayers().size(), 4);                  // picking an existing player adds nobody
+        auto *profile = qobject_cast<PlayerProfileScreen *>(w_->currentScreen());
+        QVERIFY(profile && profile->findChild<QLabel *>("playerId")->text() == pdb::formatId(b));
+        // a name nobody has, a shared first name only, and the name of a removed player: no question
+        dir = go<PlayersScreen>("players");
+        for (const QString &fresh : {QString("Casey Park"), QString("Alex Brown"), QString("Robin Fox")}) {
+            offered.clear();
+            addInDirectory(qobject_cast<PlayersScreen *>(w_->currentScreen()), fresh, "Cancel", &offered);
+            QVERIFY2(offered.isEmpty(), qPrintable(fresh + ": " + offered.join(" | ")));
+        }
+        QCOMPARE(pdb::allPlayers().size(), 7);
+        const qint64 newRobin = pdb::playersNamed("Robin Fox").first()["player_id"].toLongLong();
+        QVERIFY(newRobin != gone && pdb::isRemoved(gone));      // the removed record was not brought back or reused
+
+        // on a registration page
+        const qint64 tid = modern({}, 45, 1, false, "Sign-up");
+        auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", tid}});
+        const auto addAndEnroll = [&](const QString &typed, const QString &answer, QStringList *seen) {
+            reg->newNameBox->setText(typed);
+            pick(answer, seen);
+            reg->addBtn->click();
+            QTest::qWait(350);
+            settle();
+        };
+        offered.clear();
+        const int before = int(pdb::allPlayers().size());
+        addAndEnroll("Alex Smith", "Cancel", &offered);
+        QVERIFY2(offered.contains(QStringLiteral("Enroll Alex Smith · ") + pdb::formatId(a)), qPrintable(offered.join(" | ")));
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 0);
+        addAndEnroll("Alex Smith", QStringLiteral("Enroll Alex Smith · ") + pdb::formatId(a), nullptr);
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 1);
+        QCOMPARE(tdb::enrolledPlayers(tid).first()["player_id"].toLongLong(), a);
+        QCOMPARE(int(pdb::allPlayers().size()), before);        // the existing player was enrolled; nobody was created
+        // the same player cannot be enrolled twice
+        addAndEnroll("Alex Smith", QStringLiteral("Enroll Alex Smith · ") + pdb::formatId(a), nullptr);
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 1);
+        // "a different player" makes and enrolls a new one
+        addAndEnroll("Alex Smith", "Create a different", nullptr);
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 2);
+        QCOMPARE(int(pdb::allPlayers().size()), before + 1);
+        // searching offers both namesakes with their ids, and never the removed player
+        reg->searchBox->setText("Alex Smith");
+        QTest::qWait(500);
+        const QString found = labelText(reg);
+        QVERIFY2(found.contains(QStringLiteral("Alex Smith · ") + pdb::formatId(a))
+                 && found.contains(QStringLiteral("Alex Smith · ") + pdb::formatId(b)), qPrintable(found));
+        pdb::removePlayer(pdb::addPlayer("Vanished Vera"));
+        reg->searchBox->setText("Vanished");
+        QTest::qWait(500);
+        QVERIFY(!labelText(reg).contains("Vanished Vera"));
+    }
+
+    void removingAPlayerHidesTheirProfileAndLeavesHistoryAlone()
+    {
+        // a finished tournament the player took part in, and a running one they are still in
+        const qint64 done = modern({"Dana Cruz", "Eli Ross", "Finn Vale"}, 45, 1, true, "Finished Cup");
+        const qint64 dana = pdb::playersNamed("Dana Cruz").first()["player_id"].toLongLong();
+        const qint64 rid = tdb::currentRound(done)["round_id"].toLongLong();
+        for (const db::Row &m : tdb::roundPairings(rid))
+            if (!m["player2_id"].isNull())
+                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+        swiss::finalizeTournament(done, "MTG");
+        w_->removeTournamentTab(done);
+        const qint64 live = tdb::createTournament("Still Running", "MTG", 2, "Modern");
+        tdb::enrollPlayer(live, dana);
+        tdb::enrollPlayer(live, pdb::playersNamed("Eli Ross").first()["player_id"].toLongLong());
+        swiss::startTournament(live);
+        const auto standingsOf = [&] {
+            QStringList rows;
+            for (const db::Row &r : swiss::viewStandings(done, "MTG"))
+                rows << QStringLiteral("%1 %2 %3 %4").arg(r["standing"].toInt()).arg(r["display_name"].toString())
+                            .arg(r["match_points"].toInt()).arg(r["omw_pct"].toDouble());
+            return rows;
+        };
+        const QStringList standings = standingsOf();
+        const db::Rows matches = tdb::allMatches(done);
+        const QByteArray untouched = databaseFingerprint();
+
+        auto *profile = go<PlayerProfileScreen>("player_profile", {{"player_id", dana}});
+        QVERIFY(profile);
+        QVERIFY(buttons(profile).contains("Remove player") && !buttons(profile).contains("Delete player"));
+        // cancelling changes nothing, whichever way
+        QString seen;
+        for (const QString &way : {QString("Cancel"), QString("<esc>"), QString("<enter>")}) {
+            seen.clear();
+            answerNextDialog(way, &seen);
+            buttons(profile).value("Remove player")->click();
+            settle();
+            QCOMPARE(databaseFingerprint(), untouched);
+            QCOMPARE(w_->currentScreen(), profile);
+        }
+        QVERIFY2(seen.contains("Remove Dana Cruz from the player directory?")
+                 && seen.contains("They will no longer appear in player searches or be available for new enrollment. Their name and "
+                                  "existing tournament results will remain in history, but their profile will no longer be accessible."),
+                 qPrintable(seen));
+        QVERIFY(!seen.contains("#"));                           // nobody shares the name, so no id is needed
+
+        // still in a tournament being played: explained, and nothing changes there or here
+        setAutoConfirm(false);
+        QString refusal;
+        QTimer::singleShot(200, qApp, [] {
+            for (QPushButton *btn : QApplication::activeModalWidget()->findChildren<QPushButton *>())
+                if (btn->text() == "Remove player")
+                    btn->click();
+        });
+        QTimer::singleShot(700, qApp, [&refusal] {
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                refusal = box->windowTitle() + " | " + box->text();
+                box->accept();
+            }
+        });
+        buttons(profile).value("Remove player")->click();
+        QTest::qWait(800);
+        setAutoConfirm(true);
+        QVERIFY2(refusal.contains("Player not removed") && refusal.contains("Still Running") && refusal.contains("not reported yet"),
+                 qPrintable(refusal));
+        QCOMPARE(databaseFingerprint(), untouched);
+        QVERIFY(!pdb::isRemoved(dana));
+        QCOMPARE(tdb::enrolledPlayers(live).size(), 2);         // not quietly taken out of the event
+
+        // once that tournament is over, the removal goes through
+        tdb::terminateTournament(live);
+        w_->removeTournamentTab(live);
+        profile = go<PlayerProfileScreen>("player_profile", {{"player_id", dana}});
+        answerNextDialog("Remove player");
+        buttons(profile).value("Remove player")->click();
+        settle();
+        QVERIFY(pdb::isRemoved(dana));
+        auto *dir = qobject_cast<PlayersScreen *>(w_->currentScreen());
+        QVERIFY(dir);
+        QVERIFY(!labelText(dir).contains("Dana Cruz"));
+        QVERIFY(w_->toast->isVisible() && w_->toastLabel->text().remove(QChar(0x200B)).contains("removed from the player directory"));
+        // their profile cannot be reached any more, directly or with Back
+        QVERIFY(!go<PlayerProfileScreen>("player_profile", {{"player_id", dana}}));
+        QVERIFY(qobject_cast<PlayersScreen *>(w_->currentScreen()));
+        w_->goBack();
+        settle();
+        QVERIFY(!qobject_cast<PlayerProfileScreen *>(w_->currentScreen()));
+
+        // history is exactly as it was: same matches, same standings, the name still shown, as plain text
+        QCOMPARE(tdb::allMatches(done), matches);
+        QCOMPARE(standingsOf(), standings);
+        auto *table = go<StandingsScreen>("standings", {{"tournament_id", done}});
+        QVERIFY(labelText(table).contains("Dana Cruz"));
+        QCOMPARE(standingsOf(), standings);                     // looking at it changed nothing
+        auto *round = go<RoundScreen>("round", {{"tournament_id", done}, {"round_number", 1}});
+        QStringList onButtons;
+        for (T::WrapButton *wb : round->findChildren<T::WrapButton *>())
+            onButtons << wb->accessibleName();
+        QVERIFY2(onButtons.contains("Dana Cruz") || labelText(round).contains("Dana Cruz"), qPrintable(onButtons.join(", ")));
+        for (QWidget *screen : {static_cast<QWidget *>(table), static_cast<QWidget *>(round)})
+            for (QPushButton *btn : screen->findChildren<QPushButton *>())
+                QVERIFY2(!btn->accessibleName().contains("profile", Qt::CaseInsensitive) && !btn->text().contains("profile", Qt::CaseInsensitive),
+                         qPrintable(btn->text()));                // no link to a profile anywhere in a tournament view
+        // an opponent's own history still has the match against them
+        const qint64 eli = pdb::playersNamed("Eli Ross").first()["player_id"].toLongLong();
+        bool mentioned = false;
+        for (qint64 other : {eli, pdb::playersNamed("Finn Vale").first()["player_id"].toLongLong()})
+            for (const db::Row &m : pdb::matchHistory(other, done))
+                mentioned = mentioned || m["opponent_name"].toString() == "Dana Cruz";
+        bool hadBye = false;
+        for (const db::Row &m : pdb::matchHistory(dana, done))
+            hadBye = hadBye || m["result"].toString() == "BYE";
+        QVERIFY(mentioned || hadBye);
+
+        // they cannot be found or enrolled for something new
+        const qint64 fresh = modern({}, 45, 1, false, "Next Cup");
+        auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", fresh}});
+        reg->searchBox->setText("Dana");
+        QTest::qWait(500);
+        QVERIFY(!labelText(reg).contains("Dana Cruz"));
+        // a new Dana Cruz is a new person: no question about the removed one, a new id, no history
+        reg->newNameBox->setText("Dana Cruz");
+        reg->addBtn->click();
+        QTest::qWait(300);
+        settle();
+        QCOMPARE(tdb::enrolledPlayers(fresh).size(), 1);
+        const qint64 newDana = tdb::enrolledPlayers(fresh).first()["player_id"].toLongLong();
+        QVERIFY(newDana > dana);
+        QVERIFY(pdb::tournamentHistory(newDana).size() == 1 && pdb::lifetimeStats(newDana).isEmpty());
+        QCOMPARE(standingsOf(), standings);
+
+        // after a restart: still removed, still in history
+        w_.reset();
+        db::closeThreadConnection();
+        openWindow();
+        QVERIFY(pdb::isRemoved(dana));
+        dir = go<PlayersScreen>("players");
+        int danas = 0;
+        for (QFrame *row : dir->findChildren<QFrame *>("pr"))
+            if (row->isVisible() && row->findChild<T::NameScroll *>()->label->text().startsWith("Dana Cruz"))
+                ++danas;
+        QCOMPARE(danas, 1);                                     // only the new one
+        QVERIFY(labelText(go<StandingsScreen>("standings", {{"tournament_id", done}})).contains("Dana Cruz"));
+        QCOMPARE(standingsOf(), standings);
+
+        // the dialog names the id when another player has the same name
+        const qint64 twin = pdb::addPlayer("Dana Cruz");
+        profile = go<PlayerProfileScreen>("player_profile", {{"player_id", twin}});
+        seen.clear();
+        answerNextDialog("Cancel", &seen);
+        buttons(profile).value("Remove player")->click();
+        settle();
+        QVERIFY2(seen.contains(QStringLiteral("Remove Dana Cruz · %1 from the player directory?").arg(pdb::formatId(twin))), qPrintable(seen));
+        // everything fits in both themes, at Large text and in a narrow window
+        for (const QString &mode : {QString("dark"), QString("light")}) {
+            prefs::setPref("theme", mode);
+            prefs::setPref("text_size", mode == "light" ? "large" : "standard");
+            w_->restyle();
+            for (const QSize &size : {QSize(1180, 780), QSize(360, 640)}) {
+                w_->resize(size);
+                for (const auto &page : QList<QPair<QString, QVariantMap>>{{"players", {}}, {"player_profile", {{"player_id", twin}}},
+                                                                            {"standings", {{"tournament_id", done}}}}) {
+                    w_->navigateTo(page.first, page.second);
+                    settle();
+                    QVERIFY2(layoutProblems().isEmpty(), qPrintable(page.first + " " + mode + " " + layoutProblems().join("; ")));
+                }
+            }
+        }
+    }
+
+    // Clock colours.
+
+    void clocksAreGreenWhileCountingDownRedAtZeroAndNeutralOtherwise()
+    {
+        const qint64 tid = modern({"Ana", "Bo", "Cy", "Di"}, 45, 3, true, "Colour Cup");
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        const timerdb::Kind kind = timerdb::Kind::OneOnOne;
+        // the clock on the hub's tournament row: the time, its caption and its icon
+        const auto hubClock = [&](QString *time, QString *caption) {
+            HubScreen *hub = go<HubScreen>("mtg_hub");
+            static const QRegularExpression digits("^\\d\\d:\\d\\d$");
+            QLabel *value = nullptr, *text = nullptr;
+            for (QLabel *l : hub->findChildren<QLabel *>()) {
+                if (digits.match(l->text()).hasMatch())
+                    value = l;
+                if (l->text() == "remaining" || l->text() == "Time expired" || l->text().startsWith("clock "))
+                    text = l;
+            }
+            *time = value ? value->text() + " " + value->styleSheet() : QString();
+            *caption = text ? text->text() + " " + text->styleSheet() : QString();
+        };
+        for (const QString &mode : {QString("dark"), QString("light")}) {
+            prefs::setPref("theme", mode);
+            w_->restyle();
+            const QByteArray where = mode.toUtf8();
+            QVERIFY2(QColor(T::GREEN) != QColor(T::RED) && QColor(T::GREEN).green() > QColor(T::GREEN).red(), where);
+            QVERIFY2(QColor(T::RED).red() > QColor(T::RED).green(), where);
+            timerdb::reset(kind, rid);
+            QString time, caption;
+
+            // not started: neutral everywhere
+            auto *round = go<RoundScreen>("round", {{"tournament_id", tid}});
+            TimerWidget *clock = round->findChild<TimerWidget *>();
+            QVERIFY2(clock, where);
+            QVERIFY2(!clock->display->styleSheet().contains(T::GREEN) && !clock->display->styleSheet().contains(T::RED), where);
+            QVERIFY2(w_->tabClockColor(tid).isEmpty() && w_->tabText(tid).endsWith("Not started"), where);
+            hubClock(&time, &caption);
+            QVERIFY2(!time.contains(T::GREEN) && !time.contains(T::RED) && caption.startsWith("clock not started"), qPrintable(time + caption));
+
+            // counting down: green, with the words that say so
+            timerdb::start(kind, rid);
+            round = go<RoundScreen>("round", {{"tournament_id", tid}});
+            clock = round->findChild<TimerWidget *>();
+            QVERIFY2(clock->display->styleSheet().contains("color:" + T::GREEN), where);
+            QVERIFY2(clock->caption->text().contains("RUNNING"), where);
+            QVERIFY2(!clock->clockIcon->pixmap().isNull(), where);
+            QCOMPARE(w_->tabClockColor(tid), T::GREEN);
+            QVERIFY2(w_->tabText(tid).endsWith("remaining"), where);
+            // the tournament's name and round on the pill keep the pill's usual colours
+            QVERIFY2(!w_->tabButton(tid)->styleSheet().contains(T::GREEN) && !w_->tabButton(tid)->styleSheet().contains(T::RED), where);
+            hubClock(&time, &caption);
+            QVERIFY2(time.contains("color:" + T::GREEN) && caption.startsWith("remaining") && caption.contains(T::GREEN), qPrintable(time + caption));
+
+            // paused: neutral again, and it says "paused"
+            timerdb::pause(kind, rid);
+            round = go<RoundScreen>("round", {{"tournament_id", tid}});
+            clock = round->findChild<TimerWidget *>();
+            QVERIFY2(!clock->display->styleSheet().contains(T::GREEN) && !clock->display->styleSheet().contains(T::RED), where);
+            QVERIFY2(clock->caption->text().contains("PAUSED"), where);
+            QVERIFY2(w_->tabClockColor(tid).isEmpty() && w_->tabText(tid).contains("Paused at"), where);
+            hubClock(&time, &caption);
+            QVERIFY2(!time.contains(T::GREEN) && !time.contains(T::RED) && caption.startsWith("clock paused"), qPrintable(time + caption));
+
+            // time up: red everywhere, 00:00 where a number is shown, and nothing else changes
+            timerdb::start(kind, rid);
+            db::exec("UPDATE rounds SET timer_started_at = timer_started_at - 99999 WHERE round_id = ?", {rid});
+            round = go<RoundScreen>("round", {{"tournament_id", tid}});
+            clock = round->findChild<TimerWidget *>();
+            QCOMPARE(clock->display->text(), QString("Time expired"));
+            QVERIFY2(clock->display->styleSheet().contains("color:" + T::RED), where);
+            QCOMPARE(w_->tabClockColor(tid), T::RED);
+            QVERIFY2(w_->tabText(tid).endsWith("Time expired"), where);
+            QVERIFY2(w_->tabText(tid).startsWith("Colour Cup") && w_->tabText(tid).contains("Round 1 of 3"), where);
+            hubClock(&time, &caption);
+            QVERIFY2(time.startsWith("00:00") && time.contains("color:" + T::RED), qPrintable(time));
+            QVERIFY2(caption.startsWith("Time expired") && caption.contains(T::RED), qPrintable(caption));
+            QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::IN_PROGRESS);     // expiry ends nothing
+            QCOMPARE(tdb::rounds(tid).size(), 1);
+            QCOMPARE(tdb::pendingMatchCount(rid), 2);
+        }
+        // a saved, running clock is still running (and green) after a restart
+        timerdb::reset(kind, rid);
+        timerdb::start(kind, rid);
+        w_.reset();
+        db::closeThreadConnection();
+        openWindow();
+        QCOMPARE(w_->tabClockColor(tid), T::GREEN);
+        // once the tournament is ended, nothing counts down anywhere
+        tdb::terminateTournament(tid);
+        QString time, caption;
+        hubClock(&time, &caption);
+        QVERIFY(time.isEmpty() && caption.isEmpty());
+        QVERIFY(!w_->tabButton(tid));
     }
 
     void everyScreenFitsEveryWindowSizeThemeAndTextSize()
