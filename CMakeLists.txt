@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(TcgTournamentManager VERSION 0.2.0 LANGUAGES CXX)
+project(TcgTournamentManager VERSION 0.2.1 LANGUAGES CXX)
 
 # The version shown in the app and used to name the package.  The label marks an
 # unfinished release; set it to "" for a final one.
