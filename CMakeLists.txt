@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
 project(TcgTournamentManager VERSION 0.2.0 LANGUAGES CXX)
 
+# The version shown in the app and used to name the package.  The label marks an
+# unfinished release; set it to "" for a final one.
+set(TCG_VERSION_LABEL "preview")
+set(TCG_VERSION "${PROJECT_VERSION}")
+if(TCG_VERSION_LABEL)
+    string(APPEND TCG_VERSION "-${TCG_VERSION_LABEL}")
+endif()
+file(WRITE "${CMAKE_BINARY_DIR}/version.txt" "${TCG_VERSION}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -26,6 +35,7 @@ add_library(tcgcore STATIC
     src/core/commander_db.cpp src/core/commander_db.h
 )
 target_include_directories(tcgcore PUBLIC src/core)
+target_compile_definitions(tcgcore PRIVATE TCG_VERSION="${TCG_VERSION}")
 target_link_libraries(tcgcore PUBLIC Qt6::Core Qt6::Sql)
 
 enable_testing()

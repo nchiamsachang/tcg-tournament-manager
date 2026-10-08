@@ -1589,8 +1589,83 @@ private slots:
         QCOMPARE(p["text_size"].toString(), QString("standard"));
         QCOMPARE(p["alert_sound"].toBool(), false);
         QVERIFY2(prefs::defaultRoundMinutes("MTG") == 65, "restoring interface defaults leaves round lengths alone");
-        QCOMPARE(prefs::issuesUrl(), QString("https://github.com/nchiamsachang/tcg_tournament_manager/issues"));
+        QCOMPARE(prefs::issuesUrl(), QString("https://github.com/nchiamsachang/tcg-tournament-manager/issues"));
         QVERIFY(prefs::founders().isEmpty());
+    }
+
+    // Where the data lives
+
+    void firstLaunchStartsInTheUserFolder()
+    {
+        QTemporaryDir user, program;
+        const QString file = db::resolveDataFile(user.filePath("data"), program.path());
+        QCOMPARE(file, user.filePath("data/tcg_tournament.db"));
+        QVERIFY(QDir(user.filePath("data")).exists());
+        QVERIFY(!QFileInfo::exists(file));                      // initialize() creates it
+        QVERIFY(QDir(program.path()).isEmpty());                // nothing is written beside the program
+    }
+
+    void earlierDatabaseIsCopiedOnceAndNeverOverwritten()
+    {
+        // an earlier build's database (write-ahead log mode) in the folder above the program
+        QTemporaryDir user, old;
+        const QString earlier = old.filePath("tcg_tournament.db");
+        db::closeThreadConnection();
+        db::setPath(earlier);
+        db::initialize();
+        db::value("PRAGMA journal_mode = WAL");
+        pdb::addPlayer("Kept Player");
+        db::closeThreadConnection();
+        QFile settings(old.filePath("settings.json"));
+        QVERIFY(settings.open(QIODevice::WriteOnly));
+        settings.write("{\"theme\": \"dark\"}");
+        settings.close();
+        QVERIFY(QDir(old.path()).mkpath("dist/App"));
+        const auto bytes = [](const QString &path) {
+            QFile f(path);
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        };
+        const QByteArray before = bytes(earlier);
+
+        const QString file = db::resolveDataFile(user.filePath("data"), old.filePath("dist/App"));
+        QCOMPARE(file, user.filePath("data/tcg_tournament.db"));
+        QCOMPARE(bytes(earlier), before);                       // the original is left exactly as it was
+        QVERIFY(!QFileInfo::exists(file + ".importing"));
+        db::setPath(file);
+        QCOMPARE(pdb::allPlayers().size(), 1);
+        QCOMPARE(prefs::load()["theme"].toString(), QString("dark"));
+        pdb::addPlayer("Added Later");
+        db::closeThreadConnection();
+
+        // every later launch uses the user's database as it is
+        QCOMPARE(db::resolveDataFile(user.filePath("data"), old.filePath("dist/App")), file);
+        db::setPath(file);
+        QCOMPARE(pdb::allPlayers().size(), 2);
+        db::closeThreadConnection();
+        QCOMPARE(bytes(earlier), before);
+    }
+
+    void existingDatabaseIsBackedUpBeforeASchemaUpdate()
+    {
+        const QString backups = db::dataDir() + "/backups";
+        QVERIFY(!QDir(backups).exists());                       // a database created just now is not backed up
+        pdb::addPlayer("Before Update");
+        db::exec("DELETE FROM schema_migrations WHERE version = 3");
+        db::initialize();
+        const QStringList files = QDir(backups).entryList({"*.db"}, QDir::Files);
+        QCOMPARE(files.size(), 1);
+        db::initialize();                                       // nothing pending: nothing more is copied
+        QCOMPARE(QDir(backups).entryList({"*.db"}, QDir::Files).size(), 1);
+
+        // the backup is the database as it was before the update
+        const QString live = db::path();
+        db::closeThreadConnection();
+        db::setPath(backups + "/" + files.first());
+        QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 1);
+        QVERIFY(!db::value("SELECT 1 FROM schema_migrations WHERE version = 3").isValid());
+        db::closeThreadConnection();
+        db::setPath(live);
+        QVERIFY(db::value("SELECT 1 FROM schema_migrations WHERE version = 3").isValid());
     }
 };
 

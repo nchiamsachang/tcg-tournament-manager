@@ -289,7 +289,7 @@ private slots:
                               "Track pairings, standings, and results for formats including MTG Modern and Commander."));
         QPushButton *link = buttons(home).value(QStringLiteral("Report an issue ↗"));
         QVERIFY(link);
-        QCOMPARE(link->toolTip(), QString("https://github.com/nchiamsachang/tcg_tournament_manager/issues"));
+        QCOMPARE(link->toolTip(), QString("https://github.com/nchiamsachang/tcg-tournament-manager/issues"));
         for (const char *banned : {"Design notes", "Copy prompt", "Claude", "Demo data", "Founded by"})
             QVERIFY2(!text.contains(banned), banned);
     }

@@ -28,19 +28,32 @@ struct Result {
     int affected = 0;
 };
 
-// The .db file.  By default it sits beside the program; a database found in a
-// parent folder (the project root during development) is used instead.
+// The .db file.  By default it is in the user's own application-data folder
+// (%LOCALAPPDATA%\TcgTournamentManager on Windows), so replacing the program never touches
+// it.  Setting the TCG_DATA_DIR environment variable chooses another folder.
 QString path();
 void setPath(const QString &file);
 QString dataDir();
+
+// The default rule behind path().  When `userDir` has no database yet and an earlier build
+// left one beside the program in `programDir` (or in a parent folder of it), that database
+// and its settings.json are copied into `userDir`; the originals are left as they were and
+// nothing already in `userDir` is overwritten.  If the copy cannot be made, the earlier file
+// keeps being used where it is.
+QString resolveDataFile(const QString &userDir, const QString &programDir);
+
+// Saves a copy of the database under backups/ in the data folder and returns its path.
+// initialize() calls it before applying a schema update to a database that already has data.
+// Throws Error when the copy cannot be made.
+QString backupBeforeUpdate();
 
 Rows query(const QString &sql, const QVariantList &args = {});
 Row one(const QString &sql, const QVariantList &args = {});          // empty map when there is no row
 QVariant value(const QString &sql, const QVariantList &args = {});   // first column of the first row
 Result exec(const QString &sql, const QVariantList &args = {});
 
-// Creates all tables if they don't exist and applies pending migrations.
-// Safe to call every time the app starts.
+// Creates all tables if they don't exist and applies pending migrations, backing up an
+// existing database first.  Safe to call every time the app starts.
 void initialize();
 
 // Closes this thread's connection (call before a worker thread ends).

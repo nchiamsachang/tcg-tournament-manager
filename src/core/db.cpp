@@ -3,8 +3,11 @@
 #include <QCoreApplication>
 #include <cstdio>
 #include <cstdlib>
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QMutex>
 #include <QSet>
 #include <QSqlDatabase>
@@ -20,24 +23,85 @@ Error::Error(const QString &m, bool c) : std::runtime_error(m.toStdString()), co
 static QMutex g_pathLock;
 static QString g_path;
 
-static QString defaultPath()
+static const QString kFileName = QStringLiteral("tcg_tournament.db");
+
+// A consistent copy of a database file made by SQLite itself, so it is complete even when
+// the source has unsaved pages in a write-ahead log or is open elsewhere.  Never overwrites.
+static bool snapshot(const QString &source, const QString &dest)
 {
-    const QString name = QStringLiteral("tcg_tournament.db");
-    const QByteArray env = qgetenv("TCG_DATA_DIR");
-    if (!env.isEmpty())
-        return QDir(QString::fromLocal8Bit(env)).filePath(name);
-    QDir dir(QCoreApplication::instance() ? QCoreApplication::applicationDirPath() : QDir::currentPath());
-    const QString beside = dir.filePath(name);
-    // During development the program runs from a build folder inside the project:
-    // keep using the project's existing database rather than starting an empty one.
-    QDir up = dir;
+    if (QFileInfo::exists(dest))
+        return false;
+    const QString name = QStringLiteral("tcg_snapshot_%1").arg(quintptr(QThread::currentThreadId()));
+    bool ok = false;
+    {
+        QSqlDatabase d = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        d.setDatabaseName(source);
+        d.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY;QSQLITE_BUSY_TIMEOUT=5000"));
+        if (d.open()) {
+            QSqlQuery q(d);
+            ok = q.exec(QStringLiteral("VACUUM INTO '%1'").arg(QString(dest).replace('\'', QLatin1String("''"))));
+            q.clear();
+            d.close();
+        }
+    }
+    QSqlDatabase::removeDatabase(name);
+    if (!ok)
+        QFile::remove(dest);
+    return ok && QFileInfo(dest).size() > 0;
+}
+
+// Where builds before the per-user folder kept the database: beside the program, or in a
+// parent folder of it.  Empty when there is none.
+static QString earlierDatabase(const QString &programDir)
+{
+    if (programDir.isEmpty())
+        return QString();
+    QDir up(programDir);
     for (int i = 0; i < 5; ++i) {
-        if (QFileInfo::exists(up.filePath(name)))
-            return up.filePath(name);
+        if (QFileInfo::exists(up.filePath(kFileName)))
+            return up.filePath(kFileName);
         if (!up.cdUp())
             break;
     }
-    return beside;
+    return QString();
+}
+
+QString resolveDataFile(const QString &userDir, const QString &programDir)
+{
+    const QString target = QDir(userDir).filePath(kFileName);
+    if (QFileInfo::exists(target))
+        return target;
+    QDir().mkpath(userDir);
+    const QString earlier = earlierDatabase(programDir);
+    if (earlier.isEmpty())
+        return target;                      // first launch: initialize() creates it here
+
+    // Copied, not moved: the earlier file stays where it was.  The copy is made under another
+    // name and renamed, so an interrupted copy is never mistaken for the database.
+    const QString partial = target + QStringLiteral(".importing");
+    QFile::remove(partial);
+    if (!snapshot(earlier, partial) && !QFile::copy(earlier, partial))
+        return earlier;                     // keep working on the data where it is; retried next launch
+    if (!QFile::rename(partial, target)) {
+        QFile::remove(partial);
+        return QFileInfo::exists(target) ? target : earlier;
+    }
+    const QString settings = QStringLiteral("settings.json");
+    QFile::copy(QFileInfo(earlier).dir().filePath(settings), QDir(userDir).filePath(settings));
+    return target;
+}
+
+static QString defaultPath()
+{
+    const QByteArray env = qgetenv("TCG_DATA_DIR");
+    if (!env.isEmpty()) {
+        const QString dir = QString::fromLocal8Bit(env);
+        QDir().mkpath(dir);
+        return QDir(dir).filePath(kFileName);
+    }
+    const QString userDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                            + QStringLiteral("/TcgTournamentManager");
+    return resolveDataFile(userDir, QCoreApplication::instance() ? QCoreApplication::applicationDirPath() : QString());
 }
 
 QString path()
@@ -417,7 +481,23 @@ const QList<Migration> &migrations()
     return list;
 }
 
-static void runMigrations()
+QString backupBeforeUpdate()
+{
+    const QString dir = dataDir() + QStringLiteral("/backups");
+    QDir().mkpath(dir);
+    const QString stem = dir + QStringLiteral("/tcg_tournament.before-update-")
+                         + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QString dest = stem + QStringLiteral(".db");
+    for (int n = 2; QFileInfo::exists(dest); ++n)
+        dest = QStringLiteral("%1-%2.db").arg(stem).arg(n);
+    if (!snapshot(path(), dest))
+        throw Error(QStringLiteral("The database needs updating for this version, but a backup could not be "
+                                   "saved to %1. Nothing was changed.").arg(QDir::toNativeSeparators(dest)), false);
+    return dest;
+}
+
+// `hadData` is false for a database this launch has just created: there is nothing to back up.
+static void runMigrations(bool hadData)
 {
     exec(R"sql(
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -429,9 +509,14 @@ static void runMigrations()
     QSet<int> applied;
     for (const Row &r : query("SELECT version FROM schema_migrations"))
         applied.insert(r["version"].toInt());
+    bool backedUp = !hadData;
     for (const Migration &m : migrations()) {
         if (applied.contains(m.version))
             continue;
+        if (!backedUp) {
+            backupBeforeUpdate();
+            backedUp = true;
+        }
         Tx tx;
         // another connection may have applied it while we waited for the lock
         if (value("SELECT 1 FROM schema_migrations WHERE version = ?", {m.version}).isValid())
@@ -444,6 +529,8 @@ static void runMigrations()
 
 void initialize()
 {
+    const bool hadData = value("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'players'").isValid();
+
     exec(R"sql(
         CREATE TABLE IF NOT EXISTS players (
             player_id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -545,7 +632,7 @@ void initialize()
     exec("CREATE INDEX IF NOT EXISTS idx_tournaments_game   ON tournaments(game)");
     exec("CREATE INDEX IF NOT EXISTS idx_tournaments_date   ON tournaments(tournament_date)");
 
-    runMigrations();
+    runMigrations(hadData);
 }
 
 } // namespace db

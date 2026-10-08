@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "prefs.h"
 
 #include <QApplication>
 #include <QMessageBox>
@@ -41,7 +42,15 @@ int main(int argc, char *argv[])
     QApplication::setStyle("Fusion");
     App app(argc, argv);
     app.setApplicationName("TCG Tournament Manager");
-    MainWindow window;
-    window.show();
-    return app.exec();
+    app.setApplicationVersion(prefs::VERSION);
+    try {
+        MainWindow window;
+        window.show();
+        return app.exec();
+    } catch (const std::exception &e) {
+        // the database could not be opened, or could not be backed up before an update
+        QMessageBox::critical(nullptr, "TCG Tournament Manager",
+                              "The program could not start.\n\n" + QString::fromUtf8(e.what()));
+        return 1;
+    }
 }

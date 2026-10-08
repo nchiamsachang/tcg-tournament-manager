@@ -9,9 +9,9 @@
 
 namespace prefs {
 
-const char *const VERSION = "0.2.0-alpha";
+const char *const VERSION = TCG_VERSION;       // set in the top-level CMakeLists.txt
 // verified from this project's Git remote (origin)
-const char *const REPO_URL = "https://github.com/nchiamsachang/tcg_tournament_manager";
+const char *const REPO_URL = "https://github.com/nchiamsachang/tcg-tournament-manager";
 
 QString issuesUrl()
 {

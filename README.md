@@ -16,26 +16,49 @@ Magic: The Gathering — Modern and Commander), written in C++17 on Qt 6
 ## Building
 
 Needs Visual Studio 2022 with the C++ workload (it supplies the compiler,
-CMake and Ninja) and Qt 6 for MSVC 2022 64-bit. The scripts expect Qt in
-`C:\Qt\6.10.2\msvc2022_64`; set `QT_DIR` to use another copy.
+CMake and Ninja) and Qt 6 for MSVC 2022 64-bit. Visual Studio is found
+through its installer. Qt is looked for in `C:\Qt\6.10.2\msvc2022_64`; set
+`QT_DIR` to use another copy.
 
 ```
-build.bat        build into build
+build.bat        build (Release, 64-bit) into build
 run_tests.bat    build, then run both test programs
-deploy.bat       build, then gather the app and its Qt files into dist\TcgTournamentManager
+package.bat      build, then make the folder and zip to share (see below)
 ```
 
-`dist\TcgTournamentManager\TcgTournamentManager.exe` is the program to
-run. The folder can be copied to another PC; that PC may need the Microsoft
-Visual C++ 2015–2022 x64 runtime installed.
+## Packaging a release
+
+```
+package.bat
+```
+
+makes `dist\TcgTournamentManager-<version>\` and, from it,
+`dist\TcgTournamentManager-<version>-win64.zip`. The folder holds
+`TcgTournamentManager.exe`, the Qt files it needs, the Microsoft C++ runtime,
+a README for the people you send it to (`packaging/README.txt`) and the
+licence notices (`packaging/licenses/`). It runs by double-clicking the .exe
+on a PC with neither Qt nor Visual Studio. The program is not code-signed.
+
+The version is set at the top of `CMakeLists.txt`: the number in `project()`
+and, below it, `TCG_VERSION_LABEL` (`preview` now; empty for a final release).
+It is shown on the home screen and in Settings, and names the folder and zip.
 
 ## Where the data lives
 
-The database is `tcg_tournament.db` beside the program. When a
-`tcg_tournament.db` exists in a parent folder (the project root, while the
-program runs from `build` or `dist`) that one is used instead, so the
-app opens the tournaments you already have. Set `TCG_DATA_DIR` to force a
-folder.
+The database (`tcg_tournament.db`), `settings.json` and a `backups` folder are
+in the user's own application-data folder,
+`%LOCALAPPDATA%\TcgTournamentManager`, so replacing the program never touches
+them. Settings shows the exact path. Set `TCG_DATA_DIR` to use another folder,
+which is how to try things out without touching your own data.
+
+Builds before 0.2.0-preview kept the database beside the program or in a
+parent folder of it (the project root, while running from `build` or
+`dist`). On first launch, when the user folder has no database yet, such a
+database and its settings are copied there; the originals are left as they
+were, and nothing in the user folder is ever overwritten.
+
+Before a new version changes the database format, it saves a copy of the
+database in `backups`.
 
 ## Reproducible pairings
 

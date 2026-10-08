@@ -1,0 +1,32 @@
+TCG Tournament Manager - third-party software
+=============================================
+
+This folder is distributed with the following software made by others.
+
+
+Qt 6 (Qt6Core, Qt6Gui, Qt6Widgets, Qt6Sql, Qt6PrintSupport, Qt6Svg and the plugin folders)
+-------------------------------------------------------------------------------------------
+Copyright (C) The Qt Company Ltd. and other contributors.
+
+Qt is used under the GNU Lesser General Public License, version 3. The licence text is in
+LGPL-3.0.txt; it adds to the GNU General Public License, version 3, in GPL-3.0.txt.
+
+Qt is used unmodified and is linked dynamically: the Qt6*.dll files and the plugin folders
+beside the program can be replaced with your own build of the same Qt version. The Qt
+source code is available from https://download.qt.io/official_releases/qt/ and
+https://code.qt.io/.
+
+Qt itself contains third-party components (among them zlib, libpng, libjpeg-turbo,
+FreeType, HarfBuzz, PCRE2 and double-conversion) under their own permissive licences. They
+are listed, with their licence texts, at https://doc.qt.io/qt-6/licenses-used-in-qt.html.
+
+
+SQLite (inside sqldrivers\qsqlite.dll)
+--------------------------------------
+SQLite is in the public domain. https://www.sqlite.org/copyright.html
+
+
+Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll, concrt140.dll, vccorlib140.dll)
+-----------------------------------------------------------------------------------------------
+Copyright (C) Microsoft Corporation. Redistributed unmodified, as allowed for the
+redistributable files of Microsoft Visual Studio 2022.
