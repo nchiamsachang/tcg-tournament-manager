@@ -2,14 +2,14 @@
 
 A desktop app for running trading card game tournaments (One Piece, Pokémon,
 Magic: The Gathering — Modern and Commander), written in C++17 on Qt 6
-(Widgets, Sql, PrintSupport). The Commander rules are described in
+(Widgets, Sql, PrintSupport, Svg). The Commander rules are described in
 `docs/COMMANDER.md`.
 
 ## Layout
 
 | Folder | What is in it |
 |---|---|
-| `src/core/` | No user interface. `db` (connection, schema, migrations, transactions), `tournaments` (tournament, registration, round and match records), `players` (directory and history), `swiss` (one-on-one scoring, pairing and event flow), `commander` (multiplayer rules and pairing, no database), `commander_db` (Commander event flow), `round_clock` (countdowns saved as timestamps), `round_status` (which round is in play, for any format), `prefs` (settings file). `store.h` includes the non-Commander headers in one line. |
+| `src/core/` | No user interface. `db` (connection, schema, migrations, transactions), `tournaments` (tournament, registration, round and match records), `players` (directory and history), `swiss` (one-on-one scoring, pairing and event flow), `commander` (multiplayer rules and pairing, no database), `commander_db` (Commander event flow), `round_clock` (countdowns saved as timestamps), `round_status` (which round is in play, for any format), `prefs` (settings file), `applog` (the diagnostic log). `store.h` includes the non-Commander headers in one line. |
 | `src/ui/` | `theme` (colours and shared widgets), `main_window`, `screens_*` (every screen), `dialogs` (round clock, settings), `printing`. |
 | `assets/` | Game logos and `icons/`: the [Lucide](https://lucide.dev) icons the app uses, as SVG files built into the program (`assets.qrc`). `T::button`, `T::setButtonIcon` and `T::iconLabel` in `theme` draw them in the theme's colours. To add one, copy its `.svg` into `assets/icons` and list it in `assets.qrc`. |
 | `tests/` | `test_core.cpp`, `test_rules.cpp` (hand-worked rule examples and pairing checks), `test_ui.cpp`, and `fixtures/reference.json`. |
@@ -43,7 +43,7 @@ licence notices (`packaging/licenses/`). It runs by double-clicking the .exe
 on a PC with neither Qt nor Visual Studio. The program is not code-signed.
 
 The version is set at the top of `CMakeLists.txt`: the number in `project()`
-and, below it, `TCG_VERSION_LABEL` (`preview` now; empty for a final release).
+and, below it, `TCG_VERSION_LABEL` (`preview.3` now; empty for a final release).
 It is shown on the home screen and in Settings, and names the folder and zip.
 
 ## Where the data lives
