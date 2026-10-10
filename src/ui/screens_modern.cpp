@@ -191,10 +191,11 @@ void RegistrationScreen::addAndEnroll()
             return;
         }
     }
+    // the question above is answered and its dialog closed before anything is written
     try {
-        tdb::enrollPlayer(tournamentId, pdb::addPlayer(name));
+        tdb::addAndEnrollPlayer(tournamentId, name);        // the player and the registration, or neither
     } catch (const std::exception &e) {
-        warn(this, "Error", QString::fromUtf8(e.what()));
+        warn(this, "Player not added", name + " was not added or enrolled, and nothing was changed.\n\n" + QString::fromUtf8(e.what()));
         return;
     }
     newNameBox->clear();
@@ -731,10 +732,9 @@ void RoundScreen::rename()
 void RoundScreen::recordResult(qint64 matchId, const QString &result)
 {
     try {
-        tdb::reportMatchResult(matchId, result);
-        swiss::calculateTiebreakers(tournamentId, game_);       // records follow the result that was just entered
+        swiss::reportResult(matchId, result);       // the result and the standings that follow from it, together
     } catch (const std::exception &e) {
-        warn(this, "Error", QString::fromUtf8(e.what()));
+        warn(this, "Result not saved", "The result was not saved, and nothing was changed.\n\n" + QString::fromUtf8(e.what()));
         return;
     }
     loadRound();
@@ -774,6 +774,12 @@ void RoundScreen::finalizeTournament()
 // One-on-one standings.
 
 static const int COL_PLACE = 56, COL_PTS = 60, COL_W = 46, COL_L = 46, COL_TB = 84;
+
+// A tiebreaker column, wide enough for its heading ("Opp Opp Win%" is the long one).
+static int tiebreakWidth(const QString &heading)
+{
+    return heading.size() > 8 ? COL_TB + 40 : COL_TB;
+}
 
 static QString ordinal(int n)
 {
@@ -826,7 +832,9 @@ StandingsScreen::StandingsScreen(MainWindow *mw, qint64 tid) : mw_(mw), tourname
     }
 
     QFrame *table = T::panel("st");
-    const int fixed = COL_PLACE + COL_PTS + COL_W + COL_L + COL_TB * int(tiebreaks_.size());
+    int fixed = COL_PLACE + COL_PTS + COL_W + COL_L;
+    for (const auto &c : tiebreaks_)
+        fixed += tiebreakWidth(c.second);
     table->setMinimumWidth(T::px(fixed) + 190);
     auto *tl = new QVBoxLayout(table);
     tl->setContentsMargins(1, 1, 1, 1);
@@ -838,7 +846,7 @@ StandingsScreen::StandingsScreen(MainWindow *mw, qint64 tid) : mw_(mw), tourname
     hh->setSpacing(0);
     QList<QPair<QString, int>> cols{{"#", COL_PLACE}, {"Player", 0}, {"Pts", COL_PTS}, {"W", COL_W}, {"L", COL_L}};
     for (const auto &c : tiebreaks_)
-        cols.append({c.second, COL_TB});
+        cols.append({c.second, tiebreakWidth(c.second)});
     for (int i = 0; i < cols.size(); ++i) {
         QLabel *lb = T::lbl(cols[i].first.toUpper(), T::MUTED, 10, 700, false, false, 1.0);
         if (cols[i].second) {
@@ -871,7 +879,8 @@ void StandingsScreen::load()
     }
     T::clear(rowsBox_);
     for (int i = 0; i < standings.size(); ++i)
-        rowsBox_->addWidget(standingRow(i + 1, standings[i], i == standings.size() - 1));
+        // the place the standings give: for a finished tournament, the placing that was saved
+        rowsBox_->addWidget(standingRow(standings[i]["standing"].toInt(), standings[i], i == standings.size() - 1));
     if (standings.isEmpty()) {
         QLabel *empty = T::lbl("No standings yet", T::MUTED, 13);
         empty->setContentsMargins(20, 16, 20, 16);
@@ -901,7 +910,7 @@ QWidget *StandingsScreen::standingRow(int place, const db::Row &player, bool las
     fixed(T::lbl(player["match_wins"].toString(), T::GREEN, 13, 600), COL_W);
     fixed(T::lbl(player["match_losses"].toString(), T::RED, 13), COL_L);
     for (const auto &c : tiebreaks_)
-        fixed(T::lbl(QString::number(player[c.first].toDouble(), 'f', 3), T::MUTED, 12, 400, false, true), COL_TB);
+        fixed(T::lbl(swiss::tiebreakText(game_, c.first, player[c.first].toDouble()), T::MUTED, 12, 400, false, true), tiebreakWidth(c.second));
     return row;
 }
 
@@ -942,10 +951,10 @@ void StandingsScreen::exportCsv()
     out << header.join(",") << "\n";
     for (int i = 0; i < standings.size(); ++i) {
         const db::Row &p = standings[i];
-        QStringList row{QString::number(i + 1), printing::csvCell(p["display_name"].toString()), p["match_points"].toString(),
+        QStringList row{p["standing"].toString(), printing::csvCell(p["display_name"].toString()), p["match_points"].toString(),
                         p["match_wins"].toString(), p["match_losses"].toString()};
         for (const auto &c : tiebreaks_)
-            row << QString::number(p[c.first].toDouble(), 'f', 3);
+            row << swiss::tiebreakText(game_, c.first, p[c.first].toDouble());
         out << row.join(",") << "\n";
     }
     f.close();

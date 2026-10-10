@@ -1,7 +1,13 @@
 #include "dialogs.h"
 
+#include "applog.h"
 #include "main_window.h"
 #include "theme.h"
+
+#include <QDesktopServices>
+#include <QDir>
+#include <QSaveFile>
+#include <QUrl>
 
 #include <QDateTime>
 #include <QFile>
@@ -191,8 +197,35 @@ SettingsDialog::SettingsDialog(MainWindow *mw) : QDialog(mw), mw_(mw)
     QPushButton *backup = T::button(QStringLiteral("Export database backup…"), "ghost");
     connect(backup, &QPushButton::clicked, this, [this] { exportBackup(); });
     body->addWidget(backup, 0, Qt::AlignLeft);
+
+    body->addSpacing(10);
+    body->addWidget(T::caps("Diagnostics"));
+    body->addWidget(T::lbl("The app keeps a log of what it did and of any errors, on this computer only. Nothing is sent anywhere.",
+                           T::MUTED, 12, 400, true));
+    // shown only while the log cannot be written; the app itself is not affected
+    const applog::Status logging = applog::status();
+    if (!logging.available) {
+        QLabel *status = T::lbl(QStringLiteral("Logging unavailable: %1. The app works normally, but what it does is not "
+                                               "being recorded (%2 entries so far). It tries again by itself.")
+                                    .arg(applog::redact(logging.reason)).arg(logging.lost), T::AMBER, 12, 600, true);
+        status->setObjectName("logStatus");
+        status->setAccessibleName("Logging unavailable");
+        body->addWidget(status);
+    }
+    auto *logButtons = new QWidget;
+    auto *lr = new T::FlowLayout(logButtons, 8);
+    QPushButton *openLogs = T::button("Open log folder", "ghost");
+    connect(openLogs, &QPushButton::clicked, this, [this] { openLogFolder(); });
+    QPushButton *report = T::button(QStringLiteral("Export diagnostic report…"), "ghost");
+    connect(report, &QPushButton::clicked, this, [this] { exportReport(); });
+    lr->addWidget(openLogs);
+    lr->addWidget(report);
+    body->addWidget(logButtons);
     body->addSpacing(8);
-    body->addWidget(T::lbl(QStringLiteral("TCG Tournament Manager  v%1").arg(prefs::VERSION), T::MUTED, 11));
+    QLabel *about = T::lbl(QStringLiteral("TCG Tournament Manager  v%1  ·  build %2").arg(prefs::VERSION, prefs::BUILD), T::MUTED, 11, 400, true);
+    about->setObjectName("buildLabel");
+    about->setTextInteractionFlags(Qt::TextSelectableByMouse);      // so it can be copied into a bug report
+    body->addWidget(about);
     body->addStretch();
 
     // actions stay outside the scrolling area so they are always reachable
@@ -269,6 +302,83 @@ void SettingsDialog::exportBackup()
         warn(this, "Backup failed", "The database could not be copied to:\n" + dest);
 }
 
+QString logFolder()
+{
+    const QString dir = applog::directory().isEmpty() ? db::dataDir() + "/logs" : applog::directory();
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void SettingsDialog::openLogFolder()
+{
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(logFolder())))
+        warn(this, "Log folder", "The log folder could not be opened:\n" + QDir::toNativeSeparators(logFolder()));
+}
+
+bool saveDiagnosticReport(const QString &file, const QString &text)
+{
+    QSaveFile f(file);
+    if (!f.open(QIODevice::WriteOnly))
+        return false;
+    f.write(text.toUtf8());
+    return f.commit();
+}
+
+// The report is shown first, exactly as it will be saved; nothing leaves the computer
+// unless the organizer saves the file and sends it themselves.
+void SettingsDialog::exportReport()
+{
+    const QString text = applog::diagnosticReport();
+    QDialog dlg(this);
+    dlg.setObjectName("reportDialog");
+    dlg.setWindowTitle("Diagnostic report");
+    fitDialog(&dlg, this, 760, 560);
+    auto *v = new QVBoxLayout(&dlg);
+    v->addWidget(T::lbl("Diagnostic report", T::TEXT, 20, 700, true));
+    QLabel *notice = T::lbl("This is exactly what will be saved: version details and recent log entries, never the database, and "
+                            "nothing is sent anywhere. Actions are recorded by id, but error messages can contain personal "
+                            "information. Names the app recognises were replaced by ids on a best-effort basis; short or "
+                            "unrecognised names and other typed-in text may remain. Please read it through before sharing it.",
+                            T::MUTED, 12, 400, true);
+    notice->setObjectName("reportNotice");
+    v->addWidget(notice);
+    if (!applog::status().available) {
+        QLabel *missing = T::lbl("Logging is unavailable at the moment, so recent entries may be missing from this report.",
+                                 T::AMBER, 12, 600, true);
+        missing->setObjectName("reportLogStatus");
+        v->addWidget(missing);
+    }
+    auto *preview = new QPlainTextEdit(text);
+    preview->setObjectName("reportPreview");
+    preview->setReadOnly(true);
+    preview->setLineWrapMode(QPlainTextEdit::NoWrap);
+    preview->setFont(T::font(11, 400, true));
+    v->addWidget(preview, 1);
+    auto *buttons = new QWidget;
+    auto *row = new T::FlowLayout(buttons, 10);
+    QPushButton *save = T::button(QStringLiteral("Save report…"), "primary");
+    QPushButton *close = T::button("Close", "ghost");
+    connect(close, &QPushButton::clicked, &dlg, &QDialog::reject);
+    connect(save, &QPushButton::clicked, &dlg, [&] {
+        const QString name = QStringLiteral("tcg-diagnostic-report-%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd-HHmm"));
+        const QString dest = QFileDialog::getSaveFileName(&dlg, "Save diagnostic report", name, "Text files (*.txt)");
+        if (dest.isEmpty())
+            return;
+        if (saveDiagnosticReport(dest, text)) {
+            applog::info("report.export", {{"status", "ok"}});
+            inform(&dlg, "Report saved", "The report was saved to:\n" + dest);
+            dlg.accept();
+        } else {
+            warn(&dlg, "Report not saved", "The report could not be saved to:\n" + dest);
+        }
+    });
+    row->addWidget(save);
+    row->addWidget(close);
+    v->addWidget(buttons);
+    close->setFocus();
+    dlg.exec();
+}
+
 void fitDialog(QDialog *dialog, QWidget *parent, int width, int height)
 {
     const QSize avail = parent->window()->size();
@@ -315,8 +425,18 @@ void inform(QWidget *parent, const QString &title, const QString &text)
 
 void warn(QWidget *parent, const QString &title, const QString &text)
 {
+    // Every error the organizer is shown is in the log, under the reference shown with it.
+    // When an action has just failed, this is that action's reference and operation id, so
+    // the attempt, the failure and this message can be matched.  Names the app recognises
+    // are replaced by ids before the text is written.
+    QString op;
+    const QString ref = applog::errorReference(&op);
+    applog::Fields fields{{"ref", ref}, {"title", title}};
+    if (!op.isEmpty())
+        fields.append({"op", op});
+    applog::warning("dialog.error", fields, applog::scrub(text));
     if (!g_autoConfirm)
-        QMessageBox::warning(parent, title, text);
+        QMessageBox::warning(parent, title, text + "\n\nReference: " + ref);
 }
 
 bool askText(QWidget *parent, const QString &title, const QString &label, const QString &okText, QString *value)
@@ -487,6 +607,15 @@ QString editTournamentName(MainWindow *mw, QWidget *parent, qint64 tournamentId)
             }
         }
         // the dialog stays open with what was typed, and the tournament keeps its name
+        {
+            QString op;
+            const QString ref = applog::errorReference(&op);
+            applog::Fields fields{{"ref", ref}, {"title", "Edit tournament name"}, {"tournament", tournamentId}};
+            if (!op.isEmpty())
+                fields.append({"op", op});
+            applog::warning("dialog.error", fields, applog::scrub(problem));
+            problem += QStringLiteral(" (Reference: %1)").arg(ref);
+        }
         error->setText(T::breakable(problem));
         error->show();
         edit->setFocus();

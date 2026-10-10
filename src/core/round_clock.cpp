@@ -1,6 +1,7 @@
 #include "round_clock.h"
 
 #include "tournaments.h"
+#include "applog.h"
 
 #include <QDateTime>
 #include <algorithm>
@@ -98,6 +99,8 @@ enum class Change { Start, Pause, Reset };
 // so two windows pressing Start and Pause at once cannot interleave.
 static Timer change(Kind kind, qint64 roundId, Change what)
 {
+    applog::Action log(what == Change::Start ? "clock.start" : what == Change::Pause ? "clock.pause" : "clock.reset",
+                       {{"kind", kind == Kind::Commander ? "commander" : "one-on-one"}, {"round", roundId}});
     db::Tx tx;
     Timer t = get(kind, roundId);
     if (!t.valid || t.closed)

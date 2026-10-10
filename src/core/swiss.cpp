@@ -1,5 +1,7 @@
 #include "swiss.h"
 
+#include "applog.h"
+
 #include "tournaments.h"
 
 #include <QHash>
@@ -44,8 +46,17 @@ QList<QPair<QString, QString>> tiebreakColumns(const QString &game)
     if (game == "ONEPIECE")
         return {{"omw_pct", "OMW%"}, {"gw_pct", "GW%"}};
     if (game == "POKEMON")
-        return {{"omw_pct", "Opp Win%"}, {"ogw_pct", "OGW%"}};
+        return {{"omw_pct", "Opp Win%"}, {"ogw_pct", "Opp Opp Win%"}};      // club policy; see figuresFromMatches
     return {{"omw_pct", "OMW%"}, {"gw_pct", "GW%"}, {"ogw_pct", "OGW%"}};      // MTG
+}
+
+QString tiebreakText(const QString &game, const QString &column, double value)
+{
+    // Pokémon's second tiebreaker is never below the 25% floor once it has been worked out,
+    // so 0 means a tournament finished before the figure existed.  Its saved placings stand.
+    if (game == "POKEMON" && column == "ogw_pct" && value <= 0.0)
+        return QStringLiteral("—");
+    return QString::number(value, 'f', 3);
 }
 
 // Every player's record and tiebreakers, worked out from the saved matches.  Nothing is written.
@@ -97,6 +108,14 @@ static QHash<qint64, QVariantMap> figuresFromMatches(qint64 tournamentId, const 
         return total > 0 ? std::max(double(w) / total, floor) : floor;
     };
 
+    // Opponents' match-win percentage for everybody first, at full double precision:
+    // Pokémon's second tiebreaker is worked out from these.
+    //   - A bye is not an opponent and does not count in anybody's win rate.
+    //   - An opponent met twice counts twice, once per match.
+    //   - Each opponent counts as at least the floor.  A player with no real opponent
+    //     (only byes, or nothing played yet) is given the floor.
+    //   - A player who has dropped is treated like anyone else: their record stands as it is.
+    QHash<qint64, double> oppWin;
     for (qint64 id : ids) {
         const QList<qint64> &opp = opponents[id];
         double omw = floor;
@@ -105,10 +124,32 @@ static QHash<qint64, QVariantMap> figuresFromMatches(qint64 tournamentId, const 
             for (qint64 o : opp) sum += matchWinPct(o);
             omw = sum / opp.size();
         }
+        oppWin.insert(id, omw);
+    }
+
+    for (qint64 id : ids) {
+        const QList<qint64> &opp = opponents[id];
+        const double omw = oppWin.value(id);
         const int total = wins[id] + losses[id] + draws[id];
         const double gw = total > 0 ? double(wins[id]) / total : 0.0;
+        // The third stored figure (column ogw_pct) is a different thing per game.
         double ogw = 0.0;
-        if (game == "MTG") {
+        int ogwDigits = 4;
+        if (game == "POKEMON") {
+            // Club policy: opponents' opponents' win percentage, the average of each opponent's
+            // own Opp Win% above (same opponents, same counting).  It cannot fall below the
+            // floor, since every Opp Win% is at least the floor; with no real opponent it is
+            // the floor.  Both Pokémon figures are saved and compared at nine-decimal
+            // precision (rounded to nine places: floating-point noise goes, and two values
+            // compare equal only if they agree to nine places); screens show three.
+            ogw = floor;
+            if (!opp.isEmpty()) {
+                double sum = 0;
+                for (qint64 o : opp) sum += oppWin.value(o, floor);
+                ogw = sum / opp.size();
+            }
+            ogwDigits = 9;
+        } else if (game == "MTG") {
             ogw = floor;
             if (!opp.isEmpty()) {
                 double sum = 0;
@@ -122,7 +163,7 @@ static QHash<qint64, QVariantMap> figuresFromMatches(qint64 tournamentId, const 
         out.insert(id, {
             {"match_points", wins[id] * pts.win + draws[id] * pts.draw},
             {"match_wins", wins[id]}, {"match_losses", losses[id]}, {"match_draws", draws[id]},
-            {"omw_pct", db::roundTo(omw, 4)}, {"gw_pct", db::roundTo(gw, 4)}, {"ogw_pct", db::roundTo(ogw, 4)},
+            {"omw_pct", db::roundTo(omw, game == "POKEMON" ? 9 : 4)}, {"gw_pct", db::roundTo(gw, 4)}, {"ogw_pct", db::roundTo(ogw, ogwDigits)},
         });
     }
     return out;
@@ -193,6 +234,39 @@ Rows currentStandings(qint64 tournamentId, const QString &game)
     return table;
 }
 
+// Two players who have already met, lower id first.
+using Met = QPair<qint64, qint64>;
+static Met metKey(qint64 a, qint64 b) { return {qMin(a, b), qMax(a, b)}; }
+
+// How many partial pairings pairWithoutRematch may try before giving up.  A club-sized field
+// is searched in full well inside this; it only bounds the time spent on a very large one.
+static const int PAIRING_SEARCH_STEPS = 200000;
+
+// Pairs `unpaired` (in standings order) so that nobody meets an opponent again, when such a
+// round exists.  Each player takes the highest-placed opponent they have not met, and a
+// choice that would leave the players below it with no new opponent is taken back and the
+// next one tried.  Returns false, leaving `out` unfinished, when there is no such round.
+static bool pairWithoutRematch(const QList<qint64> &unpaired, const QSet<Met> &met, QList<QPair<qint64, qint64>> &out,
+                               int &steps)
+{
+    if (unpaired.size() < 2)
+        return true;
+    if (--steps < 0)
+        return false;
+    const qint64 p1 = unpaired.first();
+    for (int i = 1; i < unpaired.size(); ++i) {
+        if (met.contains(metKey(p1, unpaired[i])))
+            continue;
+        QList<qint64> rest = unpaired.mid(1);
+        rest.removeAt(i - 1);
+        out.append({p1, unpaired[i]});
+        if (pairWithoutRematch(rest, met, out, steps))
+            return true;
+        out.removeLast();
+    }
+    return false;
+}
+
 qint64 generatePairings(qint64 tournamentId, int roundNumber)
 {
     db::Tx tx;      // the round and all of its matches, or nothing
@@ -216,9 +290,13 @@ qint64 generatePairings(qint64 tournamentId, int roundNumber)
     }
 
     QSet<qint64> hadBye;
-    for (const Row &m : tdb::allMatches(tournamentId))
+    QSet<Met> met;
+    for (const Row &m : tdb::allMatches(tournamentId)) {
         if (m["winner"].toString() == "BYE")
             hadBye.insert(m["player1_id"].toLongLong());
+        if (!m["player2_id"].isNull())
+            met.insert(metKey(m["player1_id"].toLongLong(), m["player2_id"].toLongLong()));
+    }
 
     QVariant byePlayer;
     if (players.size() % 2 == 1) {
@@ -240,18 +318,24 @@ qint64 generatePairings(qint64 tournamentId, int roundNumber)
     QList<qint64> unpaired;
     for (const Row &p : players)
         unpaired << p["player_id"].toLongLong();
-    while (unpaired.size() >= 2) {
-        const qint64 p1 = unpaired.takeFirst();
-        bool paired = false;
-        for (int i = 0; i < unpaired.size(); ++i) {
-            if (!tdb::havePlayedBefore(tournamentId, p1, unpaired[i])) {
-                pairings.append({p1, unpaired.takeAt(i)});
-                paired = true;
-                break;
+    int steps = PAIRING_SEARCH_STEPS;
+    if (!pairWithoutRematch(unpaired, met, pairings, steps)) {
+        // every possible round repeats a match (or the field is too large to search in
+        // full): go down the standings, repeating a match only for a player with nobody new left
+        pairings.clear();
+        while (unpaired.size() >= 2) {
+            const qint64 p1 = unpaired.takeFirst();
+            bool paired = false;
+            for (int i = 0; i < unpaired.size(); ++i) {
+                if (!met.contains(metKey(p1, unpaired[i]))) {
+                    pairings.append({p1, unpaired.takeAt(i)});
+                    paired = true;
+                    break;
+                }
             }
+            if (!paired)
+                pairings.append({p1, unpaired.takeFirst()});
         }
-        if (!paired)
-            pairings.append({p1, unpaired.takeFirst()});
     }
 
     const qint64 roundId = tdb::createRound(tournamentId, roundNumber);
@@ -280,8 +364,19 @@ static void requireAllReported(qint64 roundId, int roundNumber)
                             .arg(roundNumber).arg(pending).arg(pending == 1 ? "" : "s"));
 }
 
+void reportResult(qint64 matchId, const QString &result)
+{
+    applog::Action log("result.report", {{"match", matchId}, {"match_result", result.isEmpty() ? QStringLiteral("CLEARED") : result}});
+    db::Tx tx;      // owns the transaction; the two steps below join it
+    const qint64 tournamentId = tdb::writeMatchResult(matchId, result);
+    log.set("tournament", tournamentId);
+    calculateTiebreakers(tournamentId, tdb::tournamentById(tournamentId)["game"].toString());
+    tx.commit();
+}
+
 void startTournament(qint64 tournamentId)
 {
+    applog::Action log("tournament.start", {{"tournament", tournamentId}});
     db::Tx tx;
     const Row t = requireTournament(tournamentId);
     if (t["status"].toString() != tdb::PENDING)
@@ -293,6 +388,7 @@ void startTournament(qint64 tournamentId)
 
 qint64 advanceToNextRound(qint64 tournamentId, int fromRound)
 {
+    applog::Action log("round.end", {{"tournament", tournamentId}, {"round_number", fromRound}});
     db::Tx tx;
     const Row t = requireTournament(tournamentId);
     if (t["status"].toString() != tdb::IN_PROGRESS)
@@ -310,11 +406,13 @@ qint64 advanceToNextRound(qint64 tournamentId, int fromRound)
     calculateTiebreakers(tournamentId, t["game"].toString());       // the next pairing reads the new points
     const qint64 nextRoundId = generatePairings(tournamentId, fromRound + 1);
     tx.commit();
+    log.set("next_round", nextRoundId);
     return nextRoundId;
 }
 
 Rows finalizeTournament(qint64 tournamentId, const QString &game)
 {
+    applog::Action log("tournament.finalize", {{"tournament", tournamentId}});
     db::Tx tx;
     const Row t = requireTournament(tournamentId);
     if (t["status"].toString() == tdb::COMPLETED)

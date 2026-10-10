@@ -1,6 +1,7 @@
 #include "tournaments.h"
 
 #include "players.h"
+#include "applog.h"
 
 #include <QDate>
 #include <QJsonDocument>
@@ -32,6 +33,7 @@ bool isValidRoundMinutes(int minutes)
 qint64 createTournament(const QString &name, const QString &game, int totalRounds, const QString &format,
                         const QString &tournamentDate, int roundTimeMins, int topCut)
 {
+    applog::Action log("tournament.create", {{"game", game}, {"format", format}, {"rounds", totalRounds}});
     if (name.trimmed().isEmpty())
         throw std::invalid_argument("A tournament needs a name.");
     if (name.size() > MAX_NAME_LENGTH)
@@ -41,10 +43,12 @@ qint64 createTournament(const QString &name, const QString &game, int totalRound
     if (!isValidRoundMinutes(roundTimeMins))
         throw std::invalid_argument("Round length must be from 1 to 240 minutes.");
     const QString date = tournamentDate.isEmpty() ? QDate::currentDate().toString(Qt::ISODate) : tournamentDate;
-    return db::exec("INSERT INTO tournaments (name, game, format, tournament_date, location, total_rounds, top_cut, "
-                    "round_time_mins, status, notes) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'PENDING', NULL)",
-                    {name, game, format.isEmpty() ? QVariant() : QVariant(format), date, totalRounds, topCut,
-                     roundTimeMins}).lastId;
+    const qint64 id = db::exec("INSERT INTO tournaments (name, game, format, tournament_date, location, total_rounds, top_cut, "
+                               "round_time_mins, status, notes) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'PENDING', NULL)",
+                               {name, game, format.isEmpty() ? QVariant() : QVariant(format), date, totalRounds, topCut,
+                                roundTimeMins}).lastId;
+    log.set("tournament", id);
+    return id;
 }
 
 static const char *TOURNAMENT_SELECT =
@@ -75,6 +79,7 @@ void updateTournamentStatus(qint64 tournamentId, const QString &status)
 
 bool renameTournament(qint64 tournamentId, const QString &name)
 {
+    applog::Action log("tournament.rename", {{"tournament", tournamentId}});
     const QString wanted = name.trimmed();
     if (wanted.isEmpty())
         throw std::invalid_argument("A tournament needs a name.");
@@ -85,8 +90,10 @@ bool renameTournament(qint64 tournamentId, const QString &name)
     if (t.isEmpty())
         throw std::invalid_argument("That tournament does not exist.");
     const QString previous = t["name"].toString();
-    if (previous == wanted)
+    if (previous == wanted) {
+        log.outcome("no-change");
         return false;
+    }
     db::exec("UPDATE tournaments SET name = ? WHERE tournament_id = ?", {wanted, tournamentId});
     // Commander events keep an audit trail; other formats have none
     const QString detail = QString::fromUtf8(
@@ -113,12 +120,15 @@ void requireNotTerminated(qint64 tournamentId)
 
 bool terminateTournament(qint64 tournamentId)
 {
+    applog::Action log("tournament.end_early", {{"tournament", tournamentId}});
     db::Tx tx;      // the status, the time and the clocks change together or not at all
     const QString status = db::value("SELECT status FROM tournaments WHERE tournament_id = ?", {tournamentId}).toString();
     if (status.isEmpty())
         throw std::invalid_argument("That tournament does not exist.");
-    if (status == TERMINATED)
+    if (status == TERMINATED) {
+        log.outcome("no-change");
         return false;       // a second click, or another window got there first
+    }
     if (status == COMPLETED)
         throw std::logic_error("This tournament is already finished.");
 
@@ -167,19 +177,57 @@ GameStats gameStats(const QString &game)
 
 qint64 enrollPlayer(qint64 tournamentId, qint64 playerId)
 {
-    requireNotTerminated(tournamentId);
-    if (pdb::isRemoved(playerId))
+    applog::Action log("player.enroll", {{"tournament", tournamentId}, {"player", playerId}});
+    db::Tx tx;      // the checks and the write see the same state
+    const QVariant status = db::value("SELECT status FROM tournaments WHERE tournament_id = ?", {tournamentId});
+    if (!status.isValid())
+        throw std::invalid_argument("That tournament does not exist.");
+    if (status.toString() == TERMINATED)
+        throw std::logic_error(ENDED_EARLY);
+    const Row player = db::one("SELECT deleted_at FROM players WHERE player_id = ?", {playerId});
+    if (player.isEmpty())
+        throw std::invalid_argument("That player does not exist.");
+    if (!player["deleted_at"].isNull())
         throw std::logic_error("This player was removed from the directory and cannot be registered.");
-    try {
-        return db::exec("INSERT INTO enrollments (tournament_id, player_id, deck_name) VALUES (?, ?, NULL)",
-                        {tournamentId, playerId}).lastId;
-    } catch (const db::Error &) {
-        return 0;       // player already enrolled
+    // Already registered is an answer, not an error; it is the only case reported as 0.
+    if (db::value("SELECT 1 FROM enrollments WHERE tournament_id = ? AND player_id = ?", {tournamentId, playerId}).isValid()) {
+        log.outcome("already-enrolled");
+        return 0;
     }
+    qint64 id = 0;
+    try {
+        id = db::exec("INSERT INTO enrollments (tournament_id, player_id, deck_name) VALUES (?, ?, NULL)",
+                      {tournamentId, playerId}).lastId;
+    } catch (const db::Error &e) {
+        // Another connection registered them between the check and the write: the table's
+        // UNIQUE (tournament_id, player_id) rule refused the second row.  Every other failure
+        // (a missing row, a locked or unwritable database, any other rule) is a real error.
+        if (!e.unique())
+            throw;
+        log.outcome("already-enrolled");
+        return 0;
+    }
+    tx.commit();
+    return id;
+}
+
+qint64 addAndEnrollPlayer(qint64 tournamentId, const QString &displayName)
+{
+    applog::Action log("player.add_and_enroll", {{"tournament", tournamentId}});
+    if (displayName.trimmed().isEmpty())
+        throw std::invalid_argument("A player needs a name.");
+    db::Tx tx;      // owns the transaction: the new player and their registration, or neither
+    const qint64 playerId = pdb::addPlayer(displayName.trimmed());
+    log.set("player", playerId);
+    if (enrollPlayer(tournamentId, playerId) == 0)
+        throw std::logic_error("The new player could not be registered.");     // cannot happen for a new id
+    tx.commit();
+    return playerId;
 }
 
 void unenrollPlayer(qint64 tournamentId, qint64 playerId)
 {
+    applog::Action log("player.unenroll", {{"tournament", tournamentId}, {"player", playerId}});
     requireNotTerminated(tournamentId);
     db::exec("DELETE FROM enrollments WHERE tournament_id = ? AND player_id = ?", {tournamentId, playerId});
 }
@@ -271,7 +319,7 @@ Rows roundPairings(qint64 roundId)
     return rows;
 }
 
-void reportMatchResult(qint64 matchId, const QString &result)
+qint64 writeMatchResult(qint64 matchId, const QString &result)
 {
     static const QStringList reportable = {"PLAYER1", "PLAYER2", "DRAW"};
     if (!result.isEmpty() && !reportable.contains(result))
@@ -279,7 +327,7 @@ void reportMatchResult(qint64 matchId, const QString &result)
 
     db::Tx tx;      // the checks and the write see the same state
     const Row match = db::one(
-        "SELECT m.player2_id, m.round_id, t.status, "
+        "SELECT m.player2_id, m.round_id, m.tournament_id, t.status, "
         "(SELECT MAX(r.round_id) FROM rounds r WHERE r.tournament_id = m.tournament_id "
         "  AND r.round_number = (SELECT MAX(round_number) FROM rounds WHERE tournament_id = m.tournament_id)) AS latest_round "
         "FROM matches m JOIN tournaments t ON t.tournament_id = m.tournament_id WHERE m.match_id = ?", {matchId});
@@ -296,6 +344,13 @@ void reportMatchResult(qint64 matchId, const QString &result)
     db::exec("UPDATE matches SET winner = ? WHERE match_id = ?",
              {result.isEmpty() ? QStringLiteral("PENDING") : result, matchId});
     tx.commit();
+    return match["tournament_id"].toLongLong();
+}
+
+void reportMatchResult(qint64 matchId, const QString &result)
+{
+    applog::Action log("result.report", {{"match", matchId}, {"match_result", result.isEmpty() ? QStringLiteral("CLEARED") : result}});
+    writeMatchResult(matchId, result);
 }
 
 Rows allMatches(qint64 tournamentId)

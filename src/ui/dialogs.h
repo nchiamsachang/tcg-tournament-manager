@@ -61,6 +61,10 @@ private:
                          const QList<QPair<QString, QString>> &options);
     void exportBackup();
     MainWindow *mw_;
+
+public:
+    void openLogFolder();
+    void exportReport();            // shows the report, then offers to save it
 };
 
 // Size a dialog to the window it belongs to, so it is never larger than the area available.
@@ -115,3 +119,8 @@ qint64 chooseSameName(QWidget *parent, const QString &name, const db::Rows &matc
 // The question before a player is removed from the directory; `shownName` carries the id
 // when another player has the same name.  Cancel is the default; Escape or closing cancels.
 bool confirmRemovePlayer(QWidget *parent, const QString &shownName);
+
+// Logs and diagnostic reports.
+QString logFolder();                // where the log files are (created if it is not there yet)
+// Writes a report (see applog::diagnosticReport) to a file; false when it could not be saved.
+bool saveDiagnosticReport(const QString &file, const QString &text);

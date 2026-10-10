@@ -1,7 +1,10 @@
 #include "db.h"
 
+#include "applog.h"
+
 #include <QCoreApplication>
 #include <cstdio>
+#include <exception>
 #include <cstdlib>
 #include <QDateTime>
 #include <QDir>
@@ -19,7 +22,10 @@
 
 namespace db {
 
-Error::Error(const QString &m, bool c) : std::runtime_error(m.toStdString()), constraint(c), message(m) {}
+Error::Error(const QString &m, bool c, int errorCode)
+    : std::runtime_error(m.toStdString()), constraint(c), message(m), code(errorCode)
+{
+}
 
 static QMutex g_pathLock;
 static QString g_path;
@@ -81,12 +87,16 @@ QString resolveDataFile(const QString &userDir, const QString &programDir)
     // name and renamed, so an interrupted copy is never mistaken for the database.
     const QString partial = target + QStringLiteral(".importing");
     QFile::remove(partial);
-    if (!snapshot(earlier, partial) && !QFile::copy(earlier, partial))
+    if (!snapshot(earlier, partial) && !QFile::copy(earlier, partial)) {
+        applog::error("db.import", {{"status", "failed"}}, "An earlier database could not be copied to the user folder; it is used where it is.");
         return earlier;                     // keep working on the data where it is; retried next launch
+    }
     if (!QFile::rename(partial, target)) {
         QFile::remove(partial);
+        applog::error("db.import", {{"status", "failed"}}, "The copied database could not be put in place.");
         return QFileInfo::exists(target) ? target : earlier;
     }
+    applog::info("db.import", {{"status", "ok"}}, "An earlier database was copied to the user folder from " + QDir::toNativeSeparators(earlier));
     const QString settings = QStringLiteral("settings.json");
     QFile::copy(QFileInfo(earlier).dir().filePath(settings), QDir(userDir).filePath(settings));
     return target;
@@ -128,6 +138,7 @@ QString dataDir()
 
 static thread_local QString t_openPath;
 static thread_local int t_txDepth = 0;      // open db::Tx objects on this thread
+static thread_local bool t_txFailed = false;    // a joined step failed: the open transaction can only roll back
 
 static QString connectionName()
 {
@@ -187,7 +198,7 @@ static void run(QSqlQuery &q, const QString &sql, const QVariantList &args)
         const int code = e.nativeErrorCode().toInt(&isNumber);
         const bool constraint = isNumber && (code & 0xff) == 19;   // SQLITE_CONSTRAINT and its extended codes
         QString text = e.databaseText().isEmpty() ? e.text() : e.databaseText();
-        throw Error(text, constraint);
+        throw Error(text, constraint, isNumber ? code : 0);
     }
 }
 
@@ -232,23 +243,48 @@ Result exec(const QString &sql, const QVariantList &args)
     return r;
 }
 
-Tx::Tx() : outermost_(t_txDepth == 0)
+bool inTransaction()
 {
-    if (outermost_)
+    return t_txDepth > 0;
+}
+
+Tx::Tx() : outermost_(t_txDepth == 0), exceptions_(std::uncaught_exceptions())
+{
+    if (outermost_) {
         exec(QStringLiteral("BEGIN IMMEDIATE"));
+        t_txFailed = false;         // a new transaction starts clean, whatever happened before
+    }
     ++t_txDepth;
 }
 
 void Tx::commit()
 {
-    if (outermost_)
+    if (outermost_) {
+        if (t_txFailed) {
+            // A step that had joined this transaction failed and its error was caught on the
+            // way here.  Part of the change is missing, so none of it is saved.
+            t_txFailed = false;
+            done_ = true;
+            try {
+                exec(QStringLiteral("ROLLBACK"));
+            } catch (const Error &) {
+            }
+            throw Error(QStringLiteral("Part of this change failed, so none of it was saved."), false);
+        }
         exec(QStringLiteral("COMMIT"));
+    }
     done_ = true;
 }
 
 Tx::~Tx()
 {
     --t_txDepth;
+    // A joined step that is left by an exception without committing has failed.  The owner
+    // must not commit what is left, even if the exception is caught before it gets there.
+    if (!outermost_ && !done_ && std::uncaught_exceptions() > exceptions_)
+        t_txFailed = true;
+    if (outermost_)
+        t_txFailed = false;
     if (done_ || !outermost_)
         return;
     try {
@@ -534,6 +570,7 @@ const QList<Migration> &migrations()
 // Applies one migration and records it, all or nothing.
 static void applyMigration(const Migration &m)
 {
+    applog::Action log("db.update", {{"version", m.version}, {"name", QString::fromLatin1(m.name)}});
     Tx tx;
     // another connection may have applied it while we waited for the lock
     if (value("SELECT 1 FROM schema_migrations WHERE version = ?", {m.version}).isValid())
@@ -559,9 +596,12 @@ QString backupBeforeUpdate()
     QString dest = stem + QStringLiteral(".db");
     for (int n = 2; QFileInfo::exists(dest); ++n)
         dest = QStringLiteral("%1-%2.db").arg(stem).arg(n);
-    if (!snapshot(path(), dest))
+    if (!snapshot(path(), dest)) {
+        applog::error("db.backup", {{"status", "failed"}, {"file", QFileInfo(dest).fileName()}});
         throw Error(QStringLiteral("The database needs updating for this version, but a backup could not be "
                                    "saved to %1. Nothing was changed.").arg(QDir::toNativeSeparators(dest)), false);
+    }
+    applog::info("db.backup", {{"status", "ok"}, {"file", QFileInfo(dest).fileName()}});
     return dest;
 }
 

@@ -3,6 +3,7 @@
 // reference.json holds recorded events; the replay tests require the engine
 // to produce exactly the same pods, seats, byes and standings from the same
 // inputs and seeds.
+#include "applog.h"
 #include "commander.h"
 #include "commander_db.h"
 #include "db.h"
@@ -18,6 +19,7 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -185,6 +187,9 @@ private slots:
 
     void cleanup()
     {
+        applog::setDirectory(QString());
+        applog::setLimits(2 * 1024 * 1024, 5);
+        applog::setRetryInterval(30000);
         db::closeThreadConnection();
         tmp_.reset();
     }
@@ -1464,6 +1469,110 @@ private slots:
         again.commit();
     }
 
+    // An inner step fails and its error is caught before it reaches the owner of the
+    // transaction.  The owner must not be able to save what is left.
+    void aFailedInnerStepCannotBeCommittedByItsOwner()
+    {
+        const auto players = [] { return db::value("SELECT COUNT(*) FROM players").toInt(); };
+        const auto rejected = [](db::Tx &tx) {
+            try {
+                tx.commit();
+            } catch (const db::Error &e) {
+                return e.message.contains("none of it was saved");
+            }
+            return false;
+        };
+
+        {
+            db::Tx outer;
+            pdb::addPlayer("outer");
+            try {
+                db::Tx inner;
+                pdb::addPlayer("inner");
+                throw std::runtime_error("failure inside the inner step");
+            } catch (const std::runtime_error &) {
+                // swallowed: the owner never hears of it
+            }
+            QVERIFY(rejected(outer));
+        }
+        QVERIFY(!db::inTransaction());
+        QCOMPARE(players(), 0);                         // neither the outer nor the inner write was saved
+
+        // the same through real operations: the registration fails (no such tournament)
+        {
+            db::Tx outer;
+            const qint64 id = pdb::addPlayer("kept by mistake");
+            bool failed = false;
+            try {
+                tdb::enrollPlayer(987654, id);
+            } catch (...) {
+                failed = true;
+            }
+            QVERIFY(failed);
+            QVERIFY(rejected(outer));
+        }
+        QCOMPARE(players(), 0);
+
+        // two levels down, with the level in between committing as if all were well
+        {
+            db::Tx outer;
+            pdb::addPlayer("outer");
+            {
+                db::Tx middle;
+                try {
+                    db::Tx inner;
+                    pdb::addPlayer("inner");
+                    throw std::runtime_error("failure two levels down");
+                } catch (const std::runtime_error &) {
+                }
+                middle.commit();
+            }
+            QVERIFY(rejected(outer));
+        }
+        QCOMPARE(players(), 0);
+
+        // nothing of that is left over: an independent transaction commits
+        {
+            db::Tx tx;
+            pdb::addPlayer("alone");
+            tx.commit();
+        }
+        QCOMPARE(players(), 1);
+        // a failed step whose owner gives up without committing leaves nothing behind either
+        {
+            db::Tx outer;
+            try {
+                db::Tx inner;
+                throw std::runtime_error("failure");
+            } catch (const std::runtime_error &) {
+            }
+        }
+        {
+            db::Tx outer;
+            pdb::addPlayer("outer");
+            {
+                db::Tx inner;
+                pdb::addPlayer("inner");
+                inner.commit();
+            }
+            outer.commit();                             // ordinary nested success still commits
+        }
+        QCOMPARE(players(), 3);
+        // a step that only reads and returns without committing does not spoil its owner
+        {
+            db::Tx outer;
+            pdb::addPlayer("with a read");
+            {
+                db::Tx reading;
+                db::value("SELECT COUNT(*) FROM players");
+            }
+            outer.commit();
+        }
+        QCOMPARE(players(), 4);
+        restart();
+        QCOMPARE(players(), 4);
+    }
+
     // Player ids, names that repeat, and removing a player from the directory
 
     void playerIdsArePermanentAndNamesMayRepeat()
@@ -1878,6 +1987,8 @@ private slots:
         QCOMPARE(swiss::tiebreakColumns("MTG").size(), 3);
         QCOMPARE(swiss::tiebreakColumns("ONEPIECE").size(), 2);
         QCOMPARE(swiss::tiebreakColumns("POKEMON")[1].first, QString("ogw_pct"));
+        QCOMPARE(swiss::tiebreakColumns("POKEMON")[1].second, QString("Opp Opp Win%"));
+        QCOMPARE(swiss::tiebreakColumns("MTG")[2].second, QString("OGW%"));
         for (const char *game : {"MTG", "ONEPIECE", "POKEMON"})
             QCOMPARE(swiss::tiebreakColumns(game)[0].first, QString("omw_pct"));
     }
@@ -2264,6 +2375,760 @@ private slots:
         for (qint64 tid : {pending, running, done, ended, cmd})
             QCOMPARE(tdb::tournamentById(tid)["name"].toString(), QStringLiteral("Demo Event %1").arg(++n));
         QCOMPARE(everything(), before);
+    }
+
+private:
+    // Everything in the log folder, oldest entry first.
+    QStringList logLines()
+    {
+        QStringList out;
+        const QDir dir(tmp_->filePath("logs"));
+        QStringList files = dir.entryList({"app*.log"}, QDir::Files, QDir::Name);
+        std::sort(files.begin(), files.end(), [](const QString &x, const QString &y) {      // app.4.log … app.1.log, app.log
+            const int a = x.section('.', 1, 1).toInt(), b = y.section('.', 1, 1).toInt();
+            return a > b;
+        });
+        for (const QString &name : files) {
+            QFile f(dir.filePath(name));
+            if (f.open(QIODevice::ReadOnly))
+                out << QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        }
+        return out;
+    }
+
+    QStringList logged(const QString &containing)
+    {
+        QStringList out;
+        for (const QString &l : logLines())
+            if (l.contains(containing))
+                out << l;
+        return out;
+    }
+
+private slots:
+    // The diagnostic log
+
+    void logEntriesCarryTimeSeverityVersionActionAndIds()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        applog::info("test.plain", {{"tournament", 12}, {"round", 34}, {"flag", true}, {"text", "two words"}});
+        applog::warning("test.detail", {{"player", 7}}, "first line\nsecond line");
+        applog::error("test.error");
+        const QStringList lines = logLines();
+        QCOMPARE(lines.size(), 3);
+        // local time with milliseconds and its offset from UTC, then severity, version and action
+        static const QRegularExpression head(QStringLiteral(
+            "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}[+-]\\d\\d:\\d\\d (INFO |WARN |ERROR) %1 test\\.")
+                                                 .arg(QRegularExpression::escape(prefs::VERSION)));
+        for (const QString &l : lines)
+            QVERIFY2(head.match(l).hasMatch(), qPrintable(l));
+        QVERIFY2(lines[0].endsWith("test.plain tournament=12 round=34 flag=yes text=\"two words\""), qPrintable(lines[0]));
+        QVERIFY2(lines[1].contains(" WARN ") && lines[1].endsWith("test.detail player=7 | first line / second line"), qPrintable(lines[1]));
+        QVERIFY(lines[2].contains(" ERROR "));
+        QVERIFY(QFileInfo(tmp_->filePath("logs/app.log")).size() > 0);       // on disk already: nothing waits to be flushed
+        // references are short, different each time, and fit on one line of a dialog
+        const QString ref = applog::newReference();
+        QVERIFY(QRegularExpression("^R-[2-9B-DF-HJ-NP-TV-XZ]{6}$").match(ref).hasMatch());
+        QVERIFY(ref != applog::newReference());
+    }
+
+    void actionsAreLoggedAsAttemptedThenOkOrFailedByIdNotByName()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        // one-on-one
+        const qint64 zelda = pdb::addPlayer("Zelda Hyrule"), link = pdb::addPlayer("Link Kokiri");
+        const qint64 tid = tdb::createTournament("Secret Winter Cup", "POKEMON", 2, "Standard");
+        tdb::enrollPlayer(tid, zelda);
+        tdb::enrollPlayer(tid, link);
+        QCOMPARE(tdb::enrollPlayer(tid, link), qint64(0));
+        swiss::startTournament(tid);
+        const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
+        const qint64 match = tdb::roundPairings(rid).first()["match_id"].toLongLong();
+        timerdb::start(timerdb::Kind::OneOnOne, rid);
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::advanceToNextRound(tid, 1));       // a result is missing
+        tdb::reportMatchResult(match, "PLAYER1");
+        swiss::advanceToNextRound(tid, 1);
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(987654, "PLAYER1"));
+        tdb::renameTournament(tid, "Secret Spring Cup");
+        tdb::terminateTournament(tid);
+        QVERIFY(!tdb::terminateTournament(tid));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(match, "PLAYER2"));
+        pdb::renamePlayer(link, "Link Ordon");
+        pdb::removePlayer(link);
+        // Commander
+        auto [cmd, pids] = makeEvent(8, 2);
+        const QVariantMap pod = podAt(currentRound(cmd), 0);
+        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finalizeRound(currentRound(cmd)["round_id"].toLongLong()));
+        playRound(cmd);
+        cdb::dropPlayer(cmd, pids[0]);
+        cdb::publishNextRound(cmd, 2);
+
+        const auto results = [&](const QString &action, const QString &ids) {
+            QStringList out;
+            static const QRegularExpression result(" status=([a-z-]+)");
+            for (const QString &l : logged(" " + action + " "))
+                if (l.contains(ids))
+                    out << result.match(l).captured(1);
+            return out.join(",");
+        };
+        const QString t = QStringLiteral("tournament=%1").arg(tid);
+        QCOMPARE(results("tournament.create", t), QString("ok"));           // the id is only known once it is saved
+        QCOMPARE(results("player.enroll", t + QStringLiteral(" player=%1").arg(link)), QString("attempt,ok,attempt,already-enrolled"));
+        QCOMPARE(results("tournament.start", t), QString("attempt,ok"));
+        QCOMPARE(results("clock.start", QStringLiteral("round=%1").arg(rid)), QString("attempt,ok"));
+        QCOMPARE(results("round.end", t), QString("attempt,failed,attempt,ok"));
+        QCOMPARE(results("result.report", QStringLiteral("match=%1 ").arg(match)), QString("attempt,ok,attempt,failed"));
+        QCOMPARE(results("result.report", "match=987654"), QString("attempt,failed"));
+        QCOMPARE(results("tournament.rename", t), QString("attempt,ok"));
+        QCOMPARE(results("tournament.end_early", t), QString("attempt,ok,attempt,no-change"));
+        QCOMPARE(results("player.rename", QStringLiteral("player=%1").arg(link)), QString("attempt,ok"));
+        QCOMPARE(results("player.remove", QStringLiteral("player=%1").arg(link)), QString("attempt,ok"));
+        const QString c = QStringLiteral("tournament=%1").arg(cmd);
+        QCOMPARE(results("tournament.start", c), QString("attempt,ok"));
+        QCOMPARE(results("result.report", QStringLiteral("pod=%1 ").arg(podId(pod))), QString("attempt,ok"));
+        QVERIFY(results("round.finalize", "round=").startsWith("attempt,failed,attempt,ok"));
+        QCOMPARE(results("player.drop", c), QString("attempt,ok"));
+        QCOMPARE(results("round.publish", c), QString("attempt,ok"));
+        // a failed action is a warning; a successful one is not
+        for (const QString &l : logLines()) {
+            if (l.contains("status=failed"))
+                QVERIFY2(l.contains(" WARN "), qPrintable(l));
+            if (l.contains("status=ok") || l.contains("status=attempt"))
+                QVERIFY2(l.contains(" INFO "), qPrintable(l));
+        }
+        // ids, not names: no player or tournament name was written by any of this
+        const QString all = logLines().join('\n');
+        for (const char *name : {"Zelda", "Hyrule", "Link", "Kokiri", "Ordon", "Secret", "Winter Cup", "Spring Cup", "Test Commander"})
+            QVERIFY2(!all.contains(name), name);
+        // the Commander audit history in the database is still written, as before
+        const QStringList audit = auditActions(cmd);
+        for (const char *action : {"EVENT_STARTED", "ROUND_PUBLISHED", "RESULT_REPORTED", "ROUND_FINALIZED", "PLAYER_DROPPED"})
+            QVERIFY2(audit.contains(action), action);
+    }
+
+    void aSuccessIsOnlyLoggedOnceTheChangeIsSaved()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const qint64 tid = runningSwiss();
+        // the "ok" line is written after the transaction has ended, so the change is already readable
+        // from another connection by the time it exists
+        QCOMPARE(logged("tournament.start status=ok").size(), 1);
+        std::thread([&] {
+            QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::IN_PROGRESS);
+            db::closeThreadConnection();
+        }).join();
+        // an action that is refused part-way leaves no "ok" and no change
+        const Rows before = tdb::allMatches(tid);
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::finalizeTournament(tid, "POKEMON"));
+        QCOMPARE(logged("tournament.finalize status=ok").size(), 0);
+        QCOMPARE(logged("tournament.finalize status=failed").size(), 1);
+        QCOMPARE(tdb::allMatches(tid), before);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::IN_PROGRESS);
+    }
+
+    void databaseUpdatesAndBackupsAreLogged()
+    {
+        pdb::addPlayer("Somebody");
+        db::exec("ALTER TABLE players DROP COLUMN deleted_at");
+        db::exec("DELETE FROM schema_migrations WHERE version = 5");
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        restart();          // the update runs
+        QCOMPARE(logged("db.backup status=ok").size(), 1);
+        QVERIFY(logged("db.backup status=ok").first().contains("file=tcg_tournament.before-update-"));
+        QCOMPARE(logged("db.update status=attempt version=5 name=player_removed").size(), 1);
+        QCOMPARE(logged("db.update status=ok version=5 name=player_removed").size(), 1);
+        QVERIFY(logLines().indexOf(logged("db.backup").first()) < logLines().indexOf(logged("db.update status=ok").first()));
+        restart();          // nothing to do: nothing more is logged about updates
+        QCOMPARE(logged("db.update").size(), 2);
+    }
+
+    void logFilesRotateAndStayWithinTheirLimits()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        applog::setLimits(4096, 3);
+        for (int i = 0; i < 400; ++i)
+            applog::info("test.fill", {{"n", i}}, QString(40, 'x'));
+        const QDir dir(tmp_->filePath("logs"));
+        QCOMPARE(dir.entryList({"app*.log"}, QDir::Files, QDir::Name), (QStringList{"app.1.log", "app.2.log", "app.log"}));
+        for (const QString &name : dir.entryList({"app*.log"}, QDir::Files))
+            QVERIFY2(QFileInfo(dir.filePath(name)).size() <= 4096, qPrintable(name));
+        // the newest entries are kept, in order, and the oldest have gone
+        const QStringList lines = logLines();
+        QVERIFY(lines.size() > 50 && lines.size() < 400);
+        QVERIFY(lines.last().contains("n=399 "));
+        for (int i = 1; i < lines.size(); ++i) {
+            static const QRegularExpression n(" n=(\\d+) ");
+            QCOMPARE(n.match(lines[i]).captured(1).toInt(), n.match(lines[i - 1]).captured(1).toInt() + 1);
+        }
+        const QStringList recent = applog::recentLines(10, 100000);
+        QCOMPARE(recent.size(), 10);
+        QVERIFY(recent.last().contains("n=399 ") && recent.first().contains("n=390 "));
+        QVERIFY(applog::recentLines(1000, 1000).join('\n').size() <= 1000);        // bounded by size as well as by lines
+    }
+
+    void loggingNeverGetsInTheWay()
+    {
+        // entries from before the folder is known are kept and written first
+        applog::setDirectory(QString());
+        applog::info("test.early", {{"n", 1}});
+        applog::setDirectory(tmp_->filePath("logs"));
+        applog::info("test.later", {{"n", 2}});
+        QVERIFY(logLines().size() >= 2);
+        QVERIFY(logged("test.early").size() == 1 && logLines().indexOf(logged("test.early").first()) < logLines().indexOf(logged("test.later").first()));
+
+        // a folder that cannot be used: nothing is thrown, nothing is written, and the app's own work is unaffected
+        QFile blocker(tmp_->filePath("not-a-folder"));
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.close();
+        applog::setDirectory(tmp_->filePath("not-a-folder/logs"));
+        for (int i = 0; i < 50; ++i)
+            applog::error("test.lost", {{"n", i}}, "nowhere to go");
+        const qint64 tid = runningSwiss();
+        QVERIFY(tdb::terminateTournament(tid));
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::TERMINATED);
+        QVERIFY(!QFileInfo::exists(tmp_->filePath("not-a-folder/logs")));
+        QVERIFY(applog::recentLines().isEmpty());
+        // it says so, once, with the reason and a count; it does not complain on every entry
+        const applog::Status down = applog::status();
+        QVERIFY(!down.available);
+        QVERIFY2(down.reason.contains("log folder could not be created") || down.reason.contains("could not be opened"), qPrintable(down.reason));
+        QVERIFY(!down.since.isEmpty());
+        QVERIFY2(down.lost >= 50, qPrintable(QString::number(down.lost)));
+        // the report still has the version details, says entries may be missing, and carries the newest unwritten ones
+        const QString partial = applog::diagnosticReport();
+        QVERIFY(partial.contains("App version:") && partial.contains("Build:"));
+        QVERIFY2(partial.contains("Logging:      UNAVAILABLE since") && partial.contains("recent")
+                 && partial.contains("entries may be missing from this report"), qPrintable(partial));
+        QVERIFY(partial.contains("Entries that could NOT be written to the log file"));
+        QVERIFY(partial.contains("tournament.end_early status=ok"));
+        QVERIFY(partial.contains("(none)"));                            // nothing could be read from the file
+        // when the folder becomes usable again, logging resumes by itself at the next try and says what was missed
+        applog::setRetryInterval(0);
+        QVERIFY(QFile::remove(tmp_->filePath("not-a-folder")));
+        applog::info("test.back", {{"n", 1}});
+        QVERIFY(applog::status().available);
+        QCOMPARE(applog::status().lost, 0);
+        QFile resumed(tmp_->filePath("not-a-folder/logs/app.log"));
+        QVERIFY(resumed.open(QIODevice::ReadOnly));
+        const QStringList after = QString::fromUtf8(resumed.readAll()).split(QChar(10), Qt::SkipEmptyParts);
+        QCOMPARE(after.size(), 2);
+        QVERIFY2(after[0].contains(" WARN ") && after[0].contains("log.resumed lost=") && after[1].contains("test.back n=1"),
+                 qPrintable(after.join(" || ")));
+        QVERIFY(applog::diagnosticReport().contains("Logging:      working"));
+        applog::setRetryInterval(30000);
+
+        // many threads at once: every entry arrives whole
+        applog::setDirectory(tmp_->filePath("logs2"));
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 8; ++t)
+            threads.emplace_back([t] {
+                for (int i = 0; i < 100; ++i)
+                    applog::info("test.thread", {{"thread", t}, {"n", i}}, QString(60, QChar('a' + t)));
+            });
+        for (std::thread &th : threads)
+            th.join();
+        QFile f(tmp_->filePath("logs2/app.log"));
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QStringList lines = QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(), 800);
+        static const QRegularExpression whole("test\\.thread thread=(\\d) n=\\d+ \\| ([a-h])\\2{59}$");
+        for (const QString &l : lines)
+            QVERIFY2(whole.match(l).hasMatch(), qPrintable(l));
+    }
+
+    void anAttemptAndItsOutcomeShareAnOperationId()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        static const QRegularExpression opIn(" op=([0-9A-F]{8})(?: |$)"), refIn(" ref=(R-[0-9A-Z]{6})(?: |$)");
+        const auto opOf = [](const QString &line) { return opIn.match(line).captured(1); };
+
+        // one action: two entries, one id, with other entries free to come between them
+        const qint64 tid = runningSwiss();
+        const QStringList start = logged(" tournament.start ");
+        QCOMPARE(start.size(), 2);
+        QVERIFY(start[0].contains("status=attempt") && start[1].contains("status=ok"));
+        QVERIFY(!opOf(start[0]).isEmpty());
+        QCOMPARE(opOf(start[0]), opOf(start[1]));
+        // every action has its own
+        QSet<QString> attempts;
+        int attemptLines = 0;
+        for (const QString &l : logLines()) {
+            if (!l.contains("status=attempt"))
+                continue;
+            ++attemptLines;
+            attempts.insert(opOf(l));
+        }
+        QVERIFY(attemptLines > 8);
+        QCOMPARE(int(attempts.size()), attemptLines);
+        // and every outcome belongs to exactly one attempt
+        for (const QString &l : logLines()) {
+            if (l.contains("status=attempt") || !l.contains(" status="))
+                continue;
+            QVERIFY2(attempts.contains(opOf(l)), qPrintable(l));
+        }
+
+        // a failure carries the operation id and an error reference; the dialog that reports it uses the same two
+        qint64 match = 0;
+        for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
+            if (!m["player2_id"].isNull())
+                match = m["match_id"].toLongLong();
+        QVERIFY(match);
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(match, "NONSENSE"));
+        const QStringList bad = logged("match_result=NONSENSE");
+        QCOMPARE(bad.size(), 2);
+        QVERIFY(bad[1].contains("status=failed") && bad[1].contains(" WARN "));
+        // the operation's outcome and the match's are different fields, and no line names a field twice
+        QVERIFY(bad[0].contains(" status=attempt ") && bad[0].contains(" match_result=NONSENSE"));
+        static const QRegularExpression field(" ([a-z_]+)=");
+        for (const QString &line : logLines()) {
+            QStringList seen;
+            auto it = field.globalMatch(line.section(" | ", 0, 0));
+            while (it.hasNext()) {
+                const QString key = it.next().captured(1);
+                QVERIFY2(!seen.contains(key), qPrintable(line));
+                seen << key;
+            }
+            QVERIFY2(!seen.contains("result"), qPrintable(line));
+        }
+        QCOMPARE(opOf(bad[0]), opOf(bad[1]));
+        const QString ref = refIn.match(bad[1]).captured(1);
+        QVERIFY(!ref.isEmpty() && !bad[0].contains(" ref="));
+        QString op;
+        QCOMPARE(applog::errorReference(&op), ref);
+        QCOMPARE(op, opOf(bad[1]));
+        // used once: an unrelated error afterwards gets its own reference and no operation
+        op = "x";
+        QVERIFY(applog::errorReference(&op) != ref);
+        QVERIFY(op.isEmpty());
+        // a later successful action clears an unreported failure, so it is never attached to the wrong error
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(match, "NONSENSE"));
+        tdb::reportMatchResult(match, "PLAYER1");
+        QVERIFY(applog::errorReference(&op).startsWith("R-") && op.isEmpty());
+
+        // simultaneous attempts on the same tournament: eight ids, each with its own matched outcome
+        const Race r = race([tid](int) { return tdb::terminateTournament(tid) ? 1 : 0; });
+        QCOMPARE(r.results.size(), 8);
+        QHash<QString, QStringList> byOp;
+        for (const QString &l : logged(QStringLiteral(" tournament.end_early ")))
+            byOp[opOf(l)] << QRegularExpression(" status=([a-z-]+)").match(l).captured(1);
+        QCOMPARE(int(byOp.size()), 8);
+        int ok = 0, unchanged = 0;
+        for (const QStringList &results : byOp) {
+            QCOMPARE(results.size(), 2);
+            QCOMPARE(results[0], QString("attempt"));
+            ok += results[1] == "ok";
+            unchanged += results[1] == "no-change";
+        }
+        QCOMPARE(ok, 1);                    // exactly one of them saved the change
+        QCOMPARE(unchanged, 7);
+
+        // whatever is logged while an operation runs carries its id, an operation inside another
+        // shares it, and it can be carried to another thread
+        QString outer, inner, onThread;
+        {
+            applog::Action action("test.outer", {{"n", 1}});
+            outer = action.operation();
+            QCOMPARE(applog::currentOperation(), outer);
+            applog::info("test.during");
+            {
+                applog::Action nested("test.inner");
+                inner = nested.operation();
+            }
+            std::thread([&] {
+                applog::OperationScope scope(outer);
+                onThread = applog::currentOperation();
+                applog::info("test.elsewhere");
+            }).join();
+        }
+        QVERIFY(applog::currentOperation().isEmpty());
+        QCOMPARE(inner, outer);
+        QCOMPARE(onThread, outer);
+        for (const char *name : {"test.outer", "test.during", "test.inner", "test.elsewhere"})
+            for (const QString &l : logged(QStringLiteral(" %1").arg(name)))
+                QCOMPARE(opOf(l), outer);
+        applog::info("test.after");
+        QVERIFY(opOf(logged(" test.after").first()).isEmpty());
+        // ids are short and fixed in length, so they do not make entries grow
+        for (const QString &id : attempts)
+            QCOMPARE(id.size(), 8);
+    }
+
+    void theStartEntryAndTheReportNameTheExactBuild()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const QString build = prefs::BUILD;
+        // a Git commit, marked when the files had been changed since, or "no-git": never empty or invented
+        static const QRegularExpression shape("^([0-9a-f]{8}(-modified-\\d{8}-\\d{4})?|no-git)$");
+        QVERIFY2(shape.match(build).hasMatch(), qPrintable(build));
+        applog::sessionStarted();
+        const QStringList start = logged(" app.start ");
+        QCOMPARE(start.size(), 1);
+        QVERIFY2(start.first().contains(QStringLiteral(" %1 app.start build=%2 qt=").arg(prefs::VERSION, build)), qPrintable(start.first()));
+        QVERIFY(applog::diagnosticReport().contains(QStringLiteral("Build:        ") + build));
+        // a session that is not closed is noted at the next start, without saying why it ended
+        applog::sessionStarted();
+        const QStringList note = logged(" app.previous_session ");
+        QCOMPARE(note.size(), 1);
+        QVERIFY2(note.first().contains("The previous session did not close normally.") && note.first().contains("The reason is not known"),
+                 qPrintable(note.first()));
+        QVERIFY(!note.first().contains("crash", Qt::CaseInsensitive));
+        applog::sessionEnded();
+        applog::sessionStarted();
+        QCOMPARE(logged(" app.previous_session ").size(), 1);           // closed normally: nothing to note
+        applog::sessionEnded();
+    }
+
+    void recognisedNamesAreReplacedAndTheRestIsLeft()
+    {
+        const qint64 zelda = pdb::addPlayer("Zelda Hyrule"), al = pdb::addPlayer("Al");
+        const qint64 tid = tdb::createTournament("Secret Winter Cup", "POKEMON", 1);
+        Q_UNUSED(al);
+        const QString text = "Zelda Hyrule and Al are registered for Secret Winter Cup; zelda hyrule again; Ganon is not known.";
+        QCOMPARE(applog::scrub(text),
+                 QStringLiteral("[player %1] and Al are registered for [tournament %2]; [player %1] again; Ganon is not known.")
+                     .arg(pdb::formatId(zelda)).arg(tid));
+        QCOMPARE(applog::scrub(applog::scrub(text)), applog::scrub(text));      // doing it twice changes nothing more
+        QCOMPARE(applog::scrub("result.report status=ok match=41"), QString("result.report status=ok match=41"));
+    }
+
+    void aDiagnosticReportLeavesOutNamesPathsAndTheDatabase()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const qint64 zelda = pdb::addPlayer("Zelda Hyrule");
+        pdb::addPlayer("Al");                                           // too short to tell from ordinary text
+        const qint64 tid = tdb::createTournament("Secret Winter Cup", "POKEMON", 1, "Standard");
+        const QString home = QDir::toNativeSeparators(QDir::homePath());
+        // an error as a dialog would word it: with the names, and a path into the user's folder
+        applog::warning("dialog.error", {{"ref", "R-TEST22"}, {"title", "Player not removed"}},
+                        "Zelda Hyrule is still part of a tournament.\nThey are registered for Secret Winter Cup, which has not started. "
+                        "Saved to " + home + "\\Documents\\backup.db and C:\\Users\\someone.else\\Desktop\\x.db");
+        const QString line = logged("R-TEST22").first();
+        QVERIFY2(!line.contains(home) && line.contains("~\\Documents\\backup.db"), qPrintable(line));    // no user folder, even in the file
+        QVERIFY2(!line.contains("someone.else"), qPrintable(line));
+
+        const QString report = applog::diagnosticReport();
+        QVERIFY(report.contains(QStringLiteral("App version:  ") + prefs::VERSION));
+        QVERIFY(report.contains(QStringLiteral("Build:        ") + prefs::BUILD));
+        QVERIFY(report.contains("Logging:      working"));
+        // it says plainly what it may still contain
+        QVERIFY(report.contains("PLEASE READ THIS THROUGH BEFORE SHARING IT."));
+        QVERIFY(report.contains("may contain personal information") && report.contains("best") && report.contains("can remain"));
+        QVERIFY(report.contains(QStringLiteral("Qt version:   ") + qVersion()));
+        QVERIFY(report.contains("System:") && report.contains(QSysInfo::currentCpuArchitecture()));
+        QVERIFY(report.contains("updates applied: 1, 2, 3, 4, 5"));
+        QVERIFY(report.contains("1 tournaments, 2 players"));
+        QVERIFY(report.contains("R-TEST22"));
+        // names it can recognise are replaced by ids; the user's folder is not spelled out
+        QVERIFY2(!report.contains("Zelda") && !report.contains("Hyrule") && !report.contains("Secret Winter Cup"), qPrintable(report));
+        QVERIFY(report.contains(QStringLiteral("[player %1] is still part of a tournament").arg(pdb::formatId(zelda))));
+        QVERIFY(report.contains(QStringLiteral("registered for [tournament %1], which has not started").arg(tid)));
+        QVERIFY(!report.contains(home) && !report.contains(QDir::homePath()));
+        QVERIFY(!report.contains("SQLite format"));
+        // bounded: a long log gives a report of limited size
+        for (int i = 0; i < 3000; ++i)
+            applog::info("test.fill", {{"n", i}}, QString(80, 'y'));
+        const QString big = applog::diagnosticReport();
+        QVERIFY2(big.size() < 110 * 1024, qPrintable(QString::number(big.size())));
+        QVERIFY(big.contains("n=2999 ") && !big.contains("n=5 "));
+    }
+
+private:
+    // What is saved about a tournament's results: its matches, and the records kept with the registrations.
+    QList<Rows> savedResults(qint64 tid)
+    {
+        return {db::query("SELECT * FROM matches WHERE tournament_id = ? ORDER BY match_id", {tid}),
+                db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}),
+                db::query("SELECT status FROM tournaments WHERE tournament_id = ?", {tid})};
+    }
+
+    // The stored records are exactly what the matches work out to.
+    void assertStoredFiguresMatchTheMatches(qint64 tid, const QString &game)
+    {
+        QHash<qint64, Row> stored;
+        for (const Row &r : swiss::standings(tid, game))
+            stored.insert(r["player_id"].toLongLong(), r);
+        for (const Row &live : swiss::viewStandings(tid, game)) {
+            const Row s = stored.value(live["player_id"].toLongLong());
+            for (const char *key : {"match_points", "match_wins", "match_losses", "match_draws", "omw_pct", "gw_pct", "ogw_pct"})
+                QCOMPARE(s[key].toDouble(), live[key].toDouble());
+        }
+    }
+
+    // The log entries of one operation, as "action:result" in order.
+    QStringList operationOf(const QString &lineContaining)
+    {
+        static const QRegularExpression opIn(" op=([0-9A-F]{8})"), part(" ([a-z_.]+) status=([a-z-]+)");
+        const QStringList hits = logged(lineContaining);
+        if (hits.isEmpty())
+            return {};
+        const QString op = opIn.match(hits.last()).captured(1);
+        QStringList out;
+        for (const QString &l : logged(" op=" + op)) {
+            const auto m = part.match(l);
+            out << (m.hasMatch() ? m.captured(1) + ":" + m.captured(2) : QStringLiteral("other"));
+        }
+        return out;
+    }
+
+private slots:
+    // Errors that used to be hidden, and operations that are saved whole or not at all
+
+    void onlyARealDuplicateIsReportedAsAlreadyEnrolled()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const qint64 tid = tdb::createTournament("Sign-up", "POKEMON", 2);
+        const qint64 a = pdb::addPlayer("Ana"), b = pdb::addPlayer("Bo");
+        QVERIFY(tdb::enrollPlayer(tid, a) > 0);
+        QCOMPARE(tdb::enrollPlayer(tid, a), qint64(0));         // the one case that is not an error
+        QCOMPARE(count("enrollments", tid), 1);
+
+        // something that does not exist is said to not exist
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::enrollPlayer(987654, a));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::enrollPlayer(tid, 987654));
+
+        // the database refusing the write for any other reason is an error, with its own message
+        db::exec("CREATE TRIGGER refuse_enrollment BEFORE INSERT ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'enrollments are closed'); END");
+        bool thrown = false;
+        try {
+            tdb::enrollPlayer(tid, b);
+        } catch (const db::Error &e) {
+            thrown = true;
+            QVERIFY(e.constraint && !e.unique() && !e.foreignKey() && !e.busy());
+            QVERIFY2(e.message.contains("enrollments are closed"), qPrintable(e.message));
+        }
+        QVERIFY2(thrown, "a refused write is not passed off as 'already enrolled'");
+        QCOMPARE(count("enrollments", tid), 1);
+        QCOMPARE(operationOf(QStringLiteral("player.enroll status=attempt tournament=%1 player=%2").arg(tid).arg(b)),
+                 (QStringList{"player.enroll:attempt", "player.enroll:failed"}));
+        QCOMPARE(tdb::enrollPlayer(tid, a), qint64(0));         // an existing registration is still just reported
+        db::exec("DROP TRIGGER refuse_enrollment");
+
+        // the error codes tell the kinds of refusal apart (no reading of message text)
+        try {
+            db::exec("INSERT INTO enrollments (tournament_id, player_id) VALUES (?, ?)", {tid, a});
+            QFAIL("a second row for the same player and tournament was accepted");
+        } catch (const db::Error &e) {
+            QVERIFY(e.unique() && e.constraint && !e.foreignKey());
+        }
+        try {
+            db::exec("INSERT INTO enrollments (tournament_id, player_id) VALUES (?, ?)", {tid, 987654});
+            QFAIL("a registration for a player who does not exist was accepted");
+        } catch (const db::Error &e) {
+            QVERIFY(e.foreignKey() && e.constraint && !e.unique());
+        }
+
+        // a database held by another connection: reported as busy after the wait, never as a duplicate
+        std::atomic<bool> holding{false}, release{false};
+        std::thread holder([&] {
+            {
+                db::Tx tx;
+                holding = true;
+                while (!release)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            db::closeThreadConnection();
+        });
+        while (!holding)
+            std::this_thread::yield();
+        thrown = false;
+        try {
+            tdb::enrollPlayer(tid, b);
+        } catch (const db::Error &e) {
+            thrown = true;
+            QVERIFY2(e.busy() && !e.unique() && !e.constraint, qPrintable(e.message));
+        }
+        release = true;
+        holder.join();
+        QVERIFY(thrown);
+        QCOMPARE(count("enrollments", tid), 1);
+
+        // registering the same player from eight places at once: one registration, the rest "already", no error
+        const Race r = race([tid, b](int) { return tdb::enrollPlayer(tid, b) > 0 ? 1 : 0; });
+        QCOMPARE(r.other + r.refusals + r.conflicts, 0);
+        QCOMPARE(r.results.count(1), 1);
+        QCOMPARE(r.results.count(0), 7);
+        QCOMPARE(count("enrollments", tid), 2);
+        restart();
+        QCOMPARE(count("enrollments", tid), 2);
+    }
+
+    void addAndEnrollCreatesBothRecordsOrNeither()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const qint64 tid = tdb::createTournament("Sign-up", "ONEPIECE", 2);
+        const auto everyone = [] { return db::query("SELECT * FROM players ORDER BY player_id"); };
+
+        // it works: one new player, registered, and only the owning action says "ok"
+        const qint64 id = tdb::addAndEnrollPlayer(tid, "  Nia Walker ");
+        QCOMPARE(pdb::playerById(id)["display_name"].toString(), QString("Nia Walker"));
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 1);
+        QCOMPARE(operationOf(" player.add_and_enroll status=ok"),
+                 (QStringList{"player.add_and_enroll:attempt", "player.add:attempt", "player.add:pending", "player.enroll:attempt",
+                              "player.enroll:pending", "player.add_and_enroll:ok"}));
+
+        // the registration is refused after the player was created: neither is left behind
+        const Rows before = everyone();
+        db::exec("CREATE TRIGGER refuse_enrollment BEFORE INSERT ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'enrollments are closed'); END");
+        QVERIFY_THROWS_EXCEPTION(db::Error, tdb::addAndEnrollPlayer(tid, "Ghost Player"));
+        QCOMPARE(everyone(), before);                           // no "Ghost Player", removed or otherwise
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 1);
+        const QStringList failed = operationOf(" player.add_and_enroll status=failed");
+        QCOMPARE(failed, (QStringList{"player.add_and_enroll:attempt", "player.add:attempt", "player.add:pending",
+                                      "player.enroll:attempt", "player.enroll:failed", "player.add_and_enroll:failed"}));
+        QVERIFY(!failed.join(' ').contains(":ok"));             // nothing about it was ever logged as a success
+
+        // an existing player whose registration is refused is left exactly as they were
+        const qint64 existing = pdb::addPlayer("Existing Player");
+        const Row asWas = pdb::playerById(existing);
+        QVERIFY_THROWS_EXCEPTION(db::Error, tdb::enrollPlayer(tid, existing));
+        QCOMPARE(pdb::playerById(existing), asWas);
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 1);
+        db::exec("DROP TRIGGER refuse_enrollment");
+
+        // other refusals also leave nobody behind
+        const Rows mid = everyone();
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::addAndEnrollPlayer(tid, "   "));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::addAndEnrollPlayer(987654, "Nobody Home"));
+        tdb::terminateTournament(tid);
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::addAndEnrollPlayer(tid, "Too Late"));
+        QCOMPARE(everyone(), mid);
+        // the id that was tried is not handed out twice afterwards, and adding a player on its own still works
+        const qint64 next = pdb::addPlayer("Standalone");
+        QVERIFY(next > existing);
+        restart();
+        QCOMPARE(everyone().size(), mid.size() + 1);
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 1);
+        QVERIFY(pdb::playersNamed("Ghost Player").isEmpty() && pdb::playersNamed("Too Late").isEmpty());
+    }
+
+    void aResultAndTheStandingsThatFollowAreSavedTogether()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const qint64 tid = tdb::createTournament("Modern", "MTG", 1, "Modern");
+        const QList<qint64> p = addPlayers(4, "M");
+        for (qint64 id : p)
+            tdb::enrollPlayer(tid, id);
+        swiss::startTournament(tid);
+        const Rows pairings = tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong());
+        const qint64 m1 = pairings[0]["match_id"].toLongLong(), m2 = pairings[1]["match_id"].toLongLong();
+        const qint64 p1 = pairings[0]["player1_id"].toLongLong(), p2 = pairings[0]["player2_id"].toLongLong();
+        const auto record = [&](qint64 player) {
+            const Row r = db::one("SELECT match_points, match_wins, match_losses, match_draws FROM enrollments "
+                                  "WHERE tournament_id = ? AND player_id = ?", {tid, player});
+            return QStringLiteral("%1pts %2-%3-%4").arg(r["match_points"].toInt()).arg(r["match_wins"].toInt())
+                .arg(r["match_losses"].toInt()).arg(r["match_draws"].toInt());
+        };
+
+        // report, correct, draw, clear: the stored records follow every time, without anything else being called
+        swiss::reportResult(m1, "PLAYER1");
+        QCOMPARE(record(p1), QString("3pts 1-0-0"));
+        QCOMPARE(record(p2), QString("0pts 0-1-0"));
+        assertStoredFiguresMatchTheMatches(tid, "MTG");
+        QCOMPARE(operationOf(QStringLiteral(" result.report status=ok match=%1 ").arg(m1)),
+                 (QStringList{"result.report:attempt", "result.report:ok"}));
+        swiss::reportResult(m1, "PLAYER2");
+        QCOMPARE(record(p1), QString("0pts 0-1-0"));
+        QCOMPARE(record(p2), QString("3pts 1-0-0"));
+        swiss::reportResult(m1, "DRAW");
+        QCOMPARE(record(p1), QString("1pts 0-0-1"));
+        QCOMPARE(record(p2), QString("1pts 0-0-1"));
+        assertStoredFiguresMatchTheMatches(tid, "MTG");
+        swiss::reportResult(m1, QString());
+        QCOMPARE(record(p1), QString("0pts 0-0-0"));
+        QCOMPARE(tdb::pendingMatchCount(tdb::currentRound(tid)["round_id"].toLongLong()), 2);
+        assertStoredFiguresMatchTheMatches(tid, "MTG");
+
+        // the standings cannot be saved (the step after the result is written): the result is not saved either
+        db::exec("CREATE TRIGGER break_standings BEFORE UPDATE ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'standings cannot be saved'); END");
+        QList<Rows> before = savedResults(tid);
+        bool thrown = false;
+        try {
+            swiss::reportResult(m1, "PLAYER1");
+        } catch (const db::Error &e) {
+            thrown = e.message.contains("standings cannot be saved");
+        }
+        QVERIFY(thrown);
+        QCOMPARE(savedResults(tid), before);                    // the match is still unreported
+        const QStringList failed = operationOf(QStringLiteral(" result.report status=failed match=%1 ").arg(m1));
+        QCOMPARE(failed, (QStringList{"result.report:attempt", "result.report:failed"}));
+        QVERIFY(logged(QStringLiteral(" result.report status=failed match=%1 ").arg(m1)).last().contains(" ref=R-"));
+        db::exec("DROP TRIGGER break_standings");
+        // the same when it fails part-way through the players' records, after some were already written
+        db::exec(QStringLiteral("CREATE TRIGGER break_one BEFORE UPDATE ON enrollments WHEN NEW.player_id = %1 "
+                                "BEGIN SELECT RAISE(ABORT, 'one record cannot be saved'); END").arg(p.last()));
+        QVERIFY_THROWS_EXCEPTION(db::Error, swiss::reportResult(m1, "PLAYER1"));
+        QCOMPARE(savedResults(tid), before);
+        db::exec("DROP TRIGGER break_one");
+
+        // finishing: placings and the completed status are saved with the last figures, or not at all
+        swiss::reportResult(m1, "PLAYER1");
+        swiss::reportResult(m2, "PLAYER2");
+        db::exec("CREATE TRIGGER refuse_completion BEFORE UPDATE OF status ON tournaments "
+                 "BEGIN SELECT RAISE(ABORT, 'the tournament cannot be closed'); END");
+        before = savedResults(tid);
+        QVERIFY_THROWS_EXCEPTION(db::Error, swiss::finalizeTournament(tid, "MTG"));
+        QCOMPARE(savedResults(tid), before);                    // no placings were left behind
+        QCOMPARE(db::value("SELECT COUNT(*) FROM enrollments WHERE tournament_id = ? AND final_placement IS NOT NULL", {tid}).toInt(), 0);
+        QCOMPARE(logged(" tournament.finalize status=ok").size(), 0);
+        db::exec("DROP TRIGGER refuse_completion");
+        swiss::finalizeTournament(tid, "MTG");
+        QCOMPARE(logged(" tournament.finalize status=ok").size(), 1);
+
+        // a finished tournament: an edit is refused and nothing at all changes
+        const QList<Rows> final = savedResults(tid);
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(m1, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(m2, QString()));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(m1, "DRAW"));
+        QCOMPARE(savedResults(tid), final);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::COMPLETED);
+        swiss::viewStandings(tid, "MTG");                       // and looking at the standings writes nothing
+        QCOMPARE(savedResults(tid), final);
+        restart();
+        QCOMPARE(savedResults(tid), final);
+    }
+
+    void aCommanderResultAndItsStandingsAreAlreadySavedTogether()
+    {
+        auto [tid, pids] = makeEvent(8, 2);
+        const QVariantMap pod = podAt(currentRound(tid), 0);
+        const auto saved = [&] {
+            return QList<Rows>{db::query("SELECT * FROM commander_pods WHERE tournament_id = ? ORDER BY pod_id", {tid}),
+                               db::query("SELECT * FROM commander_seats WHERE tournament_id = ? ORDER BY pod_id, seat_number", {tid}),
+                               db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}),
+                               db::query("SELECT * FROM commander_audit WHERE tournament_id = ? ORDER BY audit_id", {tid})};
+        };
+        const QList<Rows> before = saved();
+        db::exec("CREATE TRIGGER break_standings BEFORE UPDATE OF match_points ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'standings cannot be saved'); END");
+        // reporting, and later correcting, a pod: when the standings cannot be saved, neither is the result
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0)));
+        QCOMPARE(saved(), before);
+        db::exec("DROP TRIGGER break_standings");
+        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0));
+        const QList<Rows> reported = saved();
+        QVERIFY(reported != before);
+        db::exec("CREATE TRIGGER break_standings BEFORE UPDATE OF match_points ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'standings cannot be saved'); END");
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::clearPodResult(podId(pod)));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 1)));
+        QCOMPARE(saved(), reported);
+        db::exec("DROP TRIGGER break_standings");
+        Q_UNUSED(pids);
     }
 
     void gamesAreListedInOnePlaceAndInOneOrder()

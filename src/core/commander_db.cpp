@@ -1,6 +1,7 @@
 #include "commander_db.h"
 
 #include "commander.h"
+#include "applog.h"
 #include "players.h"
 #include "tournaments.h"
 
@@ -194,6 +195,7 @@ bool isCommander(qint64 tournamentId)
 qint64 createCommanderTournament(const QString &name, int expectedPlayers, int swissRounds, const QVariantMap &settings,
                                  qint64 baseSeed, const QString &tournamentDate, int roundTimeMins)
 {
+    applog::Action log("tournament.create", {{"game", "MTG"}, {"format", "Commander"}, {"rounds", swissRounds}});
     QVariantMap cfg = cmdr::defaultSettings();
     for (auto it = settings.begin(); it != settings.end(); ++it)
         cfg[it.key()] = it.value();
@@ -254,6 +256,7 @@ QVariantMap recommendation(int playerCount)
 
 void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn)
 {
+    applog::Action log("player.check_in", {{"tournament", tournamentId}, {"player", playerId}, {"checked_in", checkedIn}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
@@ -268,6 +271,7 @@ void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn)
 
 void updateEventConfig(qint64 tournamentId, int swissRounds, const QString &drawPolicy, const QString &threePodPlacement)
 {
+    applog::Action log("event.configure", {{"tournament", tournamentId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
@@ -398,6 +402,7 @@ static qint64 publish(qint64 tournamentId, int expectedRoundNumber)
 
 qint64 startEvent(qint64 tournamentId)
 {
+    applog::Action log("tournament.start", {{"tournament", tournamentId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
@@ -420,6 +425,7 @@ qint64 startEvent(qint64 tournamentId)
 
 qint64 publishNextRound(qint64 tournamentId, int expectedRoundNumber)
 {
+    applog::Action log("round.publish", {{"tournament", tournamentId}, {"round_number", expectedRoundNumber}});
     try {
         db::Tx tx;
         const qint64 roundId = publish(tournamentId, expectedRoundNumber);
@@ -507,6 +513,7 @@ static QVariantList refreshCache(qint64 tournamentId, QVariantMap *evOut = nullp
 int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminatedIds,
                     int expectedVersion)
 {
+    applog::Action log("result.report", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId}});
     db::Tx tx;
     const QVariantMap pod = loadPod(podId);
     if (pod["stage"].toString() != "SWISS")
@@ -535,6 +542,7 @@ int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const
 
 int clearPodResult(qint64 podId, int expectedVersion)
 {
+    applog::Action log("result.clear", {{"pod", podId}});
     db::Tx tx;
     const QVariantMap pod = loadPod(podId);
     if (pod["stage"].toString() != "SWISS")
@@ -628,6 +636,7 @@ static bool finalize(const Row &rnd)
 
 bool finalizeRound(qint64 roundId)
 {
+    applog::Action log("round.finalize", {{"round", roundId}});
     db::Tx tx;
     const Row rnd = db::one("SELECT * FROM commander_rounds WHERE round_id = ?", {roundId});
     if (rnd.isEmpty())
@@ -639,6 +648,7 @@ bool finalizeRound(qint64 roundId)
 
 bool finishTournament(qint64 tournamentId)
 {
+    applog::Action log("tournament.finalize", {{"tournament", tournamentId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     const QString stage = ev["stage"].toString();
@@ -669,6 +679,7 @@ static bool hasPlayoffRounds(qint64 tournamentId)
 bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminatedIds,
                    const QString &resolution, const QString &reason)
 {
+    applog::Action log("result.correct", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId}, {"resolution", resolution}});
     if (!resolution.isEmpty() && resolution != "KEEP" && resolution != "REBUILD")
         throw CommanderError("Resolution must be KEEP or REBUILD.");
     db::Tx tx;
@@ -739,6 +750,7 @@ static int latestRoundNumber(qint64 tournamentId)
 
 void dropPlayer(qint64 tournamentId, qint64 playerId)
 {
+    applog::Action log("player.drop", {{"tournament", tournamentId}, {"player", playerId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "SWISS")
@@ -755,6 +767,7 @@ void dropPlayer(qint64 tournamentId, qint64 playerId)
 
 void reinstatePlayer(qint64 tournamentId, qint64 playerId)
 {
+    applog::Action log("player.reinstate", {{"tournament", tournamentId}, {"player", playerId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     const int latest = latestRoundNumber(tournamentId);
@@ -769,6 +782,7 @@ void reinstatePlayer(qint64 tournamentId, qint64 playerId)
 
 void endSwissEarly(qint64 tournamentId)
 {
+    applog::Action log("tournament.finish_short", {{"tournament", tournamentId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     const Rows players = loadPlayers(tournamentId);
@@ -785,6 +799,7 @@ void endSwissEarly(qint64 tournamentId)
 
 bool finishLegacyPlayoff(qint64 tournamentId)
 {
+    applog::Action log("tournament.finish_legacy", {{"tournament", tournamentId}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() == "COMPLETE")

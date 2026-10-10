@@ -10,6 +10,7 @@
 namespace prefs {
 
 const char *const VERSION = TCG_VERSION;       // set in the top-level CMakeLists.txt
+const char *const BUILD = TCG_BUILD;           // worked out there too, from Git
 // verified from this project's Git remote (origin)
 const char *const REPO_URL = "https://github.com/nchiamsachang/tcg-tournament-manager";
 

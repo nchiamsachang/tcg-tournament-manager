@@ -1,5 +1,6 @@
 #include "main_window.h"
 
+#include "applog.h"
 #include "commander_db.h"
 #include "dialogs.h"
 #include "screens.h"
@@ -350,7 +351,8 @@ void MainWindow::navigateTo(const QString &screen, const QVariantMap &args)
     try {
         widget = makeScreen(screen, this, args);
     } catch (const std::exception &e) {
-        qWarning().noquote() << "Navigation error ->" << screen << ":" << e.what();
+        applog::error("page.open", {{"status", "failed"}, {"page", screen}, {"tournament", args.value("tournament_id").toLongLong()},
+                                    {"player", args.value("player_id").toLongLong()}}, QString::fromUtf8(e.what()));
         return;
     }
     history.append({screen, args});

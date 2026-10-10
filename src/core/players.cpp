@@ -1,6 +1,7 @@
 #include "players.h"
 
 #include "tournaments.h"
+#include "applog.h"
 
 #include <algorithm>
 
@@ -11,8 +12,11 @@ namespace pdb {
 
 qint64 addPlayer(const QString &displayName)
 {
-    return db::exec("INSERT INTO players (display_name, email, phone, plays_mtg, plays_onepiece, plays_pokemon, notes) "
-                    "VALUES (?, NULL, NULL, 0, 0, 0, NULL)", {displayName}).lastId;
+    applog::Action log("player.add");
+    const qint64 id = db::exec("INSERT INTO players (display_name, email, phone, plays_mtg, plays_onepiece, plays_pokemon, notes) "
+                               "VALUES (?, NULL, NULL, 0, 0, 0, NULL)", {displayName}).lastId;
+    log.set("player", id);
+    return id;
 }
 
 Rows allPlayers()
@@ -188,6 +192,7 @@ QHash<qint64, QStringList> gamesPlayed()
 
 void renamePlayer(qint64 playerId, const QString &displayName)
 {
+    applog::Action log("player.rename", {{"player", playerId}});
     if (displayName.trimmed().isEmpty())
         throw std::invalid_argument("A player needs a name.");
     if (isRemoved(playerId))
@@ -197,12 +202,15 @@ void renamePlayer(qint64 playerId, const QString &displayName)
 
 bool removePlayer(qint64 playerId)
 {
+    applog::Action log("player.remove", {{"player", playerId}});
     db::Tx tx;      // the checks and the change see the same state
     const Row player = db::one("SELECT deleted_at FROM players WHERE player_id = ?", {playerId});
     if (player.isEmpty())
         throw std::invalid_argument("That player does not exist.");
-    if (!player["deleted_at"].isNull())
+    if (!player["deleted_at"].isNull()) {
+        log.outcome("no-change");
         return false;       // a second click, or another window got there first
+    }
 
     // Tournaments being set up or played in which this player still has a part.  Nothing is
     // changed there on their behalf: the organizer resolves it in that tournament first.

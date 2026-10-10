@@ -65,7 +65,18 @@ struct GameStats {
 };
 GameStats gameStats(const QString &game);
 
-qint64 enrollPlayer(qint64 tournamentId, qint64 playerId);       // 0 if already enrolled
+// Registers a player.  Returns the new enrollment's id, or 0 when that player is already
+// registered for that tournament (the one case that is not an error).  Anything else that
+// stops it is thrown: std::invalid_argument for an unknown tournament or player,
+// std::logic_error for a tournament that was ended early or a player who was removed, and
+// db::Error for a database failure (locked, could not write, a rule of the schema).
+qint64 enrollPlayer(qint64 tournamentId, qint64 playerId);
+// "Add & enroll": creates a new player with this name and registers them, in one
+// transaction.  If the registration cannot be made, the player is not created either.
+// Returns the new player's id.  Throws as enrollPlayer does, and std::invalid_argument for
+// a blank name.  Any question about an existing player with the same name is asked by the
+// caller beforehand; no dialog is open while this runs.
+qint64 addAndEnrollPlayer(qint64 tournamentId, const QString &displayName);
 void unenrollPlayer(qint64 tournamentId, qint64 playerId);
 db::Rows enrolledPlayers(qint64 tournamentId, bool includeDropped = false);
 // Only the keys present in `stats` are written.
@@ -82,6 +93,12 @@ db::Rows roundPairings(qint64 roundId);                          // with names; 
 // `result` is PLAYER1, PLAYER2 or DRAW; an empty string puts the match back to "not reported".
 // Throws std::invalid_argument for anything else, and std::logic_error when the match is a
 // bye, is not in the tournament's current round, or the tournament is finished.
+//
+// writeMatchResult is the step: it checks and writes the match row, joining the caller's
+// transaction, and returns the tournament's id.  It does not touch the standings kept with
+// the registrations.  The app saves a result through swiss::reportResult, which does both in
+// one transaction.  reportMatchResult is that step on its own, as a logged action.
+qint64 writeMatchResult(qint64 matchId, const QString &result);
 void reportMatchResult(qint64 matchId, const QString &result);
 db::Rows allMatches(qint64 tournamentId);
 bool havePlayedBefore(qint64 tournamentId, qint64 a, qint64 b);

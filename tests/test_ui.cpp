@@ -1,5 +1,6 @@
 // Tests that drive the real screens: workflows, settings, printing, the round
 // clock, and a layout sweep over window sizes, themes and text sizes.
+#include "applog.h"
 #include "commander_db.h"
 #include "dialogs.h"
 #include "main_window.h"
@@ -11,6 +12,7 @@
 #include <QCryptographicHash>
 #include <QListView>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QWheelEvent>
@@ -221,6 +223,7 @@ private slots:
 
     void cleanup()
     {
+        applog::setDirectory(QString());
         w_.reset();
         settle();
         db::closeThreadConnection();
@@ -608,6 +611,13 @@ private slots:
         const QByteArray pdf = printing::pdfBytes(printing::tournamentReport(tid), "Letter", &pages);
         QVERIFY(pdf.startsWith("%PDF"));
         QCOMPARE(pages, 3);                                     // two rounds and the standings
+
+        // saved placings are shown as saved, also when a number is missing (older data: 1, 2, 4, 5)
+        db::exec("UPDATE enrollments SET final_placement = final_placement + 1 WHERE tournament_id = ? AND final_placement >= 3", {tid});
+        auto *saved = go<StandingsScreen>("standings", {{"tournament_id", tid}});
+        QVERIFY(saved);
+        QCOMPARE(saved->standings.last()["standing"].toInt(), 5);
+        QVERIFY(labelText(saved).contains("5th") && !labelText(saved).contains("3rd"));
     }
 
     void commanderThreeRoundEventRunsThroughTheScreens()
@@ -1753,7 +1763,8 @@ private slots:
             answer(blank, "Save", nullptr, &refusal);
             reg->renameBtn->click();
             settle();
-            QCOMPARE(refusal, QString("Enter a name for the tournament."));
+            QVERIFY2(QRegularExpression("^Enter a name for the tournament\\. \\(Reference: R-[0-9A-Z]{6}\\)$").match(refusal).hasMatch(),
+                     qPrintable(refusal));
             QCOMPARE(databaseFingerprint(), untouched);
         }
         // Enter saves; spaces around the name are removed
@@ -2327,6 +2338,241 @@ private slots:
                 }
             }
         }
+    }
+
+    // The diagnostic log, from the screens.
+
+    void errorsShownAreLoggedWithAReferenceAndCanBeExported()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const auto logText = [&] {
+            QFile f(tmp_->filePath("logs/app.log"));
+            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+        };
+        // an error dialog: the reference it shows is the one in the log
+        setAutoConfirm(false);
+        QString shown;
+        QTimer::singleShot(200, qApp, [&shown] {
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                shown = box->windowTitle() + " | " + box->text();
+                box->accept();
+            }
+        });
+        warn(w_.get(), "Could not save", "The result could not be saved.");
+        setAutoConfirm(true);
+        static const QRegularExpression refIn("Reference: (R-[0-9A-Z]{6})");
+        const QString ref = refIn.match(shown).captured(1);
+        QVERIFY2(!ref.isEmpty() && shown.startsWith("Could not save | The result could not be saved."), qPrintable(shown));
+        QString line;
+        for (const QString &l : logText().split('\n'))
+            if (l.contains("ref=" + ref))
+                line = l;
+        QVERIFY2(line.contains(" WARN ") && line.contains("dialog.error") && line.contains("title=\"Could not save\"")
+                 && line.endsWith("| The result could not be saved."), qPrintable(line));
+
+        // a failed action from a screen: the attempt, the failure and the message shown are all there
+        const qint64 tid = modern({"Ana", "Bo", "Cy", "Di"}, 45, 2, true, "Log Cup");
+        auto *round = go<RoundScreen>("round", {{"tournament_id", tid}});
+        tdb::terminateTournament(tid);                          // ended elsewhere while this page is still open
+        const qint64 match = tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()).first()["match_id"].toLongLong();
+        round->recordResult(match, "PLAYER1");
+        QString text = logText();
+        QVERIFY(text.contains(QStringLiteral("result.report status=attempt match=%1").arg(match)));
+        QVERIFY(text.contains(QStringLiteral("result.report status=failed match=%1").arg(match)));
+        QVERIFY(!text.contains(QStringLiteral("result.report status=ok match=%1").arg(match)));
+        QVERIFY(text.contains("dialog.error") && text.contains("This tournament was ended early"));
+        // the failed action and the message about it share one operation id and one reference
+        {
+            static const QRegularExpression opIn(" op=([0-9A-F]{8})"), refOf(" ref=(R-[0-9A-Z]{6})");
+            QString failed, dialog;
+            for (const QString &l : text.split('\n')) {
+                if (l.contains(QStringLiteral("result.report status=failed match=%1").arg(match)))
+                    failed = l;
+                if (l.contains("dialog.error") && l.contains("This tournament was ended early"))
+                    dialog = l;
+            }
+            QVERIFY(!failed.isEmpty() && !dialog.isEmpty());
+            QVERIFY(!opIn.match(failed).captured(1).isEmpty());
+            QCOMPARE(opIn.match(dialog).captured(1), opIn.match(failed).captured(1));
+            QCOMPARE(refOf.match(dialog).captured(1), refOf.match(failed).captured(1));
+        }
+        // a page that cannot be opened
+        w_->navigateTo("no_such_page", {{"tournament_id", tid}});
+        QVERIFY2(logText().contains(QStringLiteral("page.open status=failed page=no_such_page tournament=%1").arg(tid)), qPrintable(logText().right(400)));
+        // and a successful one, done from the screen
+        const qint64 other = modern({"Ed", "Flo"}, 45, 1, true, "Second Log Cup");
+        round = go<RoundScreen>("round", {{"tournament_id", other}});
+        const qint64 m2 = tdb::roundPairings(tdb::currentRound(other)["round_id"].toLongLong()).first()["match_id"].toLongLong();
+        round->recordResult(m2, "PLAYER1");
+        QVERIFY(logText().contains(QStringLiteral("result.report status=ok match=%1").arg(m2)));
+        // none of the names involved were written by the actions (the dialog text above had none either)
+        for (const char *name : {"Log Cup", "Ana", "Flo"})
+            QVERIFY2(!logText().contains(name), name);
+
+        // Settings: the two troubleshooting buttons
+        SettingsDialog settings(w_.get());
+        QVERIFY(buttons(&settings).isEmpty());                  // (not shown yet)
+        QStringList labels;
+        for (QPushButton *b : settings.findChildren<QPushButton *>())
+            labels << b->text();
+        QVERIFY2(labels.contains("Open log folder") && labels.contains(QStringLiteral("Export diagnostic report…")), qPrintable(labels.join(", ")));
+        QCOMPARE(QDir(logFolder()).canonicalPath(), QDir(tmp_->filePath("logs")).canonicalPath());
+        // the report is previewed exactly as it would be saved, and nothing is saved until asked
+        QString preview;
+        QStringList reportButtons;
+        QTimer::singleShot(250, qApp, [&] {
+            QWidget *dlg = QApplication::activeModalWidget();
+            if (!dlg)
+                return;
+            if (auto *box = dlg->findChild<QPlainTextEdit *>("reportPreview"))
+                preview = box->toPlainText();
+            for (QPushButton *b : dlg->findChildren<QPushButton *>())
+                reportButtons << b->text();
+            QTest::keyClick(dlg, Qt::Key_Escape);
+        });
+        settings.exportReport();
+        QVERIFY2(preview.startsWith("TCG Tournament Manager diagnostic report") && preview.contains("App version:")
+                 && preview.contains("Recent log entries"), qPrintable(preview.left(300)));
+        QVERIFY(preview.contains(ref));                         // the error above is in the excerpt
+        QVERIFY(reportButtons.contains(QStringLiteral("Save report…")) && reportButtons.contains("Close"));
+        QVERIFY(preview.contains(QStringLiteral("Build:        ") + prefs::BUILD));
+        QVERIFY(preview.contains("may contain personal information"));
+        QVERIFY(QDir(tmp_->path()).entryList({"*.txt"}, QDir::Files).isEmpty());
+        const QString file = tmp_->filePath("report.txt");
+        QVERIFY(saveDiagnosticReport(file, preview));
+        QFile saved(file);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        const QByteArray bytes = saved.readAll();
+        QCOMPARE(QString::fromUtf8(bytes), preview);
+        QVERIFY(!bytes.contains("SQLite format") && bytes.size() < 120 * 1024);
+        QVERIFY(!preview.contains(QDir::toNativeSeparators(QDir::homePath())));
+        QVERIFY(!saveDiagnosticReport(tmp_->filePath("no/such/folder/report.txt"), preview));
+        // Settings names the exact build, and says nothing about logging while it works
+        QLabel *buildLabel = settings.findChild<QLabel *>("buildLabel");
+        QVERIFY(buildLabel && buildLabel->text().remove(QChar(0x200B)).contains(QStringLiteral("v%1  ·  build %2").arg(prefs::VERSION, prefs::BUILD)));
+        QVERIFY(!settings.findChild<QLabel *>("logStatus"));
+        QStringList headings;
+        for (QLabel *l : settings.findChildren<QLabel *>())
+            headings << l->text();
+        QVERIFY(headings.contains("DIAGNOSTICS"));
+
+        // when the log cannot be written: a quiet status in Settings and in the report, no dialog, and the app works as before
+        QFile blocker(tmp_->filePath("blocked"));
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.close();
+        applog::setDirectory(tmp_->filePath("blocked/logs"));
+        const qint64 third = modern({"Gus", "Hal"}, 45, 1, true, "Unlogged Cup");
+        round = go<RoundScreen>("round", {{"tournament_id", third}});
+        const qint64 m3 = tdb::roundPairings(tdb::currentRound(third)["round_id"].toLongLong()).first()["match_id"].toLongLong();
+        round->recordResult(m3, "PLAYER1");
+        QCOMPARE(tdb::roundPairings(tdb::currentRound(third)["round_id"].toLongLong()).first()["result"].toString(), QString("PLAYER1"));
+        QVERIFY(!QApplication::activeModalWidget());            // nothing popped up about it
+        QVERIFY(!applog::status().available);
+        SettingsDialog offline(w_.get());
+        QLabel *status = offline.findChild<QLabel *>("logStatus");
+        QVERIFY(status);
+        const QString statusText = status->text().remove(QChar(0x200B));
+        QVERIFY2(statusText.startsWith("Logging unavailable: ") && statusText.contains("The app works normally"), qPrintable(statusText));
+        QVERIFY(!statusText.contains(QDir::toNativeSeparators(QDir::homePath())));
+        QString offlinePreview, offlineNote;
+        QTimer::singleShot(250, qApp, [&] {
+            QWidget *dlg = QApplication::activeModalWidget();
+            if (!dlg)
+                return;
+            if (auto *box = dlg->findChild<QPlainTextEdit *>("reportPreview"))
+                offlinePreview = box->toPlainText();
+            if (auto *note = dlg->findChild<QLabel *>("reportLogStatus"))
+                offlineNote = note->text().remove(QChar(0x200B));
+            QTest::keyClick(dlg, Qt::Key_Escape);
+        });
+        offline.exportReport();
+        QVERIFY2(offlineNote.contains("recent entries may be missing"), qPrintable(offlineNote));
+        QVERIFY2(offlinePreview.contains("Logging:      UNAVAILABLE since") && offlinePreview.contains("may be missing from this report"),
+                 qPrintable(offlinePreview.left(1500)));
+        QVERIFY(offlinePreview.contains(QStringLiteral("result.report status=ok match=%1").arg(m3)));     // kept in memory, and shown as such
+        applog::setDirectory(tmp_->filePath("logs"));
+        QVERIFY(applog::status().available);
+
+        // the Settings panel still fits with the new section, at Large text in a small window
+        prefs::setPref("text_size", "large");
+        w_->restyle();
+        w_->resize(360, 520);
+        SettingsDialog small(w_.get());
+        small.show();
+        settle();
+        for (QPushButton *b : small.findChildren<QPushButton *>())
+            if (b->isVisible())
+                QVERIFY2(b->width() >= b->sizeHint().width() && b->height() >= T::MIN_HIT - 1, qPrintable(b->text()));
+    }
+
+    // A save that fails is shown as a failure, and the page keeps showing what is really saved.
+
+    void aFailedSaveLeavesThePageAndTheDataAsTheyWere()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const auto logText = [&] {
+            QFile f(tmp_->filePath("logs/app.log"));
+            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+        };
+        // Add & enroll while the database refuses registrations
+        const qint64 tid = modern({"Ana", "Bo"}, 45, 1, false, "Sign-up");
+        auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", tid}});
+        QVERIFY(labelText(reg).contains("2 players enrolled"));
+        db::exec("CREATE TRIGGER refuse_enrollment BEFORE INSERT ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'enrollments are closed'); END");
+        const int playersBefore = db::value("SELECT COUNT(*) FROM players").toInt();
+        reg->newNameBox->setText("Cy Newcomer");
+        reg->addBtn->click();
+        settle();
+        QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), playersBefore);     // no stray new player
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 2);
+        QVERIFY(labelText(reg).contains("2 players enrolled") && !labelText(reg).contains("Cy Newcomer"));
+        QCOMPARE(reg->newNameBox->text(), QString("Cy Newcomer"));      // still there to try again
+        QString text = logText();
+        QVERIFY(text.contains("player.add_and_enroll status=failed") && !text.contains("player.add_and_enroll status=ok"));
+        QVERIFY2(text.contains("dialog.error") && text.contains("title=\"Player not added\"") && text.contains("enrollments are closed"),
+                 qPrintable(text.right(600)));
+        // enrolling someone from the search results fails the same way, without changing them
+        const qint64 di = pdb::addPlayer("Di Existing");
+        reg->searchBox->setText("Di Exist");
+        QTest::qWait(500);
+        QPushButton *enroll = nullptr;
+        for (QPushButton *b : reg->findChildren<QPushButton *>())
+            if (b->isVisible() && b->accessibleName() == "Enroll Di Existing")
+                enroll = b;
+        QVERIFY(enroll);
+        enroll->click();
+        settle();
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 2);
+        QVERIFY(!pdb::isRemoved(di) && pdb::playerById(di)["display_name"].toString() == "Di Existing");
+        QVERIFY(logText().contains("title=\"Not enrolled\""));
+        db::exec("DROP TRIGGER refuse_enrollment");
+        reg->addBtn->click();
+        settle();
+        QCOMPARE(tdb::enrolledPlayers(tid).size(), 3);                  // the same click works once the cause is gone
+        QVERIFY(labelText(reg).contains("3 players enrolled") && reg->newNameBox->text().isEmpty());
+
+        // a result while the standings cannot be saved
+        const qint64 live = modern({"Ed", "Flo"}, 45, 1, true, "Running");
+        auto *round = go<RoundScreen>("round", {{"tournament_id", live}});
+        const qint64 match = tdb::roundPairings(tdb::currentRound(live)["round_id"].toLongLong()).first()["match_id"].toLongLong();
+        db::exec("CREATE TRIGGER break_standings BEFORE UPDATE ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'standings cannot be saved'); END");
+        round->recordResult(match, "PLAYER1");
+        settle();
+        QCOMPARE(tdb::roundPairings(tdb::currentRound(live)["round_id"].toLongLong()).first()["result"], QVariant());
+        QVERIFY(labelText(round).contains("Awaiting result") && labelText(round).contains("0 / 1 reported"));
+        text = logText();
+        QVERIFY(text.contains(QStringLiteral("result.report status=failed match=%1").arg(match)));
+        QVERIFY(!text.contains(QStringLiteral("result.report status=ok match=%1").arg(match)));
+        QVERIFY(text.contains("title=\"Result not saved\""));
+        db::exec("DROP TRIGGER break_standings");
+        round->recordResult(match, "PLAYER1");
+        settle();
+        QVERIFY(labelText(round).contains("1 / 1 reported"));
+        QCOMPARE(db::value("SELECT MAX(match_wins) FROM enrollments WHERE tournament_id = ?", {live}).toInt(), 1);
     }
 
     // Clock colours.

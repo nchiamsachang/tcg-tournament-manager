@@ -18,9 +18,16 @@ using Rows = QList<QVariantMap>;
 // Any failed statement.  `constraint` is true when SQLite refused the write
 // because of a UNIQUE / CHECK / foreign key / trigger rule.
 struct Error : std::runtime_error {
-    Error(const QString &message, bool constraint);
+    Error(const QString &message, bool constraint, int code = 0);
     bool constraint;
     QString message;
+    int code;           // SQLite's extended result code, 0 when the error did not come from SQLite
+    // The write would have duplicated a row that must be unique (UNIQUE or PRIMARY KEY).
+    bool unique() const { return code == 2067 || code == 1555; }
+    // The write referred to a row that does not exist (FOREIGN KEY).
+    bool foreignKey() const { return code == 787; }
+    // Another connection held the database (BUSY or LOCKED) for longer than the wait allowed.
+    bool busy() const { return (code & 0xff) == 5 || (code & 0xff) == 6; }
 };
 
 struct Result {
@@ -59,12 +66,22 @@ void initialize();
 // Closes this thread's connection (call before a worker thread ends).
 void closeThreadConnection();
 
+// True while a db::Tx is open on this thread: what is written now is not saved until the
+// outermost one commits.
+bool inTransaction();
+
 // BEGIN IMMEDIATE ... COMMIT.  Rolls back if commit() was never reached.
 //
 // A Tx opened while another is already open on this thread joins it: only the outermost one
 // begins and commits.  That lets a function that needs "all or nothing" call other functions
 // that also do, without either knowing about the other.  An error anywhere throws, which
 // unwinds to the outermost Tx and rolls everything back.
+//
+// If a joined step fails and its exception is caught before it reaches the owner, the
+// transaction is still spoiled: the owner's commit() rolls everything back and throws,
+// so half a change is never saved.  (There are no savepoints: a step cannot be undone on
+// its own.)  A step that simply returns without committing, having changed nothing, does
+// not spoil anything, and the next transaction always starts clean.
 class Tx {
 public:
     Tx();
@@ -76,6 +93,7 @@ public:
 private:
     bool outermost_ = false;
     bool done_ = false;
+    int exceptions_ = 0;
 };
 
 // round(x, digits), correctly rounded in decimal.  Stored percentages use it so equal values

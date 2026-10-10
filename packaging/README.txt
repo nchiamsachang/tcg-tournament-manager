@@ -29,6 +29,7 @@ not in this folder:
     tcg_tournament.db    tournaments, players and results
     settings.json        appearance and round-length settings
     backups\             copies made automatically before a database update
+    logs\                a log of what the app did and of any errors
 
 Paste the line above into the File Explorer address bar to open it. The exact location
 is also shown in the program under Settings > Data, where "Export database backup"
@@ -51,6 +52,23 @@ picked up by the new version. If a new version has to change the database format
 first saves a copy in the backups folder.
 
 To remove everything, delete this folder and the user folder above.
+
+
+Reporting a problem
+-------------------
+If something goes wrong, the error message ends with a short reference such as
+R-7K3QF2. In the program, open Settings > Diagnostics > Export diagnostic report. It
+shows you a report, which you can save and attach to a bug report together with that
+reference. Settings also shows the exact build you are running; include that too.
+
+The report has version details and recent log entries. It never includes your database
+and nothing is sent automatically. Actions are recorded by number, not by name, but
+error messages may contain personal information. Player and tournament names the
+program recognises are replaced by numbers; short or unrecognised names can remain, so
+please read the report before sharing it.
+
+The log makes problems easier to trace, but it does not capture everything: if the
+program stops unexpectedly or the computer loses power, the last entries may be missing.
 
 
 Known limitations of this preview

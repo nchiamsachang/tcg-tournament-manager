@@ -11,6 +11,7 @@
 #include <QPdfWriter>
 #include <QPrintDialog>
 #include <QRadioButton>
+#include <QFontMetricsF>
 #include <QVBoxLayout>
 #include <algorithm>
 
@@ -19,6 +20,45 @@ namespace printing {
 static const int MARGIN_MM = 13;
 static const char *FACE = "Segoe UI";
 static const int WRAP = Qt::TextWordWrap | Qt::TextWrapAnywhere;
+
+// `text` made to wrap well in `width` with WORDS: lines break between words, and after a
+// hyphen.  Only a word (or hyphenated part) too long for a line of its own is given break
+// points inside it, so one very long name does not cause other words to be cut in two.
+// Measuring and drawing a text must both use this, with the same width.
+static const int WORDS = Qt::TextWordWrap;
+
+static QString fitted(const QPainter &p, qreal width, const QString &text)
+{
+    const QFontMetricsF fm(p.font(), p.device());
+    const QChar breakPoint(0x200B);     // zero-width space
+    QStringList words = text.split(QChar(' '));
+    for (QString &word : words) {
+        if (fm.horizontalAdvance(word) <= width)
+            continue;
+        QStringList parts;
+        int from = 0;
+        for (int i = 0; i < word.size(); ++i) {
+            if (word[i] == QChar('-') || i == word.size() - 1) {
+                parts << word.mid(from, i - from + 1);
+                from = i + 1;
+            }
+        }
+        for (QString &part : parts) {
+            if (fm.horizontalAdvance(part) <= width)
+                continue;
+            QString spaced;
+            for (int i = 0; i < part.size(); ++i) {
+                // not inside a surrogate pair
+                if (i > 0 && !part[i].isLowSurrogate())
+                    spaced += breakPoint;
+                spaced += part[i];
+            }
+            part = spaced;
+        }
+        word = parts.join(breakPoint);
+    }
+    return words.join(QChar(' '));
+}
 
 RoundData modernRoundData(const db::Row &tournament, int roundNumber, const db::Rows &pairings)
 {
@@ -178,7 +218,8 @@ static void renderTable(QPainter &p, QPagedPaintDevice *device, const Doc &doc, 
 
     auto textH = [&](const QFont &font, const QString &text, double width) {
         p.setFont(font);
-        return p.boundingRect(QRectF(0, 0, qMax(10.0, width - 2 * padX), 1e6), WRAP, text).height();
+        const qreal inner = qMax(10.0, width - 2 * padX);
+        return p.boundingRect(QRectF(0, 0, inner, 1e6), WORDS, fitted(p, inner, text)).height();
     };
     auto footer = [&] {
         p.setFont(face(8));
@@ -193,7 +234,8 @@ static void renderTable(QPainter &p, QPagedPaintDevice *device, const Doc &doc, 
         double x = 0;
         p.setFont(headFont);
         for (int i = 0; i < doc.columns.size(); ++i) {
-            p.drawText(QRectF(x + padX, y + padY, widths[i] - 2 * padX, hh), WRAP, doc.columns[i].first.toUpper());
+            const QString heading = doc.columns[i].first.toUpper();
+            p.drawText(QRectF(x + padX, y + padY, widths[i] - 2 * padX, hh), WORDS, fitted(p, qMax(10.0, widths[i] - 2 * padX), heading));
             x += widths[i];
         }
         p.setPen(QPen(black, 1.6 * pt));
@@ -204,12 +246,12 @@ static void renderTable(QPainter &p, QPagedPaintDevice *device, const Doc &doc, 
 
     double y = 0;
     p.setFont(face(20, true));
-    QRectF r = p.boundingRect(QRectF(0, 0, w, 1e6), WRAP, doc.title);
-    p.drawText(QRectF(0, y, w, r.height()), WRAP, doc.title);
+    QRectF r = p.boundingRect(QRectF(0, 0, w, 1e6), WORDS, fitted(p, w, doc.title));
+    p.drawText(QRectF(0, y, w, r.height()), WORDS, fitted(p, w, doc.title));
     y += r.height() + 2 * pt;
     p.setFont(face(10.5));
-    r = p.boundingRect(QRectF(0, 0, w, 1e6), WRAP, doc.sub);
-    p.drawText(QRectF(0, y, w, r.height()), WRAP, doc.sub);
+    r = p.boundingRect(QRectF(0, 0, w, 1e6), WORDS, fitted(p, w, doc.sub));
+    p.drawText(QRectF(0, y, w, r.height()), WORDS, fitted(p, w, doc.sub));
     y += r.height() + 8 * pt;
     y = header(y);
 
@@ -232,7 +274,7 @@ static void renderTable(QPainter &p, QPagedPaintDevice *device, const Doc &doc, 
         double x = 0;
         for (int i = 0; i < row.size() && i < widths.size(); ++i) {
             p.setFont(doc.bold.contains(i) ? boldFont : cellFont);
-            p.drawText(QRectF(x + padX, y + padY, widths[i] - 2 * padX, rh), WRAP, row[i]);
+            p.drawText(QRectF(x + padX, y + padY, widths[i] - 2 * padX, rh), WORDS, fitted(p, qMax(10.0, widths[i] - 2 * padX), row[i]));
             x += widths[i];
         }
         p.setPen(QPen(black, 0.6 * pt));
@@ -379,17 +421,21 @@ QList<Doc> tournamentReport(qint64 tournamentId)
     s.sub = (t["status"].toString() == "COMPLETED" ? QStringLiteral("Final standings") : QStringLiteral("Standings"))
             + QStringLiteral("  ·  ") + detail;
     const QList<QPair<QString, QString>> tiebreaks = swiss::tiebreakColumns(game);
-    const double tb = 0.12;
-    s.columns = {{"#", 0.08}, {"Player", 0.92 - 0.30 - tb * tiebreaks.size()}, {"Pts", 0.10}, {"W", 0.10}, {"L", 0.10}};
+    // a tiebreaker column, wider for a long heading ("Opp Opp Win%")
+    const auto tb = [](const QString &heading) { return heading.size() > 8 ? 0.17 : 0.12; };
+    double tiebreakShare = 0;
     for (const auto &c : tiebreaks)
-        s.columns << qMakePair(c.second, tb);
+        tiebreakShare += tb(c.second);
+    s.columns = {{"#", 0.08}, {"Player", 0.92 - 0.30 - tiebreakShare}, {"Pts", 0.10}, {"W", 0.10}, {"L", 0.10}};
+    for (const auto &c : tiebreaks)
+        s.columns << qMakePair(c.second, tb(c.second));
     s.bold = {0, 1, 2};
     s.empty = "No standings yet.";
     for (const db::Row &p : swiss::viewStandings(tournamentId, game)) {
         QStringList row{p["standing"].toString(), p["display_name"].toString(), p["match_points"].toString(),
                         p["match_wins"].toString(), p["match_losses"].toString()};
         for (const auto &c : tiebreaks)
-            row << QString::number(p[c.first].toDouble(), 'f', 3);
+            row << swiss::tiebreakText(game, c.first, p[c.first].toDouble());
         s.rows << row;
     }
     docs << s;
