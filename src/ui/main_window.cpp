@@ -532,7 +532,7 @@ void MainWindow::showTab(qint64 tournamentId)
         btn->setText(text);
         btn->setAccessibleName(tabMeta_.value(tournamentId).name + ", " + text.section(QStringLiteral(" · "), 1).trimmed()
                                + (selected ? ", open now" : ""));
-        btn->setToolTip(tabMeta_.value(tournamentId).name + QStringLiteral(" — open this tournament"));
+        btn->setToolTip(T::plainTip(tabMeta_.value(tournamentId).name + QStringLiteral(" — open this tournament")));
     }
     btn->setParts(label.head + (label.tail.isEmpty() ? QString() : label.sep), label.tail, label.tailColor, label.clock, selected);
     const QString style = T::pillQss(selected, h);

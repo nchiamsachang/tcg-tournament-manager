@@ -61,6 +61,8 @@ int px(int n);                      // a pixel size that follows the text-size p
 QString P(int n);                   // the same, as text for stylesheets
 QString alpha(const QString &hex, int a);       // CSS-style translucent colour, as rgba()
 QString breakable(const QString &text, int run = 14);   // lets long unbroken strings wrap
+// tooltip text that holds a typed name: shown as written, never read as HTML
+QString plainTip(const QString &text);
 
 QFont font(int size = 13, int weight = 400, bool mono = false, double spacing = 0.0, int head = -1);
 QLabel *lbl(const QString &text = {}, const QString &color = {}, int size = 13, int weight = 400, bool wrap = false,

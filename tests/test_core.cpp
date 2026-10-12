@@ -3353,41 +3353,138 @@ private slots:
         QCOMPARE(pdb::searchPlayers("").size(), 4);
     }
 
-    void aBackupCopyNeverTouchesTheLiveDatabase()
+    // backups saved from Settings.  the first three failed on the copy-over-the-file code
+    // this replaced; the fourth is extra coverage that passed on it too
+
+    static QByteArray contentOf(const QString &file)
+    {
+        QFile f(file);
+        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray("(unreadable)");
+    }
+
+    // players in a database file opened on its own, or -1 if it fails its integrity check
+    int playersInFile(const QString &file)
+    {
+        const QString live = db::path();
+        db::closeThreadConnection();
+        db::setPath(file);
+        const int n = db::value("SELECT COUNT(*) FROM players").toInt();
+        const QString check = db::value("PRAGMA integrity_check").toString();
+        db::closeThreadConnection();
+        db::setPath(live);
+        return check == "ok" ? n : -1;
+    }
+
+    void aFailedBackupLeavesTheFileThatWasThereUnchanged()
+    {
+        pdb::addPlayer("Kept");
+        const QString live = db::path(), dest = tmp_->filePath("backup.db");
+        db::exportCopy(dest);
+        const QByteArray earlier = contentOf(dest);
+        QVERIFY(earlier.size() > 1000);
+
+        // the database cannot be read (its drive is gone): nothing may be lost at the destination
+        db::closeThreadConnection();
+        db::setPath(tmp_->filePath("unplugged/tcg_tournament.db"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(dest));
+        QCOMPARE(contentOf(dest), earlier);
+        // the same when what is there is not a database at all
+        QFile junk(tmp_->filePath("not-a-database.db"));
+        QVERIFY(junk.open(QIODevice::WriteOnly));
+        junk.write(QByteArray(8192, 'x'));
+        junk.close();
+        db::closeThreadConnection();
+        db::setPath(junk.fileName());
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(dest));
+        QCOMPARE(contentOf(dest), earlier);
+
+        db::closeThreadConnection();
+        db::setPath(live);
+        QVERIFY(QDir(tmp_->path()).entryList({"*.partial", "*.previous"}).isEmpty());
+        QCOMPARE(playersInFile(dest), 1);
+    }
+
+    void aBackupOntoTheLiveDatabaseIsRefusedWithoutTouchingIt()
     {
         pdb::addPlayer("Kept");
         const QString live = db::path();
-        const auto players = [] { return db::value("SELECT COUNT(*) FROM players").toInt(); };
-        const auto playersIn = [&](const QString &file) {
-            db::closeThreadConnection();
-            db::setPath(file);
-            const int n = db::value("SELECT COUNT(*) FROM players").toInt();
-            const QString check = db::value("PRAGMA integrity_check").toString();
-            db::closeThreadConnection();
-            db::setPath(live);
-            return check == "ok" ? n : -1;
-        };
-
-        // the database itself, however the path is spelled
+        // with the file closed nothing else protects it: the refusal has to be the app's own
+        db::closeThreadConnection();
+        const QByteArray before = contentOf(live);
         QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(live));
         QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->path() + "/./TEST.DB"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->path() + "/sub/../test.db"));
         QVERIFY(QFileInfo::exists(live));
-        QCOMPARE(players(), 1);
+        QCOMPARE(contentOf(live), before);
+        // and while it is open, as it is in the app
+        QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 1);
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(live));
+        QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 1);
+        QCOMPARE(db::value("PRAGMA integrity_check").toString(), QString("ok"));
+        QVERIFY(QDir(tmp_->path()).entryList({"*.partial", "*.previous"}).isEmpty());
+    }
 
+    void aBackupHoldsEverythingCommittedAlsoInWalMode()
+    {
+        // in WAL mode new rows sit in a second file until a checkpoint; a copy of the main
+        // file alone would not have them
+        QCOMPARE(db::value("PRAGMA journal_mode = WAL").toString().toLower(), QString("wal"));
+        db::exec("PRAGMA wal_autocheckpoint = 0");
+        const QList<qint64> p = addPlayers(40, "W");
+        const qint64 tid = tdb::createTournament("Wal Cup", "POKEMON", 1);
+        tdb::enrollPlayer(tid, p[0]);
+        tdb::enrollPlayer(tid, p[1]);
+        swiss::startTournament(tid);
+        QVERIFY(QFileInfo(db::path() + "-wal").size() > 0);
+
+        const QString dest = tmp_->filePath("wal-backup.db");
+        {
+            db::Tx open;        // a change still in progress is not part of the backup
+            pdb::addPlayer("Not saved yet");
+            db::exportCopy(dest);
+        }
+        QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 40);
+        QCOMPARE(playersInFile(dest), 40);
+        // the copy is one file that stands on its own
+        QVERIFY(!QFileInfo::exists(dest + "-wal"));
+        const QString live = db::path();
+        db::closeThreadConnection();
+        db::setPath(dest);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", {tid}).toInt(), 1);
+        QCOMPARE(db::value("SELECT name FROM tournaments WHERE tournament_id = ?", {tid}).toString(), QString("Wal Cup"));
+        QCOMPARE(db::query("PRAGMA foreign_key_check").size(), 0);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM schema_migrations").toInt(), int(db::migrations().size()));
+        db::closeThreadConnection();
+        db::setPath(live);
+    }
+
+    void aBackupReplacesAnEarlierOneOnlyWhenItSucceeds()
+    {
+        pdb::addPlayer("Kept");
         const QString dest = tmp_->filePath("backup.db");
         db::exportCopy(dest);
-        QCOMPARE(playersIn(dest), 1);
+        QCOMPARE(playersInFile(dest), 1);
         pdb::addPlayer("Second");
-        db::exportCopy(dest);               // an existing backup is replaced
-        QCOMPARE(playersIn(dest), 2);
+        db::exportCopy(dest);
+        QCOMPARE(playersInFile(dest), 2);
 
-        // a copy that cannot be written leaves the earlier backup as it was
+        // places a copy cannot go
         QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->filePath("no/such/folder/backup.db")));
-        QVERIFY(QDir(dest).mkpath(tmp_->filePath("taken.db")));     // a folder where the file should go
+        QVERIFY(QDir().mkpath(tmp_->filePath("taken.db")));         // a folder where the file should go
         QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->filePath("taken.db")));
-        QCOMPARE(playersIn(dest), 2);
-        QCOMPARE(players(), 2);
-        QVERIFY(QDir(tmp_->path()).entryList({"*.partial"}).isEmpty());
+        QVERIFY(QFileInfo(tmp_->filePath("taken.db")).isDir());
+#ifdef Q_OS_WIN
+        // another program has the earlier backup open, so it cannot be replaced: it stays as it is
+        const QByteArray earlier = contentOf(dest);
+        QFile held(dest);
+        QVERIFY(held.open(QIODevice::ReadOnly));
+        pdb::addPlayer("Third");
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(dest));
+        held.close();
+        QCOMPARE(contentOf(dest), earlier);
+#endif
+        QVERIFY(QDir(tmp_->path()).entryList({"*.partial", "*.previous"}).isEmpty());
+        QCOMPARE(playersInFile(dest), 2);
     }
 
     void theDatabaseEnforcesItsReferencesAndFindsARoundsMatchesByIndex()
@@ -3420,6 +3517,61 @@ private slots:
         QVERIFY(db::value("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_matches_round'").isValid());
         QCOMPARE(db::value("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", {tid}).toInt(), 1);
         QCOMPARE(QDir(tmp_->filePath("backups")).entryList({"*.db"}).size(), 1);       // backed up first
+    }
+
+    // characterization, not a rule that was decided: what joining after the start does today.
+    // no screen offers it; it is recorded here so a change of policy is a deliberate one
+    void lateEnrollmentAsItWorksToday()
+    {
+        const qint64 tid = tdb::createTournament("Late", "MTG", 3, "Modern");
+        const QList<qint64> p = addPlayers(5, "L");
+        for (int i = 0; i < 4; ++i)
+            tdb::enrollPlayer(tid, p[i]);
+        swiss::startTournament(tid);
+        const qint64 late = p[4];
+        const auto inRound = [&](int number) {
+            return db::value("SELECT COUNT(*) FROM matches m JOIN rounds r ON r.round_id = m.round_id WHERE m.tournament_id = ? "
+                             "AND r.round_number = ? AND (m.player1_id = ? OR m.player2_id = ?)", {tid, number, late, late}).toInt();
+        };
+        const auto reportAll = [&] {
+            for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
+                if (!m["player2_id"].isNull())
+                    swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
+        };
+
+        // joins the list at once, with nothing for the round already paired
+        QVERIFY(tdb::enrollPlayer(tid, late) > 0);
+        QCOMPARE(tdb::enrollPlayer(tid, late), 0);              // still only once
+        QCOMPARE(inRound(1), 0);
+        Rows table = swiss::viewStandings(tid, "MTG");
+        QCOMPARE(table.size(), 5);
+        const Row joined = *std::find_if(table.begin(), table.end(), [&](const Row &r) { return r["player_id"].toLongLong() == late; });
+        QCOMPARE(joined["match_points"].toInt() + joined["match_wins"].toInt() + joined["match_losses"].toInt(), 0);
+        // and is paired from the next round on; the missed round is neither a loss nor a bye
+        reportAll();
+        swiss::advanceToNextRound(tid, 1);
+        QCOMPARE(inRound(1), 0);
+        QCOMPARE(inRound(2), 1);
+        QCOMPARE(tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()).size(), 3);    // five players: two matches and a bye
+        reportAll();
+        swiss::advanceToNextRound(tid, 2);
+        reportAll();
+        table = swiss::finalizeTournament(tid, "MTG");
+        QCOMPARE(table.size(), 5);
+        for (const Row &r : table)
+            QVERIFY(r["final_placement"].toInt() >= 1 && r["final_placement"].toInt() <= 5);
+        QCOMPARE(pdb::matchHistory(late, tid).size(), 2);
+        QCOMPARE(pdb::tournamentHistory(late).size(), 1);
+
+        // a Commander event that has started: the newcomer is added as checked in and active,
+        // although check-in itself and removal are both closed by then
+        auto [cid, seated] = makeEvent(8, 2);
+        const qint64 extra = pdb::addPlayer("Late Commander");
+        QVERIFY(tdb::enrollPlayer(cid, extra) > 0);
+        QCOMPARE(db::value("SELECT checked_in FROM enrollments WHERE tournament_id = ? AND player_id = ?", {cid, extra}).toInt(), 1);
+        QCOMPARE(cdb::getStandings(cid).size(), seated.size() + 1);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::setCheckedIn(cid, extra, false));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(cid, extra));
     }
 };
 

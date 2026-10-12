@@ -95,6 +95,7 @@ public:
     QLineEdit *searchBox = nullptr, *newNameBox = nullptr;
     QPushButton *startBtn = nullptr, *addBtn = nullptr, *renameBtn = nullptr;
     void rename();                          // the pencil beside the title
+    bool searchPending() const { return searchTimer_.isActive(); }      // typed text not searched for yet
 
 protected:
     virtual void buildUi();
@@ -209,6 +210,8 @@ public:
     void setGameChecked(const QString &game, bool on);
     void openFilterMenu();
     QFrame *filterMenu() const { return filterMenu_; }       // the open panel of checkboxes, if any
+    int listBuilds = 0;                                      // times the list of rows was built
+    bool searchPending() const { return searchTimer_.isActive(); }      // typed text not searched for yet
 
 protected:
     void resizeEvent(QResizeEvent *e) override;

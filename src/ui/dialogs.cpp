@@ -412,17 +412,29 @@ void setAutoConfirm(bool on)
     g_autoConfirm = on;
 }
 
+// messages carry typed names, so they are shown as plain text and never read as HTML
+static int plainBox(QWidget *parent, QMessageBox::Icon icon, const QString &title, const QString &text,
+                    QMessageBox::StandardButtons buttons, QMessageBox::StandardButton preferred)
+{
+    QMessageBox box(icon, title, QString(), buttons, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    box.setDefaultButton(preferred);
+    return box.exec();
+}
+
 bool confirm(QWidget *parent, const QString &title, const QString &text)
 {
     if (g_autoConfirm)
         return true;
-    return QMessageBox::question(parent, title, text, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+    return plainBox(parent, QMessageBox::Question, title, text, QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+           == QMessageBox::Yes;
 }
 
 void inform(QWidget *parent, const QString &title, const QString &text)
 {
     if (!g_autoConfirm)
-        QMessageBox::information(parent, title, text);
+        plainBox(parent, QMessageBox::Information, title, text, QMessageBox::Ok, QMessageBox::Ok);
 }
 
 void warn(QWidget *parent, const QString &title, const QString &text)
@@ -438,7 +450,7 @@ void warn(QWidget *parent, const QString &title, const QString &text)
         fields.append({"op", op});
     applog::warning("dialog.error", fields, applog::scrub(text));
     if (!g_autoConfirm)
-        QMessageBox::warning(parent, title, text + "\n\nReference: " + ref);
+        plainBox(parent, QMessageBox::Warning, title, text + "\n\nReference: " + ref, QMessageBox::Ok, QMessageBox::Ok);
 }
 
 bool askText(QWidget *parent, const QString &title, const QString &label, const QString &okText, QString *value)

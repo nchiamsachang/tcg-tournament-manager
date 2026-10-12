@@ -43,7 +43,7 @@ licence notices (`packaging/licenses/`). It runs by double-clicking the .exe
 on a PC with neither Qt nor Visual Studio. The program is not code-signed.
 
 The version is set at the top of `CMakeLists.txt`: the number in `project()`
-and, below it, `TCG_VERSION_LABEL` (`preview.4` now; empty for a final release).
+and, below it, `TCG_VERSION_LABEL` (`preview.5` now; empty for a final release).
 It is shown on the home screen and in Settings, and names the folder and zip.
 
 ## Where the data lives

@@ -187,9 +187,16 @@ QLabel *caps(const QString &text, const QString &color, int size)
     return lbl(text.toUpper(), color.isEmpty() ? MUTED : color, size, 600, false, false, 0.8);
 }
 
+QString plainTip(const QString &text)
+{
+    // qt renders a tooltip as rich text when it looks like markup; escaped, it is the same text
+    return Qt::mightBeRichText(text) ? QStringLiteral("<p>%1</p>").arg(text.toHtmlEscaped()) : text;
+}
+
 QLabel *pill(const QString &text, const QString &color, bool dot, const QString &bg)
 {
     auto *l = new QLabel((dot ? QStringLiteral("●  ") : QString()) + text);
+    l->setTextFormat(Qt::PlainText);
     l->setFont(font(11, 700));
     l->setStyleSheet("color:" + color + ";background:" + (bg.isEmpty() ? alpha(color, 28) : bg) + ";border:1px solid "
                      + alpha(color, 110) + ";border-radius:" + P(10) + "px;padding:" + P(3) + "px " + P(10) + "px;");
@@ -838,7 +845,7 @@ NameScroll::NameScroll(const QString &text, int size, int weight)
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     setFocusPolicy(Qt::StrongFocus);            // Tab to it, then the arrow keys scroll
-    setToolTip(text);
+    setToolTip(plainTip(text));
     setAccessibleName(text);
     setAccessibleDescription(text + ". Scroll sideways to read the whole name.");
     setObjectName("nameScroll");

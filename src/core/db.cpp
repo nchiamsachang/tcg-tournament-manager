@@ -619,6 +619,26 @@ QString backupBeforeUpdate()
     return dest;
 }
 
+// true when `file` opens as a database and passes SQLite's own integrity check
+static bool intact(const QString &file)
+{
+    const QString name = QStringLiteral("tcg_check_%1").arg(quintptr(QThread::currentThreadId()));
+    bool ok = false;
+    {
+        QSqlDatabase d = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        d.setDatabaseName(file);
+        d.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+        if (d.open()) {
+            QSqlQuery q(d);
+            ok = q.exec(QStringLiteral("PRAGMA integrity_check")) && q.next() && q.value(0).toString() == QLatin1String("ok");
+            q.clear();
+            d.close();
+        }
+    }
+    QSqlDatabase::removeDatabase(name);
+    return ok;
+}
+
 void exportCopy(const QString &dest)
 {
     const QFileInfo target(dest), live(path());
@@ -626,15 +646,32 @@ void exportCopy(const QString &dest)
                                   .compare(QDir::cleanPath(live.absoluteFilePath()), Qt::CaseInsensitive) == 0;
     if (sameSpelling || (target.exists() && target.canonicalFilePath() == live.canonicalFilePath()))
         throw Error(QStringLiteral("A backup cannot replace the database that is in use. Choose another file name."), false);
-    // written beside the destination first, so an earlier backup there survives a failed copy
-    const QString partial = dest + QStringLiteral(".partial");
+    if (target.exists() && !target.isFile())
+        throw Error(QStringLiteral("That name belongs to a folder. Choose another file name."), false);
+    // the copy is made and checked beside the destination; a file already there is only
+    // replaced by a good copy, and comes back if the swap fails
+    const QString partial = dest + QStringLiteral(".partial"), previous = dest + QStringLiteral(".previous");
     QFile::remove(partial);
-    if (!snapshot(path(), partial))
-        throw Error(QStringLiteral("The database could not be copied to that location."), false);
-    if ((target.exists() && !QFile::remove(dest)) || !QFile::rename(partial, dest)) {
+    if (!snapshot(path(), partial) || !intact(partial)) {
         QFile::remove(partial);
-        throw Error(QStringLiteral("The existing file there could not be replaced."), false);
+        throw Error(QStringLiteral("The database could not be copied to that location."), false);
     }
+    const bool replacing = target.exists();
+    if (replacing) {
+        QFile::remove(previous);
+        if (!QFile::rename(dest, previous)) {
+            QFile::remove(partial);
+            throw Error(QStringLiteral("The existing file there could not be replaced."), false);
+        }
+    }
+    if (!QFile::rename(partial, dest)) {
+        if (replacing)
+            QFile::rename(previous, dest);
+        QFile::remove(partial);
+        throw Error(QStringLiteral("The copy could not be put in place."), false);
+    }
+    if (replacing)
+        QFile::remove(previous);
 }
 
 // `hadData` is false for a database this launch has just created: there is nothing to back up.

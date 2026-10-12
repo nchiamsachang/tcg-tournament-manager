@@ -663,8 +663,8 @@ QWidget *RoundScreen::pairingRow(const db::Row &pairing, bool live)
     b1->setEnabled(canReport);
     b2->setEnabled(canReport);
     if (canReport) {
-        b1->setToolTip(p1 + " wins");
-        b2->setToolTip(p2 + " wins");
+        b1->setToolTip(T::plainTip(p1 + " wins"));
+        b2->setToolTip(T::plainTip(p2 + " wins"));
         connect(b1, &QPushButton::clicked, this, [this, matchId] { recordResult(matchId, "PLAYER1"); });
         connect(b2, &QPushButton::clicked, this, [this, matchId] { recordResult(matchId, "PLAYER2"); });
     }
@@ -1223,6 +1223,7 @@ void PlayersScreen::populate(const db::Rows &players, int outOf)
 {
     T::ScrollKeeper keep(this);         // filtering or searching rebuilds the list without moving the page
     T::clear(list_);
+    ++listBuilds;
     const bool filtered = !gameFilter_.isEmpty();
     countLabel->setText(filtered ? QStringLiteral("%1 of %2 player%3").arg(players.size()).arg(outOf).arg(outOf == 1 ? "" : "s")
                                  : QStringLiteral("%1 player%2").arg(players.size()).arg(players.size() == 1 ? "" : "s"));
@@ -1297,8 +1298,15 @@ int PlayersScreen::tagAreaWidth() const
 void PlayersScreen::resizeEvent(QResizeEvent *e)
 {
     T::Screen::resizeEvent(e);
-    if (list_ && tagAreaWidth() != tagArea_)
-        runSearch();        // the tag area follows the room available
+    if (!list_ || tagAreaWidth() == tagArea_)
+        return;
+    // only the tag column depends on the width, so the rows are kept and their strips resized
+    tagArea_ = tagAreaWidth();
+    for (int i = 0; i < list_->count(); ++i) {
+        QWidget *row = list_->itemAt(i)->widget();
+        if (auto *tags = row ? row->findChild<T::TagStrip *>() : nullptr)
+            tags->setFixedWidth(tagArea_);
+    }
 }
 
 static QString profileGameLabel(const QString &game)

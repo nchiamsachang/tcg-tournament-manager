@@ -14,6 +14,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
+#include <QTextDocumentFragment>
 #include <QScrollBar>
 #include <QWheelEvent>
 #include <QScreen>
@@ -127,6 +128,14 @@ class UiTests : public QObject {
         if (start)
             cdb::startEvent(tid);
         return tid;
+    }
+
+    // types into a search box and waits until that search has run and its rows are shown
+    template <typename S> void search(S *screen, const QString &text)
+    {
+        screen->searchBox->setText(text);
+        QTRY_VERIFY_WITH_TIMEOUT(!screen->searchPending(), 10000);
+        settle();
     }
 
     template <typename S> S *go(const QString &name, const QVariantMap &args = {})
@@ -495,10 +504,25 @@ private slots:
         QVERIFY(w_->tabText(a).endsWith("Not started"));
         QVERIFY(w_->tabText(b).contains("Round 1 of 2") && w_->tabText(b).endsWith("Not started"));
 
+        // shown: the seconds on a pill's clock, -1 if it has none.  agrees: that reading fits a
+        // clock that had `left` seconds to go and has run between beforeMs and nowMs since
+        static const QRegularExpression clock(QStringLiteral("(\\d+):(\\d\\d)"));
+        const auto shown = [&](qint64 tid) {
+            const QRegularExpressionMatch m = clock.match(w_->tabText(tid));
+            return m.hasMatch() ? m.captured(1).toInt() * 60 + m.captured(2).toInt() : -1;
+        };
+        const auto agrees = [](int seconds, int left, qint64 beforeMs, qint64 nowMs) {
+            return seconds >= left - int(nowMs / 1000) - 1 && seconds <= left - int(beforeMs / 1000) + 1;
+        };
+
+        QElapsedTimer sinceA;
+        sinceA.start();
         timerdb::start(timerdb::Kind::OneOnOne, ra);
         db::exec("UPDATE rounds SET timer_started_at = timer_started_at - 1242 WHERE round_id = ?", {ra});   // 20:42 gone
+        const int leftA = 45 * 60 - 1242;                       // 24:18
+        qint64 before = sinceA.elapsed();
         go<HomeScreen>("home");                                 // navigating re-reads the saved clocks
-        QVERIFY2(w_->tabText(a).contains("24:18 remaining") || w_->tabText(a).contains("24:17 remaining"), qPrintable(w_->tabText(a)));
+        QVERIFY2(w_->tabText(a).endsWith("remaining") && agrees(shown(a), leftA, before, sinceA.elapsed()), qPrintable(w_->tabText(a)));
         QCOMPARE(w_->tabButton(a)->text(), w_->tabText(a));     // what is on screen is that text
         QVERIFY2(w_->tabText(b).endsWith("Not started"), "each tournament has its own clock");
 
@@ -506,15 +530,26 @@ private slots:
         go<PlayersScreen>("players");
         w_->resize(700, 500);
         settle();
+        before = sinceA.elapsed();
         w_.reset();
         openWindow();
-        QVERIFY2(w_->tabText(a).contains("24:1"), qPrintable(w_->tabText(a)));
+        QVERIFY2(w_->tabText(a).endsWith("remaining") && agrees(shown(a), leftA, before, sinceA.elapsed()), qPrintable(w_->tabText(a)));
 
+        const qint64 pausedFrom = sinceA.elapsed();
         timerdb::pause(timerdb::Kind::OneOnOne, ra);
+        const qint64 pausedBy = sinceA.elapsed();
+        QElapsedTimer sinceB;
+        sinceB.start();
         timerdb::start(timerdb::Kind::Commander, rb);
+        before = sinceB.elapsed();
         go<HomeScreen>("home");
-        QVERIFY2(w_->tabText(a).contains("Paused at 24:1"), qPrintable(w_->tabText(a)));
-        QVERIFY2(w_->tabText(b).contains("80:00 remaining") || w_->tabText(b).contains("79:5"), qPrintable(w_->tabText(b)));
+        QVERIFY2(w_->tabText(a).contains("Paused at ") && agrees(shown(a), leftA, pausedFrom, pausedBy), qPrintable(w_->tabText(a)));
+        QVERIFY2(w_->tabText(b).endsWith("remaining") && agrees(shown(b), 80 * 60, before, sinceB.elapsed()), qPrintable(w_->tabText(b)));
+        // a paused clock stays where it was however long the page is open
+        const int pausedAt = shown(a);
+        QTest::qWait(1200);
+        go<HomeScreen>("home");
+        QCOMPARE(shown(a), pausedAt);
 
         // at zero it says so, stays at zero, and changes nothing else
         db::exec("UPDATE commander_rounds SET timer_started_at = timer_started_at - 99999 WHERE round_id = ?", {rb});
@@ -790,10 +825,10 @@ private slots:
                 QCOMPARE(format->count(), 2);
                 const QByteArray where = QStringLiteral("%1 %2x%3").arg(mode).arg(size.width()).arg(size.height()).toUtf8();
                 format->showPopup();
-                QTest::qWait(150);
                 QAbstractItemView *view = format->view();
                 QWidget *popup = view->window();
-                QVERIFY2(popup->isVisible() && popup != w_.get(), where);
+                QTRY_VERIFY2_WITH_TIMEOUT(popup->isVisible(), where, 10000);
+                QVERIFY2(popup != w_.get(), where);
                 QVERIFY2(!popup->testAttribute(Qt::WA_TranslucentBackground), where);
                 // every pixel of the open list is solid: sample the unselected row away from its text,
                 // the list padding and the popup frame
@@ -825,8 +860,7 @@ private slots:
                 // choosing with the keyboard works and closes the list
                 QTest::keyClick(view, Qt::Key_Down);
                 QTest::keyClick(view, Qt::Key_Return);
-                QTest::qWait(50);
-                QVERIFY2(!popup->isVisible(), where);
+                QTRY_VERIFY2_WITH_TIMEOUT(!popup->isVisible(), where, 10000);
                 QCOMPARE(format->currentText(), QString("Commander"));
             }
         }
@@ -983,12 +1017,12 @@ private slots:
             }
         }
         QCOMPARE(found, 1);
-        dir->searchBox->setText("Newc");
-        QTest::qWait(400);
-        int visibleRows = 0;
+        search(dir, "Newc");
+        QStringList visibleNames;
         for (QFrame *row : dir->findChildren<QFrame *>("pr"))
-            visibleRows += row->isVisible() ? 1 : 0;
-        QCOMPARE(visibleRows, 1);                       // search still works
+            if (row->isVisible())
+                visibleNames << row->findChild<T::NameScroll *>()->label->text();
+        QCOMPARE(visibleNames, QStringList{"Newcomer"});        // search still works
     }
 
     // Clicking does not move the page.
@@ -1429,20 +1463,17 @@ private slots:
         dir->setGameChecked("ONEPIECE", false);
         QCOMPARE(shown(), (QStringList{"Bo", "Cy", "Ed", "Flo", "Gus"}));
         // with the name search
-        dir->searchBox->setText("o");
-        QTest::qWait(400);
+        search(dir, "o");
         QCOMPARE(shown(), (QStringList{"Bo", "Flo"}));
         QCOMPARE(dir->countLabel->text(), QString("2 of 3 players"));       // of the three names with an "o"
-        dir->searchBox->setText("Newc");
-        QTest::qWait(400);
+        search(dir, "Newc");
         QVERIFY(shown().isEmpty());
         QLabel *empty = dir->findChild<QLabel *>("noPlayers");
         QVERIFY(empty && empty->isVisible());
         const QString emptyText = empty->text().remove(QChar(0x200B));
         QVERIFY2(emptyText.contains("Newc") && emptyText.contains("Magic: The Gathering") && emptyText.contains("All games"),
                  qPrintable(emptyText));
-        dir->searchBox->clear();
-        QTest::qWait(400);
+        search(dir, QString());
         // unticking the last game goes back to All games
         dir->setGameChecked("MTG", false);
         QVERIFY(dir->gameFilter().isEmpty());
@@ -1959,14 +1990,11 @@ private slots:
         auto *dir = go<PlayersScreen>("players");
         QCOMPARE(listed(dir), (QStringList{"Alex Jones", la, "Jordan Smith", lb}));
         // searching down to one of them keeps its id: it was decided from the whole directory
-        dir->searchBox->setText("alex  S");
-        QTest::qWait(400);
+        search(dir, "alex  S");
         QCOMPARE(listed(dir), QStringList{lb});
-        dir->searchBox->setText("Jones");
-        QTest::qWait(400);
+        search(dir, "Jones");
         QCOMPARE(listed(dir), QStringList{"Alex Jones"});
-        dir->searchBox->clear();
-        QTest::qWait(400);
+        search(dir, QString());
         // so does the game filter
         const qint64 cup = tdb::createTournament("Cup", "POKEMON", 1, "Standard");
         tdb::enrollPlayer(cup, a);
@@ -2160,14 +2188,12 @@ private slots:
         QCOMPARE(tdb::enrolledPlayers(tid).size(), 2);
         QCOMPARE(int(pdb::allPlayers().size()), before + 1);
         // searching offers both namesakes with their ids, and never the removed player
-        reg->searchBox->setText("Alex Smith");
-        QTest::qWait(500);
+        search(reg, "Alex Smith");
         const QString found = labelText(reg);
         QVERIFY2(found.contains(QStringLiteral("Alex Smith · ") + pdb::formatId(a))
                  && found.contains(QStringLiteral("Alex Smith · ") + pdb::formatId(b)), qPrintable(found));
         pdb::removePlayer(pdb::addPlayer("Vanished Vera"));
-        reg->searchBox->setText("Vanished");
-        QTest::qWait(500);
+        search(reg, "Vanished");
         QVERIFY(!labelText(reg).contains("Vanished Vera"));
     }
 
@@ -2287,8 +2313,7 @@ private slots:
         // they cannot be found or enrolled for something new
         const qint64 fresh = modern({}, 45, 1, false, "Next Cup");
         auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", fresh}});
-        reg->searchBox->setText("Dana");
-        QTest::qWait(500);
+        search(reg, "Dana");
         QVERIFY(!labelText(reg).contains("Dana Cruz"));
         // a new Dana Cruz is a new person: no question about the removed one, a new id, no history
         reg->newNameBox->setText("Dana Cruz");
@@ -2536,8 +2561,7 @@ private slots:
                  qPrintable(text.right(600)));
         // enrolling someone from the search results fails the same way, without changing them
         const qint64 di = pdb::addPlayer("Di Existing");
-        reg->searchBox->setText("Di Exist");
-        QTest::qWait(500);
+        search(reg, "Di Exist");
         QPushButton *enroll = nullptr;
         for (QPushButton *b : reg->findChildren<QPushButton *>())
             if (b->isVisible() && b->accessibleName() == "Enroll Di Existing")
@@ -2670,8 +2694,20 @@ private slots:
         QVERIFY(!w_->tabButton(tid));
     }
 
+    void everyScreenFitsEveryWindowSizeThemeAndTextSize_data()
+    {
+        QTest::addColumn<QString>("theme");
+        QTest::addColumn<QString>("textSize");
+        QTest::newRow("dark, standard text") << "dark" << "standard";
+        QTest::newRow("light, standard text") << "light" << "standard";
+        QTest::newRow("light, large text") << "light" << "large";
+        QTest::newRow("dark, large text") << "dark" << "large";
+    }
+
     void everyScreenFitsEveryWindowSizeThemeAndTextSize()
     {
+        QFETCH(QString, theme);
+        QFETCH(QString, textSize);
         const QList<qint64> pids = players({LONG_NAME, UNBROKEN, "Ana", "Bo", "Cy", "Di", "Ed"});
         const QList<qint64> extra = players({"Priya", "Marcus", "Nami", "Dom"});
         const qint64 mod = tdb::createTournament("Modern Monday With A Really Long Tournament Name", "MTG", 3, "Modern", {}, 45);
@@ -2739,8 +2775,8 @@ private slots:
         const QString shots = qEnvironmentVariable("TCG_UI_SHOTS");     // optional folder for screenshots
         QStringList report;
         int combinations = 0;
-        for (const auto &look : {qMakePair(QString("dark"), QString("standard")), qMakePair(QString("light"), QString("standard")),
-                                 qMakePair(QString("light"), QString("large")), qMakePair(QString("dark"), QString("large"))}) {
+        {
+            const auto look = qMakePair(theme, textSize);
             prefs::setPref("theme", look.first);
             prefs::setPref("text_size", look.second);
             w_->restyle();
@@ -2773,8 +2809,107 @@ private slots:
         if (!report.isEmpty())
             qWarning().noquote() << report.mid(0, 40).join("\n");
         QVERIFY2(report.isEmpty(), qPrintable(QStringLiteral("%1 layout problems").arg(report.size())));
-        QCOMPARE(combinations, int(sizes.size() * screens.size() * 4));
+        QCOMPARE(combinations, int(sizes.size() * screens.size()));
     }
+    // the players page used to build every row twice on opening, and again on every resize
+    void playersPageBuildsItsRowsOnceAndFollowsTheWindow()
+    {
+        const QList<qint64> ids = players({LONG_NAME, "Bo", "Cy", "Di", "Ed", "Flo"});
+        const qint64 poke = tdb::createTournament("Poke", "POKEMON", 1, "Standard");
+        tdb::enrollPlayer(poke, ids[0]);
+        tdb::enrollPlayer(poke, ids[1]);
+        swiss::startTournament(poke);
+        const auto tagWidths = [](PlayersScreen *page) {
+            QList<int> widths;
+            for (QFrame *row : page->findChildren<QFrame *>("pr"))
+                if (row->isVisible())
+                    widths << row->findChild<T::TagStrip *>()->width();
+            return widths;
+        };
+
+        w_->resize(1280, 800);
+        settle();
+        auto *page = go<PlayersScreen>("players");
+        QVERIFY(page);
+        QCOMPARE(page->listBuilds, 1);
+        QCOMPARE(tagWidths(page).size(), 6);
+        for (const QSize &size : {QSize(900, 700), QSize(640, 480), QSize(360, 640), QSize(1440, 900)}) {
+            w_->resize(size);
+            settle();
+            const QByteArray where = QStringLiteral("%1x%2").arg(size.width()).arg(size.height()).toUtf8();
+            QVERIFY2(page == w_->currentScreen() && page->listBuilds == 1, where);     // the same rows
+            const QList<int> kept = tagWidths(page);
+            // and they look as a page opened at this size does
+            auto *fresh = go<PlayersScreen>("players");
+            QVERIFY2(fresh->listBuilds == 1, where);
+            QVERIFY2(kept == tagWidths(fresh) && kept.size() == 6, where);
+            QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
+            page = fresh;
+        }
+        // a search is still one rebuild, with the new result
+        search(page, "Bo");
+        QCOMPARE(page->listBuilds, 2);
+        QCOMPARE(tagWidths(page).size(), 1);
+    }
+
+    // a typed name is text, never markup: as HTML it could make Qt load an image file
+    void typedNamesAreNeverShownAsMarkup()
+    {
+        const QString markup = QStringLiteral("<b>Bo</b><img src=\"none.svg\">");
+        const qint64 tid = modern({markup, "Cy"}, 45, 1, true, QStringLiteral("<i>Cup</i>"));
+        // what a tooltip puts on screen: Qt renders it as HTML when it looks like HTML
+        const auto displayed = [](const QString &tip) {
+            return Qt::mightBeRichText(tip) ? QTextDocumentFragment::fromHtml(tip).toPlainText() : tip;
+        };
+
+        auto *dir = go<PlayersScreen>("players");
+        int found = 0;
+        for (T::NameScroll *strip : dir->findChildren<T::NameScroll *>()) {
+            if (strip->isVisible() && strip->label->text() == markup) {
+                QCOMPARE(strip->label->textFormat(), Qt::PlainText);
+                QCOMPARE(displayed(strip->toolTip()), markup);
+                ++found;
+            }
+        }
+        QCOMPARE(found, 1);
+
+        auto *round = go<RoundScreen>("round", {{"tournament_id", tid}});
+        QVERIFY(round);
+        int winTips = 0;
+        for (T::WrapButton *b : round->findChildren<T::WrapButton *>()) {
+            if (b->toolTip().isEmpty())
+                continue;
+            QVERIFY2(displayed(b->toolTip()).endsWith(" wins") && !displayed(b->toolTip()).isEmpty(), qPrintable(b->toolTip()));
+            winTips += displayed(b->toolTip()) == markup + " wins";
+        }
+        QCOMPARE(winTips, 1);
+        QVERIFY2(displayed(w_->tabButton(tid)->toolTip()).startsWith("<i>Cup</i>"), qPrintable(w_->tabButton(tid)->toolTip()));
+
+        // and the question, notice and error boxes
+        setAutoConfirm(false);
+        QList<Qt::TextFormat> formats;
+        QStringList texts;
+        const auto answer = [&] {
+            QTimer::singleShot(0, qApp, [&] {
+                if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                    formats << box->textFormat();
+                    texts << box->text();
+                    box->reject();
+                }
+            });
+        };
+        answer();
+        confirm(w_.get(), "Remove Player", "Remove " + markup + " from this tournament?");
+        answer();
+        inform(w_.get(), "Saved", markup);
+        answer();
+        warn(w_.get(), "Player not removed", markup + " is still playing.");
+        setAutoConfirm(true);
+        QCOMPARE(formats, (QList<Qt::TextFormat>{Qt::PlainText, Qt::PlainText, Qt::PlainText}));
+        for (const QString &text : texts)
+            QVERIFY2(text.contains(markup), qPrintable(text));
+    }
+
     // audit: what the screens must not let through
 
     void goingBackAfterTheStartDoesNotReopenRegistration()

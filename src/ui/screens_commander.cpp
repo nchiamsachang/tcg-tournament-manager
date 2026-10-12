@@ -685,6 +685,7 @@ void CommanderEventScreen::correct(const QVariantMap &pod)
     } catch (const cdb::ResolutionRequired &e) {
         QMessageBox box(this);
         box.setWindowTitle("Later rounds depend on this result");
+        box.setTextFormat(Qt::PlainText);
         box.setText(e.message);
         box.setInformativeText("Keep: standings are recalculated, but everything already published stays as it is.\n"
                                "Rebuild: later rounds are discarded and redone from the corrected result "
