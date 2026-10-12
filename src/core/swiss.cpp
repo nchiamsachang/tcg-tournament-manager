@@ -381,6 +381,8 @@ void startTournament(qint64 tournamentId)
     const Row t = requireTournament(tournamentId);
     if (t["status"].toString() != tdb::PENDING)
         throw RuleError("This tournament has already been started.");
+    if (tdb::enrolledPlayers(tournamentId, false).size() < 2)
+        throw RuleError("A tournament needs at least two players to start.");
     tdb::updateTournamentStatus(tournamentId, tdb::IN_PROGRESS);
     generatePairings(tournamentId, 1);
     tx.commit();
@@ -410,18 +412,23 @@ qint64 advanceToNextRound(qint64 tournamentId, int fromRound)
     return nextRoundId;
 }
 
-Rows finalizeTournament(qint64 tournamentId, const QString &game)
+Rows finalizeTournament(qint64 tournamentId, const QString &)
 {
     applog::Action log("tournament.finalize", {{"tournament", tournamentId}});
     db::Tx tx;
     const Row t = requireTournament(tournamentId);
+    const QString game = t["game"].toString();      // the saved game decides the scoring, not the caller
     if (t["status"].toString() == tdb::COMPLETED)
         return standings(tournamentId, game);       // already finished: the saved placings stand
     if (t["status"].toString() == tdb::TERMINATED)
         throw RuleError("This tournament was ended early; it has no final standings to save.");
+    if (t["status"].toString() != tdb::IN_PROGRESS)
+        throw RuleError("This tournament has not started.");
     const Row current = tdb::currentRound(tournamentId);
-    if (!current.isEmpty())
-        requireAllReported(current["round_id"].toLongLong(), current["round_number"].toInt());
+    if (current.isEmpty() || current["round_number"].toInt() < t["total_rounds"].toInt())
+        throw RuleError(QStringLiteral("This tournament has %1 rounds; it can be finalized after the last one, "
+                                       "or ended early.").arg(t["total_rounds"].toInt()));
+    requireAllReported(current["round_id"].toLongLong(), current["round_number"].toInt());
 
     calculateTiebreakers(tournamentId, game);
     for (const Row &p : standings(tournamentId, game))

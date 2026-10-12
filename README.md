@@ -43,7 +43,7 @@ licence notices (`packaging/licenses/`). It runs by double-clicking the .exe
 on a PC with neither Qt nor Visual Studio. The program is not code-signed.
 
 The version is set at the top of `CMakeLists.txt`: the number in `project()`
-and, below it, `TCG_VERSION_LABEL` (`preview.3` now; empty for a final release).
+and, below it, `TCG_VERSION_LABEL` (`preview.4` now; empty for a final release).
 It is shown on the home screen and in Settings, and names the folder and zip.
 
 ## Where the data lives
@@ -94,6 +94,11 @@ Things worth knowing:
 - If a step fails and its error is caught before it reaches the owner, the
   owner still cannot save the rest: its `commit()` rolls everything back and
   throws. There are no savepoints, so a step is never undone on its own.
+- The rules are enforced in the core, whatever a screen allows: names are
+  trimmed, 1 to 100 characters and free of line breaks; a tournament needs a
+  known game, 1 to 15 rounds and two players to start; a player can be taken
+  off the list only before the start and nobody joins a finished tournament;
+  a tournament is finalized only in its last configured round.
 - Dialogs are never open during a transaction. A question (same name? end the
   round?) is asked first; the write starts after it is answered.
 - `tdb::enrollPlayer` returns 0 only when that player is already registered

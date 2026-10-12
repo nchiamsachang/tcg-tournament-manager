@@ -53,6 +53,8 @@ QString resolveDataFile(const QString &userDir, const QString &programDir);
 // initialize() calls it before applying a schema update to a database that already has data.
 // Throws Error when the copy cannot be made.
 QString backupBeforeUpdate();
+// saves a copy of the database to a file the organizer chose; throws Error if it cannot
+void exportCopy(const QString &dest);
 
 Rows query(const QString &sql, const QVariantList &args = {});
 Row one(const QString &sql, const QVariantList &args = {});          // empty map when there is no row

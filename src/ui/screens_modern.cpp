@@ -204,10 +204,15 @@ void RegistrationScreen::addAndEnroll()
 
 void RegistrationScreen::unenroll(qint64 playerId, const QString &name)
 {
-    if (confirm(this, "Remove Player", "Remove " + name + " from this tournament?")) {
+    if (!confirm(this, "Remove Player", "Remove " + name + " from this tournament?"))
+        return;
+    try {
         tdb::unenrollPlayer(tournamentId, playerId);
-        refreshEnrolled();
+    } catch (const std::exception &e) {
+        warn(this, "Player not removed", QString::fromUtf8(e.what()));
+        return;
     }
+    refreshEnrolled();
 }
 
 void RegistrationScreen::refreshEnrolled()

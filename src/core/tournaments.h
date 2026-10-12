@@ -16,6 +16,11 @@ constexpr int DEFAULT_ROUND_MINUTES = 50;
 bool isValidRoundMinutes(int minutes);
 // The longest tournament name, in characters, when one is created or renamed.
 constexpr int MAX_NAME_LENGTH = 100;
+// the most rounds a one-on-one tournament can be created with
+constexpr int MAX_ROUNDS = 15;
+// a player or tournament name as it is stored: trimmed, 1 to MAX_NAME_LENGTH characters,
+// no control characters; throws std::invalid_argument otherwise (`what`: "player", "tournament")
+QString checkedName(const QString &name, const QString &what);
 
 // The games the app runs, by the id stored in tournaments.game, in the order they are
 // listed everywhere (home page, game tags, the players filter).  Modern and Commander are

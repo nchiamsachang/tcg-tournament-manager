@@ -444,7 +444,10 @@ QList<Doc> tournamentReport(qint64 tournamentId)
 
 QString csvCell(QString text)
 {
-    if (text.contains(',') || text.contains('"') || text.contains('\n'))
+    // a spreadsheet runs a cell that starts with one of these as a formula; the quote makes it text
+    if (!text.isEmpty() && QStringLiteral("=+-@\t\r").contains(text.at(0)))
+        text.prepend('\'');
+    if (text.contains(',') || text.contains('"') || text.contains('\n') || text.contains('\r'))
         text = "\"" + text.replace("\"", "\"\"") + "\"";
     return text;
 }

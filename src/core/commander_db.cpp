@@ -196,6 +196,9 @@ qint64 createCommanderTournament(const QString &name, int expectedPlayers, int s
                                  qint64 baseSeed, const QString &tournamentDate, int roundTimeMins)
 {
     applog::Action log("tournament.create", {{"game", "MTG"}, {"format", "Commander"}, {"rounds", swissRounds}});
+    const QString wanted = tdb::checkedName(name, QStringLiteral("tournament"));
+    if (!tdb::isValidRoundMinutes(roundTimeMins))
+        throw CommanderError("Round length must be from 1 to 240 minutes.");
     QVariantMap cfg = cmdr::defaultSettings();
     for (auto it = settings.begin(); it != settings.end(); ++it)
         cfg[it.key()] = it.value();
@@ -213,7 +216,7 @@ qint64 createCommanderTournament(const QString &name, int expectedPlayers, int s
     db::Tx tx;
     const qint64 tid = db::exec(
         "INSERT INTO tournaments (name, game, format, tournament_date, total_rounds, top_cut, round_time_mins, status) "
-        "VALUES (?, 'MTG', ?, ?, ?, 0, ?, 'PENDING')", {name, QString(FORMAT), date, rounds, roundTimeMins}).lastId;
+        "VALUES (?, 'MTG', ?, ?, ?, 0, ?, 'PENDING')", {wanted, QString(FORMAT), date, rounds, roundTimeMins}).lastId;
     db::exec("INSERT INTO commander_events (tournament_id, rules_version, settings_json, recommended_rounds, "
              "swiss_rounds, recommended_cut, playoff_cut, base_seed) VALUES (?, ?, ?, ?, ?, 0, 0, ?)",
              {tid, QString(cmdr::RULES_VERSION), toJson(cfg), recRounds, rounds, seed});

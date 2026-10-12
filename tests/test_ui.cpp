@@ -2775,6 +2775,53 @@ private slots:
         QVERIFY2(report.isEmpty(), qPrintable(QStringLiteral("%1 layout problems").arg(report.size())));
         QCOMPARE(combinations, int(sizes.size() * screens.size() * 4));
     }
+    // audit: what the screens must not let through
+
+    void goingBackAfterTheStartDoesNotReopenRegistration()
+    {
+        const qint64 tid = modern({"Ana", "Bo", "Cy", "Di"}, 45, 2, false);
+        go<HubScreen>("hub", {{"game", "MTG"}});
+        auto *reg = go<RegistrationScreen>("registration", {{"tournament_id", tid}});
+        QVERIFY(reg);
+        reg->confirmStart();
+        settle();
+        QVERIFY(qobject_cast<RoundScreen *>(w_->currentScreen()));
+        w_->goBack();
+        settle();
+        QVERIFY2(!qobject_cast<RegistrationScreen *>(w_->currentScreen()), "registration is over once round 1 is paired");
+        QVERIFY(qobject_cast<HubScreen *>(w_->currentScreen()));
+        QCOMPARE(tdb::enrolledPlayers(tid, true).size(), 4);
+
+        // the same for a Commander event
+        const qint64 cmd = commander({"Ka", "Le", "Mo", "Ni"}, 1, false);
+        go<HubScreen>("hub", {{"game", "MTG"}});
+        QVERIFY(go<CommanderRegistrationScreen>("registration", {{"tournament_id", cmd}}));
+        cdb::startEvent(cmd);
+        go<CommanderEventScreen>("round", {{"tournament_id", cmd}});
+        w_->goBack();
+        settle();
+        QVERIFY(qobject_cast<HubScreen *>(w_->currentScreen()));
+        // a tournament still being set up keeps its way back
+        const qint64 open = modern({"Oz", "Pi"}, 45, 2, false, "Open");
+        go<HubScreen>("hub", {{"game", "MTG"}});
+        go<RegistrationScreen>("registration", {{"tournament_id", open}});
+        go<PlayersScreen>("players");
+        w_->goBack();
+        settle();
+        QVERIFY(qobject_cast<RegistrationScreen *>(w_->currentScreen()));
+    }
+
+    void exportedCellsCannotBecomeSpreadsheetFormulas()
+    {
+        QCOMPARE(printing::csvCell("Ana"), QString("Ana"));
+        QCOMPARE(printing::csvCell("Smith, Bo"), QString("\"Smith, Bo\""));
+        QCOMPARE(printing::csvCell("Say \"hi\""), QString("\"Say \"\"hi\"\"\""));
+        for (const char *risky : {"=1+1", "+1", "-1", "@SUM(A1)"})
+            QCOMPARE(printing::csvCell(risky), QStringLiteral("'") + risky);
+        QCOMPARE(printing::csvCell("=HYPERLINK(\"x\",\"y\")"), QString("\"'=HYPERLINK(\"\"x\"\",\"\"y\"\")\""));
+        QCOMPARE(printing::csvCell("a\rb"), QString("\"a\rb\""));
+        QCOMPARE(printing::csvCell("Mary-Jane"), QString("Mary-Jane"));    // only a leading character matters
+    }
 };
 
 int main(int argc, char *argv[])

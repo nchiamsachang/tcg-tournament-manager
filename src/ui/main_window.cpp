@@ -356,6 +356,8 @@ void MainWindow::navigateTo(const QString &screen, const QVariantMap &args)
         return;
     }
     history.append({screen, args});
+    if (history.size() > 200)
+        history.removeFirst();      // a long session does not grow the list without end
     QList<QWidget *> old;
     for (int i = 0; i < stack->count(); ++i)
         old << stack->widget(i);
@@ -373,11 +375,19 @@ void MainWindow::navigateTo(const QString &screen, const QVariantMap &args)
 
 void MainWindow::goBack()
 {
-    if (history.size() > 1) {
-        history.removeLast();
+    if (history.size() < 2)
+        return;
+    history.removeLast();
+    while (!history.isEmpty()) {
         const auto prev = history.takeLast();
+        // registration is over once the tournament has started: skip that page
+        const qint64 tid = prev.second.value("tournament_id").toLongLong();
+        if (prev.first == "registration" && tdb::tournamentById(tid)["status"].toString() != tdb::PENDING)
+            continue;
         navigateTo(prev.first, prev.second);
+        return;
     }
+    navigateTo("home");
 }
 
 void MainWindow::addTournamentTab(qint64 tournamentId, const QString &game, const QString &name)

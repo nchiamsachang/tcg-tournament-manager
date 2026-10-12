@@ -13,8 +13,9 @@ namespace pdb {
 qint64 addPlayer(const QString &displayName)
 {
     applog::Action log("player.add");
+    const QString name = tdb::checkedName(displayName, QStringLiteral("player"));
     const qint64 id = db::exec("INSERT INTO players (display_name, email, phone, plays_mtg, plays_onepiece, plays_pokemon, notes) "
-                               "VALUES (?, NULL, NULL, 0, 0, 0, NULL)", {displayName}).lastId;
+                               "VALUES (?, NULL, NULL, 0, 0, 0, NULL)", {name}).lastId;
     log.set("player", id);
     return id;
 }
@@ -91,8 +92,11 @@ Row playerById(qint64 playerId)
 
 Rows searchPlayers(const QString &text)
 {
-    return db::query("SELECT * FROM players WHERE deleted_at IS NULL AND display_name LIKE ? "
-                     "ORDER BY display_name COLLATE NOCASE, player_id", {"%" + text + "%"});
+    // the typed text is matched as it is: % and _ are not wildcards
+    QString literal = text;
+    literal.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    return db::query("SELECT * FROM players WHERE deleted_at IS NULL AND display_name LIKE ? ESCAPE '\\' "
+                     "ORDER BY display_name COLLATE NOCASE, player_id", {"%" + literal + "%"});
 }
 
 Rows tournamentHistory(qint64 playerId)
@@ -193,11 +197,15 @@ QHash<qint64, QStringList> gamesPlayed()
 void renamePlayer(qint64 playerId, const QString &displayName)
 {
     applog::Action log("player.rename", {{"player", playerId}});
-    if (displayName.trimmed().isEmpty())
-        throw std::invalid_argument("A player needs a name.");
-    if (isRemoved(playerId))
+    const QString name = tdb::checkedName(displayName, QStringLiteral("player"));
+    db::Tx tx;
+    const Row player = db::one("SELECT deleted_at FROM players WHERE player_id = ?", {playerId});
+    if (player.isEmpty())
+        throw std::invalid_argument("That player does not exist.");
+    if (!player["deleted_at"].isNull())
         throw std::invalid_argument("This player was removed from the directory and can no longer be renamed.");
-    db::exec("UPDATE players SET display_name = ? WHERE player_id = ?", {displayName.trimmed(), playerId});
+    db::exec("UPDATE players SET display_name = ? WHERE player_id = ?", {name, playerId});
+    tx.commit();
 }
 
 bool removePlayer(qint64 playerId)

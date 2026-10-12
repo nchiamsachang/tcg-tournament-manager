@@ -65,7 +65,8 @@ void startTournament(qint64 tournamentId);
 qint64 advanceToNextRound(qint64 tournamentId, int fromRound);
 // Saves final placings and marks the tournament completed; returns the final standings.
 // Finishing a tournament that is already completed changes nothing.  Throws RuleError
-// while results are missing.
+// while results are missing, before the last configured round, or if it never started.
+// The scoring is that of the tournament's saved game; `game` is ignored.
 db::Rows finalizeTournament(qint64 tournamentId, const QString &game);
 
 } // namespace swiss

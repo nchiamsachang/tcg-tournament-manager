@@ -173,7 +173,14 @@ static QSqlDatabase connection()
     if (!d.open())
         throw Error(QStringLiteral("Cannot open database %1: %2").arg(file, d.lastError().text()), false);
     QSqlQuery q(d);
-    q.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
+    // references are only enforced per connection, so a connection without them is not used
+    const bool enforced = q.exec(QStringLiteral("PRAGMA foreign_keys = ON")) && q.exec(QStringLiteral("PRAGMA foreign_keys"))
+                          && q.next() && q.value(0).toInt() == 1;
+    q.clear();
+    if (!enforced) {
+        d.close();
+        throw Error(QStringLiteral("The database could not be opened with its integrity rules switched on."), false);
+    }
     t_openPath = file;
     return d;
 }
@@ -555,6 +562,12 @@ static void migration005PlayerRemoved()
         exec("ALTER TABLE players ADD COLUMN deleted_at TEXT");
 }
 
+// a round's matches are read on every refresh of its screen; without this the whole table is scanned
+static void migration006MatchesRoundIndex()
+{
+    exec("CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(round_id)");
+}
+
 const QList<Migration> &migrations()
 {
     static const QList<Migration> list = {
@@ -563,6 +576,7 @@ const QList<Migration> &migrations()
         {3, "commander_fixed_rounds", migration003CommanderFixedRounds},
         {4, "tournament_terminated", migration004TournamentTerminated, true},
         {5, "player_removed", migration005PlayerRemoved},
+        {6, "matches_round_index", migration006MatchesRoundIndex},
     };
     return list;
 }
@@ -603,6 +617,24 @@ QString backupBeforeUpdate()
     }
     applog::info("db.backup", {{"status", "ok"}, {"file", QFileInfo(dest).fileName()}});
     return dest;
+}
+
+void exportCopy(const QString &dest)
+{
+    const QFileInfo target(dest), live(path());
+    const bool sameSpelling = QDir::cleanPath(target.absoluteFilePath())
+                                  .compare(QDir::cleanPath(live.absoluteFilePath()), Qt::CaseInsensitive) == 0;
+    if (sameSpelling || (target.exists() && target.canonicalFilePath() == live.canonicalFilePath()))
+        throw Error(QStringLiteral("A backup cannot replace the database that is in use. Choose another file name."), false);
+    // written beside the destination first, so an earlier backup there survives a failed copy
+    const QString partial = dest + QStringLiteral(".partial");
+    QFile::remove(partial);
+    if (!snapshot(path(), partial))
+        throw Error(QStringLiteral("The database could not be copied to that location."), false);
+    if ((target.exists() && !QFile::remove(dest)) || !QFile::rename(partial, dest)) {
+        QFile::remove(partial);
+        throw Error(QStringLiteral("The existing file there could not be replaced."), false);
+    }
 }
 
 // `hadData` is false for a database this launch has just created: there is nothing to back up.

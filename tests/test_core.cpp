@@ -1197,7 +1197,8 @@ private slots:
         db::exec("INSERT INTO enrollments (tournament_id, player_id, match_points) VALUES (1, 1, 9)");
         restart();
         const Rows versions = db::query("SELECT version, name FROM schema_migrations ORDER BY version");
-        QCOMPARE(versions.size(), 5);
+        QCOMPARE(versions.size(), 6);
+        QCOMPARE(versions[5]["name"].toString(), QString("matches_round_index"));
         QCOMPARE(versions[4]["name"].toString(), QString("player_removed"));
         QCOMPARE(versions[2]["name"].toString(), QString("commander_fixed_rounds"));
         QCOMPARE(versions[3]["name"].toString(), QString("tournament_terminated"));
@@ -3211,6 +3212,214 @@ private slots:
         db::closeThreadConnection();
         db::setPath(live);
         QVERIFY(db::value("SELECT 1 FROM schema_migrations WHERE version = 3").isValid());
+    }
+
+    // audit: rules the core must enforce whatever the screens allow
+
+    void aPlayerCannotLeaveOrJoinOnceResultsDependOnThem()
+    {
+        const qint64 tid = tdb::createTournament("Locked", "POKEMON", 1);
+        const QList<qint64> p = addPlayers(5, "U");
+        for (int i = 0; i < 4; ++i)
+            tdb::enrollPlayer(tid, p[i]);
+        tdb::unenrollPlayer(tid, p[3]);     // allowed while it is being set up
+        QCOMPARE(tdb::enrolledPlayers(tid, true).size(), 3);
+        tdb::unenrollPlayer(tid, p[3]);     // a second click changes nothing
+        tdb::enrollPlayer(tid, p[3]);
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::unenrollPlayer(987654, p[0]));
+
+        swiss::startTournament(tid);
+        QList<Rows> before = savedResults(tid);
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(tid, p[0]));
+        QCOMPARE(savedResults(tid), before);
+
+        for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
+            if (!m["player2_id"].isNull())
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
+        swiss::finalizeTournament(tid, "POKEMON");
+        before = savedResults(tid);
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(tid, p[0]));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::enrollPlayer(tid, p[4]));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::addAndEnrollPlayer(tid, "Too Late"));
+        QCOMPARE(savedResults(tid), before);
+        QVERIFY(pdb::playersNamed("Too Late").isEmpty());
+        restart();
+        QCOMPARE(savedResults(tid), before);
+    }
+
+    void aTournamentIsFinalizedOnlyAfterItsLastRound()
+    {
+        const qint64 tid = tdb::createTournament("Three rounds", "MTG", 3, "Modern");
+        const QList<qint64> p = addPlayers(4, "F");
+        for (qint64 id : p)
+            tdb::enrollPlayer(tid, id);
+        const auto status = [&] { return tdb::tournamentById(tid)["status"].toString(); };
+        const auto placed = [&] {
+            return db::value("SELECT COUNT(*) FROM enrollments WHERE tournament_id = ? AND final_placement IS NOT NULL", {tid}).toInt();
+        };
+        const auto reportAll = [&] {
+            for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
+                if (!m["player2_id"].isNull())
+                    swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
+        };
+
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::finalizeTournament(tid, "MTG"));      // never started
+        QCOMPARE(status(), tdb::PENDING);
+        swiss::startTournament(tid);
+        reportAll();
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::finalizeTournament(tid, "MTG"));      // round 1 of 3
+        QCOMPARE(status(), tdb::IN_PROGRESS);
+        QCOMPARE(placed(), 0);
+        swiss::advanceToNextRound(tid, 1);
+        reportAll();
+        swiss::advanceToNextRound(tid, 2);
+        reportAll();
+        // the tournament's own game decides the scoring, whatever the caller passes
+        swiss::finalizeTournament(tid, "POKEMON");
+        QCOMPARE(status(), tdb::COMPLETED);
+        QCOMPARE(placed(), 4);
+        QCOMPARE(db::value("SELECT MAX(match_points) FROM enrollments WHERE tournament_id = ?", {tid}).toInt() % 3, 0);
+        QVERIFY(db::value("SELECT MAX(match_points) FROM enrollments WHERE tournament_id = ?", {tid}).toInt() >= 6);
+    }
+
+    void aTournamentNeedsTwoPlayersToStart()
+    {
+        const qint64 tid = tdb::createTournament("Lonely", "ONEPIECE", 2);
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::startTournament(tid));
+        tdb::enrollPlayer(tid, pdb::addPlayer("Only One"));
+        QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::startTournament(tid));
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::PENDING);
+        QCOMPARE(tdb::rounds(tid).size(), 0);
+        tdb::enrollPlayer(tid, pdb::addPlayer("Second"));
+        swiss::startTournament(tid);
+        QCOMPARE(tdb::rounds(tid).size(), 1);
+    }
+
+    void playerNamesAreCheckedInTheCore()
+    {
+        const auto count = [] { return db::value("SELECT COUNT(*) FROM players").toInt(); };
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::addPlayer(QString()));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::addPlayer("   "));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::addPlayer(QString(tdb::MAX_NAME_LENGTH + 1, 'x')));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::addPlayer(QStringLiteral("Line\nBreak")));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::addPlayer(QStringLiteral("Tab\tbed")));
+        QCOMPARE(count(), 0);
+
+        const qint64 id = pdb::addPlayer("  Ada Lovelace  ");
+        QCOMPARE(pdb::playerById(id)["display_name"].toString(), QString("Ada Lovelace"));
+        pdb::addPlayer(QString(tdb::MAX_NAME_LENGTH, 'x'));
+        pdb::addPlayer(QStringLiteral("Zoë O'Brien-Smith 2"));
+        QCOMPARE(count(), 3);
+
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::renamePlayer(987654, "Nobody"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::renamePlayer(id, QString(tdb::MAX_NAME_LENGTH + 1, 'y')));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pdb::renamePlayer(id, QStringLiteral("Bad\rName")));
+        QCOMPARE(pdb::playerById(id)["display_name"].toString(), QString("Ada Lovelace"));
+        pdb::renamePlayer(id, "  Ada King ");
+        QCOMPARE(pdb::playerById(id)["display_name"].toString(), QString("Ada King"));
+        // a name saved by an earlier version is still read as it is
+        db::exec("INSERT INTO players (display_name) VALUES (?)", {QString(300, 'z')});
+        QCOMPARE(pdb::allPlayers().size(), 4);
+    }
+
+    void tournamentDetailsAreCheckedInTheCore()
+    {
+        const auto count = [] { return db::value("SELECT COUNT(*) FROM tournaments").toInt(); };
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::createTournament("Chess night", "CHESS", 3));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::createTournament("Endless", "MTG", tdb::MAX_ROUNDS + 1));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::createTournament("Someday", "MTG", 3, {}, "next tuesday"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::createTournament(QStringLiteral("Two\nlines"), "MTG", 3));
+        QVERIFY_THROWS_EXCEPTION(std::exception, cdb::createCommanderTournament("   ", 8, 3, {}, 5));
+        QVERIFY_THROWS_EXCEPTION(std::exception, cdb::createCommanderTournament(QString(tdb::MAX_NAME_LENGTH + 1, 'c'), 8, 3, {}, 5));
+        QVERIFY_THROWS_EXCEPTION(std::exception, cdb::createCommanderTournament("Pods", 8, 3, {}, 5, {}, 0));
+        QCOMPARE(count(), 0);
+
+        const qint64 tid = tdb::createTournament("  Friday Standard  ", "POKEMON", tdb::MAX_ROUNDS, {}, "2026-10-16");
+        QCOMPARE(tdb::tournamentById(tid)["name"].toString(), QString("Friday Standard"));
+        QCOMPARE(tdb::tournamentById(tid)["tournament_date"].toString(), QString("2026-10-16"));
+        QVERIFY(cdb::createCommanderTournament("Pods", 8, 3, {}, 5) > 0);
+    }
+
+    void searchingTreatsPercentAndUnderscoreAsOrdinaryCharacters()
+    {
+        pdb::addPlayer("Ann");
+        pdb::addPlayer("50% Off");
+        pdb::addPlayer("a_b");
+        pdb::addPlayer("Back\\slash");
+        QCOMPARE(pdb::searchPlayers("%").size(), 1);
+        QCOMPARE(pdb::searchPlayers("_").size(), 1);
+        QCOMPARE(pdb::searchPlayers("\\").size(), 1);
+        QCOMPARE(pdb::searchPlayers("AN").size(), 1);      // still not case sensitive
+        QCOMPARE(pdb::searchPlayers("").size(), 4);
+    }
+
+    void aBackupCopyNeverTouchesTheLiveDatabase()
+    {
+        pdb::addPlayer("Kept");
+        const QString live = db::path();
+        const auto players = [] { return db::value("SELECT COUNT(*) FROM players").toInt(); };
+        const auto playersIn = [&](const QString &file) {
+            db::closeThreadConnection();
+            db::setPath(file);
+            const int n = db::value("SELECT COUNT(*) FROM players").toInt();
+            const QString check = db::value("PRAGMA integrity_check").toString();
+            db::closeThreadConnection();
+            db::setPath(live);
+            return check == "ok" ? n : -1;
+        };
+
+        // the database itself, however the path is spelled
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(live));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->path() + "/./TEST.DB"));
+        QVERIFY(QFileInfo::exists(live));
+        QCOMPARE(players(), 1);
+
+        const QString dest = tmp_->filePath("backup.db");
+        db::exportCopy(dest);
+        QCOMPARE(playersIn(dest), 1);
+        pdb::addPlayer("Second");
+        db::exportCopy(dest);               // an existing backup is replaced
+        QCOMPARE(playersIn(dest), 2);
+
+        // a copy that cannot be written leaves the earlier backup as it was
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->filePath("no/such/folder/backup.db")));
+        QVERIFY(QDir(dest).mkpath(tmp_->filePath("taken.db")));     // a folder where the file should go
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exportCopy(tmp_->filePath("taken.db")));
+        QCOMPARE(playersIn(dest), 2);
+        QCOMPARE(players(), 2);
+        QVERIFY(QDir(tmp_->path()).entryList({"*.partial"}).isEmpty());
+    }
+
+    void theDatabaseEnforcesItsReferencesAndFindsARoundsMatchesByIndex()
+    {
+        QCOMPARE(db::value("PRAGMA foreign_keys").toInt(), 1);
+        const qint64 tid = tdb::createTournament("Refs", "MTG", 2);
+        const qint64 a = pdb::addPlayer("A"), b = pdb::addPlayer("B");
+        tdb::enrollPlayer(tid, a);
+        tdb::enrollPlayer(tid, b);
+        swiss::startTournament(tid);
+        bool refused = false;
+        try {
+            db::exec("DELETE FROM players WHERE player_id = ?", {a});
+        } catch (const db::Error &e) {
+            refused = e.foreignKey();
+        }
+        QVERIFY(refused);
+        // the queries a round screen runs on every refresh do not read the whole table
+        for (const char *sql : {"SELECT COUNT(*) FROM matches WHERE round_id = 1 AND winner = 'PENDING'",
+                                "SELECT * FROM matches m WHERE m.round_id = 1 ORDER BY m.table_number"}) {
+            QString plan;
+            for (const Row &r : db::query(QStringLiteral("EXPLAIN QUERY PLAN ") + sql))
+                plan += r["detail"].toString() + "; ";
+            QVERIFY2(plan.contains("idx_matches_round"), qPrintable(plan));
+        }
+        // and the update that adds the index reaches a database made before it
+        db::exec("DROP INDEX idx_matches_round");
+        db::exec("DELETE FROM schema_migrations WHERE version = 6");
+        restart();
+        QVERIFY(db::value("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_matches_round'").isValid());
+        QCOMPARE(db::value("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", {tid}).toInt(), 1);
+        QCOMPARE(QDir(tmp_->filePath("backups")).entryList({"*.db"}).size(), 1);       // backed up first
     }
 };
 

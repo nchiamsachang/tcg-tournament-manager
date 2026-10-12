@@ -30,22 +30,39 @@ bool isValidRoundMinutes(int minutes)
     return minutes >= MIN_ROUND_MINUTES && minutes <= MAX_ROUND_MINUTES;
 }
 
+QString checkedName(const QString &name, const QString &what)
+{
+    const QString wanted = name.trimmed();
+    if (wanted.isEmpty())
+        throw std::invalid_argument(QStringLiteral("A %1 needs a name.").arg(what).toStdString());
+    if (wanted.size() > MAX_NAME_LENGTH)
+        throw std::invalid_argument(QStringLiteral("A %1 name can be at most %2 characters.").arg(what).arg(MAX_NAME_LENGTH).toStdString());
+    for (const QChar c : wanted) {
+        if (c.category() == QChar::Other_Control)
+            throw std::invalid_argument(QStringLiteral("A %1 name cannot contain line breaks or tabs.").arg(what).toStdString());
+    }
+    return wanted;
+}
+
 qint64 createTournament(const QString &name, const QString &game, int totalRounds, const QString &format,
                         const QString &tournamentDate, int roundTimeMins, int topCut)
 {
     applog::Action log("tournament.create", {{"game", game}, {"format", format}, {"rounds", totalRounds}});
-    if (name.trimmed().isEmpty())
-        throw std::invalid_argument("A tournament needs a name.");
-    if (name.size() > MAX_NAME_LENGTH)
-        throw std::invalid_argument("A tournament name can be at most 100 characters.");
+    const QString wanted = checkedName(name, QStringLiteral("tournament"));
+    if (!supportedGames().contains(game))
+        throw std::invalid_argument("That game is not one this app runs.");
     if (totalRounds < 1)
         throw std::invalid_argument("A tournament needs at least one round.");
+    if (totalRounds > MAX_ROUNDS)
+        throw std::invalid_argument("A tournament can have at most 15 rounds.");
     if (!isValidRoundMinutes(roundTimeMins))
         throw std::invalid_argument("Round length must be from 1 to 240 minutes.");
+    if (!tournamentDate.isEmpty() && !QDate::fromString(tournamentDate, Qt::ISODate).isValid())
+        throw std::invalid_argument("The tournament date must be a date such as 2026-10-16.");
     const QString date = tournamentDate.isEmpty() ? QDate::currentDate().toString(Qt::ISODate) : tournamentDate;
     const qint64 id = db::exec("INSERT INTO tournaments (name, game, format, tournament_date, location, total_rounds, top_cut, "
                                "round_time_mins, status, notes) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'PENDING', NULL)",
-                               {name, game, format.isEmpty() ? QVariant() : QVariant(format), date, totalRounds, topCut,
+                               {wanted, game, format.isEmpty() ? QVariant() : QVariant(format), date, totalRounds, topCut,
                                 roundTimeMins}).lastId;
     log.set("tournament", id);
     return id;
@@ -80,11 +97,7 @@ void updateTournamentStatus(qint64 tournamentId, const QString &status)
 bool renameTournament(qint64 tournamentId, const QString &name)
 {
     applog::Action log("tournament.rename", {{"tournament", tournamentId}});
-    const QString wanted = name.trimmed();
-    if (wanted.isEmpty())
-        throw std::invalid_argument("A tournament needs a name.");
-    if (wanted.size() > MAX_NAME_LENGTH)
-        throw std::invalid_argument("A tournament name can be at most 100 characters.");
+    const QString wanted = checkedName(name, QStringLiteral("tournament"));
     db::Tx tx;
     const Row t = db::one("SELECT name FROM tournaments WHERE tournament_id = ?", {tournamentId});
     if (t.isEmpty())
@@ -184,6 +197,8 @@ qint64 enrollPlayer(qint64 tournamentId, qint64 playerId)
         throw std::invalid_argument("That tournament does not exist.");
     if (status.toString() == TERMINATED)
         throw std::logic_error(ENDED_EARLY);
+    if (status.toString() == COMPLETED)
+        throw std::logic_error("This tournament is finished; its player list can no longer be changed.");
     const Row player = db::one("SELECT deleted_at FROM players WHERE player_id = ?", {playerId});
     if (player.isEmpty())
         throw std::invalid_argument("That player does not exist.");
@@ -214,10 +229,8 @@ qint64 enrollPlayer(qint64 tournamentId, qint64 playerId)
 qint64 addAndEnrollPlayer(qint64 tournamentId, const QString &displayName)
 {
     applog::Action log("player.add_and_enroll", {{"tournament", tournamentId}});
-    if (displayName.trimmed().isEmpty())
-        throw std::invalid_argument("A player needs a name.");
     db::Tx tx;      // owns the transaction: the new player and their registration, or neither
-    const qint64 playerId = pdb::addPlayer(displayName.trimmed());
+    const qint64 playerId = pdb::addPlayer(displayName);
     log.set("player", playerId);
     if (enrollPlayer(tournamentId, playerId) == 0)
         throw std::logic_error("The new player could not be registered.");     // cannot happen for a new id
@@ -228,8 +241,17 @@ qint64 addAndEnrollPlayer(qint64 tournamentId, const QString &displayName)
 void unenrollPlayer(qint64 tournamentId, qint64 playerId)
 {
     applog::Action log("player.unenroll", {{"tournament", tournamentId}, {"player", playerId}});
-    requireNotTerminated(tournamentId);
+    db::Tx tx;
+    const QVariant status = db::value("SELECT status FROM tournaments WHERE tournament_id = ?", {tournamentId});
+    if (!status.isValid())
+        throw std::invalid_argument("That tournament does not exist.");
+    if (status.toString() == TERMINATED)
+        throw std::logic_error(ENDED_EARLY);
+    // once round 1 is paired the registration carries the player's record and placing
+    if (status.toString() != PENDING)
+        throw std::logic_error("A player can only be taken off the list before the tournament starts.");
     db::exec("DELETE FROM enrollments WHERE tournament_id = ? AND player_id = ?", {tournamentId, playerId});
+    tx.commit();
 }
 
 Rows enrolledPlayers(qint64 tournamentId, bool includeDropped)

@@ -295,11 +295,13 @@ void SettingsDialog::exportBackup()
     const QString dest = QFileDialog::getSaveFileName(this, "Save database backup", "tcg_backup.db", "SQLite Database (*.db)");
     if (dest.isEmpty())
         return;
-    QFile::remove(dest);
-    if (QFile::copy(db::path(), dest))
-        inform(this, "Backup saved", "Database backed up to:\n" + dest);
-    else
-        warn(this, "Backup failed", "The database could not be copied to:\n" + dest);
+    try {
+        db::exportCopy(dest);
+    } catch (const db::Error &e) {
+        warn(this, "Backup failed", e.message + "\n\n" + QDir::toNativeSeparators(dest));
+        return;
+    }
+    inform(this, "Backup saved", "Database backed up to:\n" + QDir::toNativeSeparators(dest));
 }
 
 QString logFolder()

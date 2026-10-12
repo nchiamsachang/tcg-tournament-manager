@@ -3,7 +3,7 @@ project(TcgTournamentManager VERSION 0.2.1 LANGUAGES CXX)
 
 # The version shown in the app and used to name the package.  The label marks an
 # unfinished release; set it to "" for a final one.
-set(TCG_VERSION_LABEL "preview.3")
+set(TCG_VERSION_LABEL "preview.4")
 set(TCG_VERSION "${PROJECT_VERSION}")
 if(TCG_VERSION_LABEL)
     string(APPEND TCG_VERSION "-${TCG_VERSION_LABEL}")
@@ -74,6 +74,10 @@ add_test(NAME core COMMAND test_core)
 add_executable(test_rules tests/test_rules.cpp)
 target_link_libraries(test_rules PRIVATE tcgcore Qt6::Test)
 add_test(NAME rules COMMAND test_rules)
+
+# Timings on generated data; run by hand, not part of the suites.
+add_executable(bench_core tests/bench_core.cpp)
+target_link_libraries(bench_core PRIVATE tcgcore)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/CMakeLists.txt")
     add_subdirectory(src/ui)
