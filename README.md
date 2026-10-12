@@ -19,8 +19,11 @@ Magic: The Gathering — Modern and Commander), written in C++17 on Qt 6
 
 Needs Visual Studio 2022 with the C++ workload (it supplies the compiler,
 CMake and Ninja) and Qt 6 for MSVC 2022 64-bit. Visual Studio is found
-through its installer. Qt is looked for in `C:\Qt\6.10.2\msvc2022_64`; set
-`QT_DIR` to use another copy.
+through its installer. Qt is looked for in `C:\Qt\6.11.3\msvc2022_64`; set
+`QT_DIR` to use another copy, and `BUILD_DIR` to build in a folder other than
+`build`. A build folder configured for one Qt kit is configured again from
+scratch when the kit changes, and `package.bat` refuses a package whose Qt
+files are not all from the kit it was built with.
 
 ```
 build.bat        build (Release, 64-bit) into build
@@ -43,7 +46,7 @@ licence notices (`packaging/licenses/`). It runs by double-clicking the .exe
 on a PC with neither Qt nor Visual Studio. The program is not code-signed.
 
 The version is set at the top of `CMakeLists.txt`: the number in `project()`
-and, below it, `TCG_VERSION_LABEL` (`preview.5` now; empty for a final release).
+and, below it, `TCG_VERSION_LABEL` (`preview.6` now; empty for a final release).
 It is shown on the home screen and in Settings, and names the folder and zip.
 
 ## Where the data lives

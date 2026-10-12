@@ -1,5 +1,6 @@
 # Build output
 build/
+build-*/
 dist/
 
 # Downloaded icon library to pick from; the icons the app uses are copied into assets/

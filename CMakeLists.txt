@@ -3,7 +3,7 @@ project(TcgTournamentManager VERSION 0.2.1 LANGUAGES CXX)
 
 # The version shown in the app and used to name the package.  The label marks an
 # unfinished release; set it to "" for a final one.
-set(TCG_VERSION_LABEL "preview.5")
+set(TCG_VERSION_LABEL "preview.6")
 set(TCG_VERSION "${PROJECT_VERSION}")
 if(TCG_VERSION_LABEL)
     string(APPEND TCG_VERSION "-${TCG_VERSION_LABEL}")

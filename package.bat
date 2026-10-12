@@ -8,7 +8,7 @@ setlocal
 call "%~dp0vsenv.bat" || exit /b 1
 call "%~dp0build.bat" || exit /b 1
 
-set /p VERSION=<"%~dp0build\version.txt"
+set /p VERSION=<"%~dp0%BUILD_DIR%\version.txt"
 set "NAME=TcgTournamentManager-%VERSION%"
 set "OUT=%~dp0dist\%NAME%"
 set "ZIP=%~dp0dist\%NAME%-win64.zip"
@@ -16,12 +16,15 @@ set "ZIP=%~dp0dist\%NAME%-win64.zip"
 if exist "%OUT%" rmdir /s /q "%OUT%"
 if exist "%OUT%" echo Could not replace "%OUT%". Close the program if it is running from there.& exit /b 1
 mkdir "%OUT%" || exit /b 1
-copy /y "%~dp0build\src\ui\TcgTournamentManager.exe" "%OUT%\" >nul || exit /b 1
+copy /y "%~dp0%BUILD_DIR%\src\ui\TcgTournamentManager.exe" "%OUT%\" >nul || exit /b 1
 
 rem Qt libraries and plugins.  Left out: the touch-over-network plugin (the only thing that
 rem would pull in Qt Network), the drivers for database servers the app does not use, and
-rem the shader compilers.  What was copied is listed in build\windeployqt.log.
-windeployqt --release --no-translations --no-system-d3d-compiler --no-system-dxc-compiler --no-opengl-sw --no-compiler-runtime --exclude-plugins qtuiotouchplugin,qsqlibase,qsqlmimer,qsqloci,qsqlodbc,qsqlpsql "%OUT%\TcgTournamentManager.exe" > "%~dp0build\windeployqt.log" || exit /b 1
+rem the shader compilers.  What was copied is listed in windeployqt.log in the build folder.
+windeployqt --release --no-translations --no-system-d3d-compiler --no-system-dxc-compiler --no-opengl-sw --no-compiler-runtime --exclude-plugins qtuiotouchplugin,qsqlibase,qsqlmimer,qsqloci,qsqlodbc,qsqlpsql "%OUT%\TcgTournamentManager.exe" > "%~dp0%BUILD_DIR%\windeployqt.log" || exit /b 1
+
+rem every qt file in the package must be from the kit the program was built with
+powershell -NoProfile -Command "$want = (& qmake -query QT_VERSION).Trim(); $qt = @(Get-ChildItem -Recurse -LiteralPath '%OUT%' -Filter *.dll | Where-Object { $_.VersionInfo.CompanyName -like '*Qt Company*' }); $bad = @($qt | Where-Object { -not $_.VersionInfo.ProductVersion.StartsWith($want) }); $bad | ForEach-Object { Write-Host ('  ' + $_.Name + ' is ' + $_.VersionInfo.ProductVersion + ', expected ' + $want) }; if ($qt.Count -eq 0 -or $bad.Count -gt 0) { exit 1 }; Write-Host ('Qt runtime: ' + $want + ', ' + $qt.Count + ' files')" || (echo Refusing to package: the Qt files do not all come from "%QT_DIR%".& exit /b 1)
 
 rem windeployqt can copy Windows' own icuuc.dll; every supported Windows already has it.
 if exist "%OUT%\icuuc.dll" fc /b "%OUT%\icuuc.dll" "%SystemRoot%\System32\icuuc.dll" >nul 2>&1 && del "%OUT%\icuuc.dll"
@@ -37,7 +40,7 @@ copy /y "%~dp0packaging\licenses\*" "%OUT%\licenses\" >nul || exit /b 1
 powershell -NoProfile -Command "(Get-Content -Raw -LiteralPath '%~dp0packaging\README.txt').Replace('@VERSION@', '%VERSION%') | Set-Content -NoNewline -Encoding ascii -LiteralPath '%OUT%\README.txt'" || exit /b 1
 
 rem Nothing private may be shipped.
-dir /s /b "%OUT%\*.db" "%OUT%\*.db-wal" "%OUT%\*.db-shm" "%OUT%\settings.json" "%OUT%\*.log" "%OUT%\*.pdb" >nul 2>&1 && echo Refusing to package: "%OUT%" contains a database, settings, log or debug file.&& exit /b 1
+dir /s /b "%OUT%\*.db" "%OUT%\*.db-wal" "%OUT%\*.db-shm" "%OUT%\settings.json" "%OUT%\*.log" "%OUT%\*.pdb" "%OUT%\CLAUDE*.md" >nul 2>&1 && echo Refusing to package: "%OUT%" contains a database, settings, log or debug file.&& exit /b 1
 
 if exist "%ZIP%" del "%ZIP%"
 "%SystemRoot%\System32\tar.exe" -a -c -f "%ZIP%" -C "%~dp0dist" "%NAME%" || exit /b 1

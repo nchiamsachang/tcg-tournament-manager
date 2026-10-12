@@ -2,7 +2,9 @@
 rem Puts the MSVC compiler, CMake, Ninja and Qt on PATH for the script that calls this.
 rem Qt: set QT_DIR to the Qt kit folder (the one that contains bin\windeployqt.exe).
 rem Visual Studio 2022 with the C++ workload is found through its installer.
-if "%QT_DIR%"=="" set "QT_DIR=C:\Qt\6.10.2\msvc2022_64"
+if "%QT_DIR%"=="" set "QT_DIR=C:\Qt\6.11.3\msvc2022_64"
+rem BUILD_DIR: the build folder, relative to the project; another name keeps two kits apart
+if "%BUILD_DIR%"=="" set "BUILD_DIR=build"
 if exist "%QT_DIR%\bin\windeployqt.exe" goto :qt_ok
 echo Qt was not found in "%QT_DIR%". Set QT_DIR to your Qt 6 MSVC 64-bit folder.
 exit /b 1

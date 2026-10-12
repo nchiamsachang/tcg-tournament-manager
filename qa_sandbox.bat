@@ -4,13 +4,14 @@ rem tournaments (%LOCALAPPDATA%\TcgTournamentManager) are not opened.  Run build
 rem   qa_sandbox.bat          keep what earlier test sessions saved
 rem   qa_sandbox.bat fresh    start from an empty database
 setlocal
-if "%QT_DIR%"=="" set "QT_DIR=C:\Qt\6.10.2\msvc2022_64"
+if "%QT_DIR%"=="" set "QT_DIR=C:\Qt\6.11.3\msvc2022_64"
+if "%BUILD_DIR%"=="" set "BUILD_DIR=build"
 set "TCG_DATA_DIR=%TEMP%\tcg-qa-sandbox"
 if /i "%~1"=="fresh" if exist "%TCG_DATA_DIR%" rmdir /s /q "%TCG_DATA_DIR%"
-if not exist "%~dp0build\src\ui\TcgTournamentManager.exe" (
+if not exist "%~dp0%BUILD_DIR%\src\ui\TcgTournamentManager.exe" (
     echo The app has not been built yet. Run build.bat first.
     exit /b 1
 )
 set "PATH=%QT_DIR%\bin;%PATH%"
 echo Test data folder: %TCG_DATA_DIR%
-start "" "%~dp0build\src\ui\TcgTournamentManager.exe"
+start "" "%~dp0%BUILD_DIR%\src\ui\TcgTournamentManager.exe"
