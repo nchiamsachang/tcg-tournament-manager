@@ -171,3 +171,68 @@ Build `0.2.1-preview.3, build 5c4fa23c-modified-20261010-0122`, packaged exe, di
 | RG-704b (the same check with whatever pairings the app makes) | Pass |
 
 Pokémon's two tiebreakers are stored and compared at nine-decimal precision and shown to three.
+
+## Addendum 3, 2026-10-12: release 0.2.3
+
+Version 0.2.3, commit `dc39504`, build identifier `dc395042`, built against Qt 6.11.3 and packaged
+from committed source as `TcgTournamentManager-0.2.3-win64.zip`.
+
+**Status: not fully verified.** The UI suite has not had a clean run on the packaged binaries.
+
+### Automated suites
+
+| Run | `test_core` | `test_rules` | `test_ui` |
+|---|---|---|---|
+| Final source, development build folder | 101 passed, 0 failed | 18 passed, 0 failed | 42 passed, 0 failed |
+| Package binaries, attempt 1 | 101 passed, 0 failed | 18 passed, 0 failed | 41 passed, **1 failed** |
+| Package binaries, UI attempt 2 | not rerun | not rerun | 41 passed, **1 failed** |
+
+No expected failures and no skipped tests in any run.
+
+The two UI failures were different tests:
+
+- Attempt 1: `tournamentsCanBeRenamedFromTheirPagesInEveryState`. The rename dialog's field held
+  "fo" where the tournament name was expected. No test contains that text. Run alone three
+  times afterwards: passed, failed (a later check of the same prefilled field), passed.
+- Attempt 2: `ordinaryActionsLeaveThePageWhereItIs`. Keyboard focus was not on the button the
+  test had just used.
+
+Both tests depend on keyboard focus, and the suite opens real dialogs that take it. While they
+ran the PC was in use: the last real keyboard or mouse input was under a second old when
+checked. That is the likely cause, but it has not been confirmed by a clean run, so the
+failures stay open here.
+
+**Still to do:** with nobody using the PC, run `set BUILD_DIR=build-release` and then
+`run_tests.bat`, and record the result in this file.
+
+### Packaged app, disposable data
+
+Done by hand through UI Automation on the extracted ZIP. All passed.
+
+| Check | Result |
+|---|---|
+| Start on an older-schema database | Pass. Backed up first, updates 5 and 6 applied, all 8 players kept |
+| One-on-one event, 2 rounds as configured | Pass. Enrollment (a name with markup shown as typed), pairing, clock start, pause, resume and expiry with results left alone, a result undone and corrected, final standings equal to a hand calculation |
+| Commander event, 2 rounds as configured | Pass. Check-in undone for one player, pod created, a result cleared and corrected, a draw, final standings |
+| PDF export | Pass |
+| Final standings after a restart | Pass, both events |
+| Large text, narrow window, both themes, icons | Pass |
+| Backup export, opened from a separate folder | Pass, both events present |
+| Package contents | 30 files; no databases, logs, settings, test data or assistant files; 14 Qt files, all 6.11.3 |
+
+Duplicate names, removing a player while keeping history, and ending a tournament early were
+not repeated by hand; the automated tests for them passed on the package binaries.
+
+### Found during this check
+
+BUG-012 (BUG_LOG.md): the first 0.2.3 package crashed when a button was pressed behind an open
+question dialog. Fixed in `dc39504`; the package named above is the rebuilt one and survives
+the same steps.
+
+### Not covered
+
+- No code signing, installer or clean-machine test.
+- Enrolling a player after a tournament has started is still allowed by the core and is
+  recorded only as today's behaviour (`lateEnrollmentAsItWorksToday`); the policy is undecided.
+- Buttons pressed behind an open dialog by an accessibility or automation tool still act;
+  they no longer crash the app.
