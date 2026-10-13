@@ -12,7 +12,8 @@ target_link_libraries(tcgui PUBLIC tcgcore Qt6::Widgets Qt6::PrintSupport Qt6::S
 
 set(TCG_ASSETS ${CMAKE_SOURCE_DIR}/assets/assets.qrc)
 
-add_executable(TcgTournamentManager WIN32 ${CMAKE_SOURCE_DIR}/src/main.cpp ${TCG_ASSETS})
+configure_file(${CMAKE_SOURCE_DIR}/packaging/version.rc.in ${CMAKE_BINARY_DIR}/version.rc @ONLY)
+add_executable(TcgTournamentManager WIN32 ${CMAKE_SOURCE_DIR}/src/main.cpp ${TCG_ASSETS} ${CMAKE_BINARY_DIR}/version.rc)
 target_link_libraries(TcgTournamentManager PRIVATE tcgui)
 
 add_executable(test_ui ${CMAKE_SOURCE_DIR}/tests/test_ui.cpp ${TCG_ASSETS})

@@ -3,9 +3,9 @@
 // It supplements the Commander audit history in the database and never replaces it.  One
 // line per entry:
 //
-//     2026-10-09T14:03:22.123-05:00 INFO  0.2.1-preview.3 tournament.start status=attempt tournament=12 op=4F2A91C7
-//     2026-10-09T14:03:22.140-05:00 INFO  0.2.1-preview.3 tournament.start status=ok tournament=12 op=4F2A91C7
-//     2026-10-09T14:03:40.511-05:00 WARN  0.2.1-preview.3 dialog.error ref=R-7K3QF2 title="Player not removed" op=9D01B6E3 | ...
+//     2026-10-09T14:03:22.123-05:00 INFO  0.2.3 tournament.start status=attempt tournament=12 op=4F2A91C7
+//     2026-10-09T14:03:22.140-05:00 INFO  0.2.3 tournament.start status=ok tournament=12 op=4F2A91C7
+//     2026-10-09T14:03:40.511-05:00 WARN  0.2.3 dialog.error ref=R-7K3QF2 title="Player not removed" op=9D01B6E3 | ...
 //
 // Field names are not reused within a line.  "status" is how the operation went (attempt,
 // then ok, pending, failed, or a named outcome such as no-change).  What was being saved has

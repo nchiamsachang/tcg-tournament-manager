@@ -1,8 +1,8 @@
 TCG Tournament Manager @VERSION@
 ================================
 
-This is a PREVIEW release for testing. It is unfinished: expect rough edges, and
-please report problems at
+Runs trading card game tournaments for a club: One Piece, Pokemon and Magic (Modern and
+Commander). Please report problems at
 https://github.com/nchiamsachang/tcg-tournament-manager/issues
 
 
@@ -41,7 +41,7 @@ it): on first launch that database and its settings are copied into the folder a
 The old files are left as they were, and an existing database is never overwritten.
 
 
-Updating to a newer preview
+Updating to a newer version
 ---------------------------
 1. Close the program.
 2. Delete this folder, or leave it; it holds no data.
@@ -71,8 +71,8 @@ The log makes problems easier to trace, but it does not capture everything: if t
 program stops unexpectedly or the computer loses power, the last entries may be missing.
 
 
-Known limitations of this preview
----------------------------------
+Known limitations
+-----------------
 - Not code-signed (see above).
 - No installer, Start-menu shortcut or automatic updates: you replace the folder by hand.
 - The program has no icon of its own yet; Windows shows its default program icon.

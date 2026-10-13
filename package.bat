@@ -9,6 +9,9 @@ call "%~dp0vsenv.bat" || exit /b 1
 call "%~dp0build.bat" || exit /b 1
 
 set /p VERSION=<"%~dp0%BUILD_DIR%\version.txt"
+set /p BUILD_ID=<"%~dp0%BUILD_DIR%\build_id.txt"
+rem a package is made from committed source, so its build identifier names the code inside
+if not "%BUILD_ID:modified=%"=="%BUILD_ID%" if not "%ALLOW_MODIFIED%"=="1" (echo Refusing to package: the source differs from its commit ^(build %BUILD_ID%^). Commit first, or set ALLOW_MODIFIED=1.& exit /b 1)
 set "NAME=TcgTournamentManager-%VERSION%"
 set "OUT=%~dp0dist\%NAME%"
 set "ZIP=%~dp0dist\%NAME%-win64.zip"
@@ -46,5 +49,6 @@ if exist "%ZIP%" del "%ZIP%"
 "%SystemRoot%\System32\tar.exe" -a -c -f "%ZIP%" -C "%~dp0dist" "%NAME%" || exit /b 1
 echo.
 echo Version: %VERSION%
+echo Build:   %BUILD_ID%
 echo Folder:  %OUT%
 echo Zip:     %ZIP%

@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
-project(TcgTournamentManager VERSION 0.2.1 LANGUAGES CXX)
+project(TcgTournamentManager VERSION 0.2.3 LANGUAGES CXX RC)
 
-# The version shown in the app and used to name the package.  The label marks an
-# unfinished release; set it to "" for a final one.
-set(TCG_VERSION_LABEL "preview.6")
+# the one place the version is set: the app, the log, the program's properties and the
+# package name all take it from here.  a release changes the last number (0.2.4, 0.2.5);
+# a rebuild of the same release does not.  the label stays empty for releases
+set(TCG_VERSION_LABEL "")
 set(TCG_VERSION "${PROJECT_VERSION}")
 if(TCG_VERSION_LABEL)
     string(APPEND TCG_VERSION "-${TCG_VERSION_LABEL}")

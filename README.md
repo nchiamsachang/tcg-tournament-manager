@@ -45,9 +45,15 @@ a README for the people you send it to (`packaging/README.txt`) and the
 licence notices (`packaging/licenses/`). It runs by double-clicking the .exe
 on a PC with neither Qt nor Visual Studio. The program is not code-signed.
 
-The version is set at the top of `CMakeLists.txt`: the number in `project()`
-and, below it, `TCG_VERSION_LABEL` (`preview.6` now; empty for a final release).
-It is shown on the home screen and in Settings, and names the folder and zip.
+The version is set in one place, the number in `project()` at the top of
+`CMakeLists.txt` (0.2.3 now). The home screen, Settings, the log, diagnostic
+reports, the program's Windows properties and the folder and zip names all
+take it from there. A new release changes the last number (0.2.4, 0.2.5, ...);
+rebuilding the same release does not change it. The exact build is identified
+separately, by the Git commit shown in Settings and in diagnostic reports.
+`package.bat` refuses to package source that differs from its commit, so a
+package's build identifier always names the code it was made from (set
+`ALLOW_MODIFIED=1` for a throwaway local package).
 
 ## Where the data lives
 
@@ -161,8 +167,8 @@ five are kept. Each line has the local time with its UTC offset, a severity,
 the app version, an action and the ids involved:
 
 ```
-2026-10-09T14:03:22.123-05:00 INFO  0.2.1-preview.3 result.report status=attempt match=41 match_result=PLAYER1 op=4F2A91C7
-2026-10-09T14:03:22.140-05:00 INFO  0.2.1-preview.3 result.report status=ok match=41 match_result=PLAYER1 tournament=7 op=4F2A91C7
+2026-10-09T14:03:22.123-05:00 INFO  0.2.3 result.report status=attempt match=41 match_result=PLAYER1 op=4F2A91C7
+2026-10-09T14:03:22.140-05:00 INFO  0.2.3 result.report status=ok match=41 match_result=PLAYER1 tournament=7 op=4F2A91C7
 ```
 
 `status` is how the operation went: `attempt` when it starts, then `ok`,
