@@ -4,6 +4,8 @@ A short checklist to run around a real club event. The detailed cases, with full
 and the automated test that backs each one, are in
 [REGRESSION_CASES.md](REGRESSION_CASES.md). Problems go in [BUG_LOG.md](BUG_LOG.md).
 What has actually been run so far is in [TEST_REPORT.md](TEST_REPORT.md).
+For a ten-minute run of the packaged app before a demo, use
+[DEMO_CHECKLIST.md](DEMO_CHECKLIST.md).
 
 ## How to use it
 
