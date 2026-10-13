@@ -2963,6 +2963,7 @@ int main(int argc, char *argv[])
 {
     QApplication::setStyle("Fusion");       // as main.cpp does
     QApplication app(argc, argv);
+    db::requireChosenPath();
     UiTests tests;
     return QTest::qExec(&tests, argc, argv);
 }

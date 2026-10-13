@@ -144,6 +144,7 @@ void run(const Size &s)
 
 } // namespace
 
+    db::requireChosenPath();
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);

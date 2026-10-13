@@ -192,6 +192,7 @@ class RulesTests : public QObject {
     }
 
 private slots:
+    void initTestCase() { db::requireChosenPath(); }
     void init()
     {
         tmp_ = std::make_unique<QTemporaryDir>();

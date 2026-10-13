@@ -177,6 +177,7 @@ class CoreTests : public QObject {
     }
 
 private slots:
+    void initTestCase() { db::requireChosenPath(); }
     void init()
     {
         tmp_ = std::make_unique<QTemporaryDir>();
@@ -3572,6 +3573,36 @@ private slots:
         QCOMPARE(cdb::getStandings(cid).size(), seated.size() + 1);
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::setCheckedIn(cid, extra, false));
         QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(cid, extra));
+
+    // the suites run with db::requireChosenPath(): losing the test folder must never mean
+    // falling back to the organizer's own data
+    void aTestProgramNeverFallsBackToTheDefaultDataFolder()
+    {
+        const QByteArray chosen = qgetenv("TCG_DATA_DIR");
+        const QString test = db::path();
+        db::closeThreadConnection();
+        db::setPath(QString());
+        qunsetenv("TCG_DATA_DIR");
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::path());
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::dataDir());
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::value("SELECT 1"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::initialize());
+        QVERIFY_THROWS_EXCEPTION(db::Error, pdb::addPlayer("Nowhere"));
+        // a folder named through TCG_DATA_DIR is a choice, and is the one used
+        const QString named = tmp_->filePath("named by the environment");
+        qputenv("TCG_DATA_DIR", named.toLocal8Bit());
+        QCOMPARE(QDir::cleanPath(db::path()), QDir::cleanPath(named + "/tcg_tournament.db"));
+        db::initialize();
+        pdb::addPlayer("Somewhere");
+        QVERIFY(QFileInfo::exists(named + "/tcg_tournament.db"));
+        db::closeThreadConnection();
+        if (chosen.isEmpty())
+            qunsetenv("TCG_DATA_DIR");
+        else
+            qputenv("TCG_DATA_DIR", chosen);
+        db::setPath(test);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 0);     // the test's own database again
+    }
     }
 };
 

@@ -115,11 +115,23 @@ static QString defaultPath()
     return resolveDataFile(userDir, QCoreApplication::instance() ? QCoreApplication::applicationDirPath() : QString());
 }
 
+static bool g_requireChosen = false;
+
+void requireChosenPath()
+{
+    QMutexLocker lock(&g_pathLock);
+    g_requireChosen = true;
+}
+
 QString path()
 {
     QMutexLocker lock(&g_pathLock);
-    if (g_path.isEmpty())
+    if (g_path.isEmpty()) {
+        if (g_requireChosen && qEnvironmentVariableIsEmpty("TCG_DATA_DIR"))
+            throw Error(QStringLiteral("No data folder was chosen. This program only works on a folder it is given, "
+                                       "never on the default one."), false);
         g_path = defaultPath();
+    }
     return g_path;
 }
 

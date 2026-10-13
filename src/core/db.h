@@ -40,6 +40,9 @@ struct Result {
 // it.  Setting the TCG_DATA_DIR environment variable chooses another folder.
 QString path();
 void setPath(const QString &file);
+// for test and maintenance programs, called first: with no path set and no TCG_DATA_DIR,
+// path() throws instead of resolving to the organizer's own data folder
+void requireChosenPath();
 QString dataDir();
 
 // The default rule behind path().  When `userDir` has no database yet and an earlier build
