@@ -338,8 +338,27 @@ void MainWindow::roundAlert(const QString &message)
         notify(message);
 }
 
+// true while a question opened by the current page is waiting for its answer.  the code that
+// asked is on the call stack and returns into that page, so the page must outlive the dialog
+bool MainWindow::pageIsAsking() const
+{
+    const QWidget *page = stack ? stack->currentWidget() : nullptr;
+    if (!page)
+        return false;
+    for (const QWidget *top : QApplication::topLevelWidgets()) {
+        const QWidget *owner = top->parentWidget();
+        if (top->isModal() && top->isVisible() && owner && (owner == page || page->isAncestorOf(owner)))
+            return true;
+    }
+    return false;
+}
+
 void MainWindow::navigateTo(const QString &screen, const QVariantMap &args)
 {
+    if (pageIsAsking()) {
+        applog::warning("page.open", {{"status", "refused"}, {"page", screen}}, "A question on the current page is still open.");
+        return;
+    }
     if (screen == "settings") {
         openSettings();
         return;
@@ -372,7 +391,7 @@ void MainWindow::navigateTo(const QString &screen, const QVariantMap &args)
 
 void MainWindow::goBack()
 {
-    if (history.size() < 2)
+    if (history.size() < 2 || pageIsAsking())
         return;
     history.removeLast();
     while (!history.isEmpty()) {

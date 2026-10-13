@@ -25,6 +25,7 @@ public:
     // tournament_setup (game), registration / round / standings / round_select (tournament_id), settings.
     void navigateTo(const QString &screen, const QVariantMap &args = {});
     void goBack();
+    bool pageIsAsking() const;
     QWidget *currentScreen() const { return stack ? stack->currentWidget() : nullptr; }
     QList<QPair<QString, QVariantMap>> history;
 

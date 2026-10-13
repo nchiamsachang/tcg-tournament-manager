@@ -2910,6 +2910,65 @@ private slots:
             QVERIFY2(text.contains(markup), qPrintable(text));
     }
 
+    // an accessibility or automation tool can press a button behind an open question, which a
+    // mouse cannot.  replacing the page then crashed: its handler was still waiting for the answer
+    void aPageIsNotReplacedWhileItsOwnQuestionIsOpen()
+    {
+        const qint64 tid = modern({"Ana", "Bo", "Cy", "Di"}, 45, 2);
+        auto *round = go<RoundScreen>("round", {{"tournament_id", tid}});
+        QVERIFY(round);
+        qint64 match = 0;
+        for (const db::Row &m : tdb::roundPairings(round->currentRoundId))
+            if (!m["player2_id"].isNull())
+                match = m["match_id"].toLongLong();
+        round->recordResult(match, "PLAYER1");
+        settle();
+        QPushButton *undo = nullptr;
+        for (QPushButton *b : round->findChildren<QPushButton *>())
+            if (b->isVisible() && b->text() == "Undo")
+                undo = b;
+        QVERIFY(undo);
+
+        setAutoConfirm(false);
+        bool asked = false, stayedOnNavigate = false, stayedOnBack = false;
+        const int pagesBefore = int(w_->history.size());
+        QTimer::singleShot(0, qApp, [&] {
+            auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            asked = box != nullptr;
+            w_->navigateTo("home");
+            stayedOnNavigate = w_->currentScreen() == round;
+            w_->goBack();
+            stayedOnBack = w_->currentScreen() == round && int(w_->history.size()) == pagesBefore;
+            if (box)
+                box->reject();          // "No": the result stays
+        });
+        undo->click();
+        setAutoConfirm(true);
+        settle();
+        QVERIFY(asked);
+        QVERIFY2(stayedOnNavigate, "the page was replaced under its own open question");
+        QVERIFY2(stayedOnBack, "Back replaced the page under its own open question");
+        QCOMPARE(w_->currentScreen(), round);
+        QCOMPARE(tdb::pendingMatchCount(round->currentRoundId), 1);         // the answer was No
+        // with the question answered, navigation works as before
+        QVERIFY(go<HomeScreen>("home"));
+
+        // Settings is not a page's question: changing the look from it still rebuilds the page
+        go<RoundScreen>("round", {{"tournament_id", tid}});
+        bool rebuilt = false;
+        QTimer::singleShot(0, qApp, [&] {
+            QWidget *before = w_->currentScreen();
+            w_->setTheme("light");
+            rebuilt = w_->currentScreen() != before && qobject_cast<RoundScreen *>(w_->currentScreen());
+            if (QWidget *dlg = QApplication::activeModalWidget())
+                dlg->close();
+        });
+        w_->navigateTo("settings");
+        settle();
+        QVERIFY(rebuilt);
+        w_->setTheme("dark");
+    }
+
     // audit: what the screens must not let through
 
     void goingBackAfterTheStartDoesNotReopenRegistration()
