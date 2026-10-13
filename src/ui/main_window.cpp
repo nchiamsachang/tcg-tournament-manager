@@ -10,14 +10,12 @@
 #include <QApplication>
 #include <QCursor>
 #include <QGuiApplication>
-#include <QDateTime>
 #include <QHBoxLayout>
 #include <QPalette>
 #include <QStyleHints>
 #include <QStyleOptionButton>
 #include <QStylePainter>
 #include <QVBoxLayout>
-#include <QtDebug>
 
 // A tournament's pill in the bar under the navigation.  It is an ordinary button (its text is
 // the whole label), drawn in two parts so the clock can have its own colour and a timer icon.
@@ -46,7 +44,6 @@ public:
     }
     QSize minimumSizeHint() const override { return sizeHint(); }
     QString tailColor() const { return tailColor_; }
-    bool showsClock() const { return clock_; }
 
 protected:
     void paintEvent(QPaintEvent *) override

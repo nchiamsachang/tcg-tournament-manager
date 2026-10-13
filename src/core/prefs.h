@@ -2,7 +2,7 @@
 #pragma once
 
 #include <QJsonObject>
-#include <QStringList>
+#include <QString>
 
 namespace prefs {
 

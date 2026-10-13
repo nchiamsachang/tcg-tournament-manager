@@ -25,7 +25,6 @@ struct Timer {
     bool closed = false;            // the tournament is finished or was ended early: the clock is stopped for good
 };
 
-double clockOffset();               // seconds to add to this machine's clock to get the database clock
 double remaining(int limitSecs, State state, int elapsedSecs, bool hasStart, double startedAt, double now);
 double remaining(const Timer &t, double now);
 Timer get(Kind kind, qint64 roundId);

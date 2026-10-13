@@ -58,9 +58,6 @@ bool renameTournament(qint64 tournamentId, const QString &name);
 // is already completed.
 bool terminateTournament(qint64 tournamentId);
 bool isTerminated(qint64 tournamentId);
-// Throws std::logic_error when the tournament was ended early.  The functions that enrol
-// players, pair rounds and save results call it first.
-void requireNotTerminated(qint64 tournamentId);
 
 // What a game's hub page shows beside its tournament list.
 struct GameStats {
@@ -106,7 +103,6 @@ db::Rows roundPairings(qint64 roundId);                          // with names; 
 qint64 writeMatchResult(qint64 matchId, const QString &result);
 void reportMatchResult(qint64 matchId, const QString &result);
 db::Rows allMatches(qint64 tournamentId);
-bool havePlayedBefore(qint64 tournamentId, qint64 a, qint64 b);
 int pendingMatchCount(qint64 roundId);
 
 } // namespace tdb

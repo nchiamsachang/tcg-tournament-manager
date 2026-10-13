@@ -23,7 +23,6 @@
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QSizePolicy>
-#include <QStyle>
 
 namespace T {
 

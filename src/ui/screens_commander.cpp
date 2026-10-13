@@ -14,14 +14,6 @@ static QPushButton *smallButton(const QString &text, bool danger = false, const 
     return T::button(text, danger ? "danger" : "ghost", icon);
 }
 
-static QList<qint64> seatIds(const QVariantMap &pod)
-{
-    QList<qint64> out;
-    for (const QVariant &s : pod["seats"].toList())
-        out << s.toMap()["player_id"].toLongLong();
-    return out;
-}
-
 ResultDialog::ResultDialog(QWidget *parent, const QVariantMap &pod, const QString &title, const QString &drawPolicy,
                            bool startAsDraw, bool askReason)
     : QDialog(parent)

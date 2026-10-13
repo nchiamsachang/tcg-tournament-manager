@@ -8,7 +8,6 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
-#include <QFileInfo>
 #include <QMutex>
 #include <QRandomGenerator>
 #include <QRegularExpression>

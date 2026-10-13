@@ -13,7 +13,6 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QList>
-#include <QMap>
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>

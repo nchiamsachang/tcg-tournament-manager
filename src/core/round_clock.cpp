@@ -42,11 +42,6 @@ static QString stateText(State state)
     return "STOPPED";
 }
 
-double clockOffset()
-{
-    return db::value(QStringLiteral("SELECT %1").arg(DB_NOW)).toDouble() - localNow();
-}
-
 double remaining(int limitSecs, State state, int elapsedSecs, bool hasStart, double startedAt, double now)
 {
     double run = elapsedSecs;

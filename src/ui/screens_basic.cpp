@@ -4,12 +4,9 @@
 
 #include <QApplication>
 #include <QBitmap>
-#include <QDateTime>
-#include <QDesktopServices>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScreen>
-#include <QUrl>
 #include <stdexcept>
 
 QWidget *makeScreen(const QString &requested, MainWindow *mw, QVariantMap args)

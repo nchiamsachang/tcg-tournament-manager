@@ -125,12 +125,6 @@ bool isTerminated(qint64 tournamentId)
     return db::value("SELECT status FROM tournaments WHERE tournament_id = ?", {tournamentId}).toString() == TERMINATED;
 }
 
-void requireNotTerminated(qint64 tournamentId)
-{
-    if (isTerminated(tournamentId))
-        throw std::logic_error(ENDED_EARLY);
-}
-
 bool terminateTournament(qint64 tournamentId)
 {
     applog::Action log("tournament.end_early", {{"tournament", tournamentId}});
@@ -379,12 +373,6 @@ Rows allMatches(qint64 tournamentId)
 {
     return db::query("SELECT m.*, r.round_number, r.round_type FROM matches m JOIN rounds r ON r.round_id = m.round_id "
                      "WHERE m.tournament_id = ? ORDER BY r.round_number ASC", {tournamentId});
-}
-
-bool havePlayedBefore(qint64 tournamentId, qint64 a, qint64 b)
-{
-    return db::value("SELECT COUNT(*) FROM matches WHERE tournament_id = ? AND ((player1_id = ? AND player2_id = ?) "
-                     "OR (player1_id = ? AND player2_id = ?))", {tournamentId, a, b, b, a}).toInt() > 0;
 }
 
 int pendingMatchCount(qint64 roundId)

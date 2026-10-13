@@ -10,13 +10,11 @@
 #include <QUrl>
 
 #include <QDateTime>
-#include <QFile>
 #include <QFileDialog>
 #include <QLineEdit>
 #include <QLocale>
 #include <QMessageBox>
 #include <QPlainTextEdit>
-#include <QRadioButton>
 #include <QTimeZone>
 #include <QVBoxLayout>
 
