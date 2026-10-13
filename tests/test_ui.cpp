@@ -1225,7 +1225,7 @@ private slots:
             const db::Row rnd = tdb::currentRound(mod);
             for (const db::Row &m : tdb::roundPairings(rnd["round_id"].toLongLong()))
                 if (!m["player2_id"].isNull())
-                    tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                    swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
             if (r == 1)
                 swiss::advanceToNextRound(mod, 1);
         }
@@ -1567,7 +1567,7 @@ private slots:
         const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
         for (const db::Row &m : tdb::roundPairings(rid)) {
             if (!m["player2_id"].isNull()) {
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
                 break;
             }
         }
@@ -1869,7 +1869,7 @@ private slots:
 
         // 4. an older completed tournament, from its history page
         const qint64 done = modern({"Ana", "Bo"}, 45, 1, true, "Old Finished Name");
-        tdb::reportMatchResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(done, "MTG");
         w_->removeTournamentTab(done);
         const db::Rows finalStandings = swiss::standings(done, "MTG");
@@ -2205,7 +2205,7 @@ private slots:
         const qint64 rid = tdb::currentRound(done)["round_id"].toLongLong();
         for (const db::Row &m : tdb::roundPairings(rid))
             if (!m["player2_id"].isNull())
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(done, "MTG");
         w_->removeTournamentTab(done);
         const qint64 live = tdb::createTournament("Still Running", "MTG", 2, "Modern");
@@ -2323,7 +2323,7 @@ private slots:
         QCOMPARE(tdb::enrolledPlayers(fresh).size(), 1);
         const qint64 newDana = tdb::enrolledPlayers(fresh).first()["player_id"].toLongLong();
         QVERIFY(newDana > dana);
-        QVERIFY(pdb::tournamentHistory(newDana).size() == 1 && pdb::lifetimeStats(newDana).isEmpty());
+        QVERIFY(pdb::tournamentHistory(newDana).size() == 1 && pdb::tournamentHistory(newDana).first()["final_placement"].isNull());
         QCOMPARE(standingsOf(), standings);
 
         // after a restart: still removed, still in history
@@ -2719,7 +2719,7 @@ private slots:
         swiss::startTournament(mod);
         for (const db::Row &m : tdb::roundPairings(tdb::currentRound(mod)["round_id"].toLongLong())) {
             if (!m["player2_id"].isNull()) {
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
                 break;
             }
         }

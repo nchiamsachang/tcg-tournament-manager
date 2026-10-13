@@ -111,8 +111,7 @@ Things worth knowing:
   duplicate (`unique()`), a missing row (`foreignKey()`) and a locked database
   (`busy()`) are told apart without reading message text.
 - `tdb::writeMatchResult` writes only the match row and is meant to be called
-  inside an owner's transaction. `tdb::reportMatchResult` is that step on its
-  own; the app does not use it to save a result.
+  inside an owner's transaction; results are saved through `swiss::reportResult`.
 - The figures in `enrollments` are a stored copy of what the matches work out
   to. They are rewritten by the operations above, never by looking at
   standings (`swiss::viewStandings` does not write).

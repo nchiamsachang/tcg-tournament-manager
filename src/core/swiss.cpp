@@ -225,15 +225,6 @@ Rows viewStandings(qint64 tournamentId, const QString &game)
     return ranked(players, game);
 }
 
-Rows currentStandings(qint64 tournamentId, const QString &game)
-{
-    db::Tx tx;
-    calculateTiebreakers(tournamentId, game);
-    const Rows table = standings(tournamentId, game);
-    tx.commit();
-    return table;
-}
-
 // Two players who have already met, lower id first.
 using Met = QPair<qint64, qint64>;
 static Met metKey(qint64 a, qint64 b) { return {qMin(a, b), qMax(a, b)}; }

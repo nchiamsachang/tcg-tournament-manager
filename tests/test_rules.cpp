@@ -88,7 +88,7 @@ class RulesTests : public QObject {
                 tdb::createMatch(rid, tid, m.p1);
                 continue;
             }
-            tdb::reportMatchResult(tdb::createMatch(rid, tid, m.p1, m.p2, ++table), m.result);
+            swiss::reportResult(tdb::createMatch(rid, tid, m.p1, m.p2, ++table), m.result);
         }
     }
 
@@ -166,7 +166,7 @@ class RulesTests : public QObject {
         static const QStringList results{"PLAYER1", "PLAYER2", "DRAW"};
         for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
             if (!m["player2_id"].isNull())
-                tdb::reportMatchResult(m["match_id"].toLongLong(), results[int(rng() % (allowDraws ? 3 : 2))]);
+                swiss::reportResult(m["match_id"].toLongLong(), results[int(rng() % (allowDraws ? 3 : 2))]);
     }
 
     static QSet<Pair> pairsPlayed(qint64 tid)
@@ -233,7 +233,7 @@ private slots:
         playFixedRound(tid, 1, {{a, b, "PLAYER1"}, {c, d, "DRAW"}, {e, 0, {}}});
         playFixedRound(tid, 2, {{a, c, "DRAW"}, {e, d, "PLAYER1"}, {b, 0, {}}});
 
-        const QHash<qint64, Row> t = byPlayer(swiss::currentStandings(tid, "MTG"));
+        const QHash<qint64, Row> t = byPlayer(swiss::viewStandings(tid, "MTG"));
         QCOMPARE(t.size(), 5);
         //                                  pts W  L  D  OMW%   GW%  OGW%   place
         QCOMPARE(figureProblem(t[e], 6, 2, 0, 0, 0.33, 1.0, 0.33, 1), QString());
@@ -277,7 +277,7 @@ private slots:
         QCOMPARE(swiss::omwFloor(game), floor);
         QList<qint64> p;
         const qint64 tid = sixPlayerEvent(game, &p);
-        const QHash<qint64, Row> t = byPlayer(swiss::currentStandings(tid, game));
+        const QHash<qint64, Row> t = byPlayer(swiss::viewStandings(tid, game));
 
         QCOMPARE(t[p[0]]["match_points"].toInt(), 2 * winPoints);
         QCOMPARE(t[p[5]]["match_points"].toInt(), 0);
@@ -368,7 +368,7 @@ private slots:
         QCOMPARE(swiss::points("POKEMON").draw, 0);
         QList<qint64> p;
         const qint64 tid = oppOppEvent("POKEMON", &p);
-        const Rows table = swiss::currentStandings(tid, "POKEMON");
+        const Rows table = swiss::viewStandings(tid, "POKEMON");
         const QHash<qint64, Row> t = byPlayer(table);
 
         const int points[] = {1, 0, 1, 1, 2, 1};
@@ -394,7 +394,7 @@ private slots:
         // the same matches under Magic's rules: its figure in that column is level for C and D
         QList<qint64> m;
         const qint64 magic = oppOppEvent("MTG", &m);
-        const QHash<qint64, Row> mt = byPlayer(swiss::currentStandings(magic, "MTG"));
+        const QHash<qint64, Row> mt = byPlayer(swiss::viewStandings(magic, "MTG"));
         QVERIFY(near(mt[m[2]]["ogw_pct"].toDouble(), 0.5));
         QVERIFY(near(mt[m[3]]["ogw_pct"].toDouble(), 0.5));
         QVERIFY(near(mt[m[2]]["omw_pct"].toDouble(), mt[m[3]]["omw_pct"].toDouble()));
@@ -415,7 +415,7 @@ private slots:
         playFixedRound(tid, 1, {{a, b, "PLAYER1"}, {c, 0, {}}});
         playFixedRound(tid, 2, {{b, a, "PLAYER1"}, {c, 0, {}}});
         playFixedRound(tid, 3, {{c, a, "PLAYER1"}, {b, 0, {}}});
-        const QHash<qint64, Row> t = byPlayer(swiss::currentStandings(tid, "POKEMON"));
+        const QHash<qint64, Row> t = byPlayer(swiss::viewStandings(tid, "POKEMON"));
         QVERIFY(near(t[a]["omw_pct"].toDouble(), 2.0 / 3));
         QVERIFY(near(t[b]["omw_pct"].toDouble(), 1.0 / 3));
         QVERIFY(near(t[c]["omw_pct"].toDouble(), 1.0 / 3));
@@ -437,7 +437,7 @@ private slots:
             QCOMPARE(row["ogw_pct"].toDouble(), 0.25);
         }
         playFixedRound(tid, 1, {{p[0], p[1], "PLAYER1"}, {p[2], 0, {}}});
-        const QHash<qint64, Row> t = byPlayer(swiss::currentStandings(tid, "POKEMON"));
+        const QHash<qint64, Row> t = byPlayer(swiss::viewStandings(tid, "POKEMON"));
         QCOMPARE(t[p[2]]["omw_pct"].toDouble(), 0.25);
         QCOMPARE(t[p[2]]["ogw_pct"].toDouble(), 0.25);
         QVERIFY(near(t[p[0]]["omw_pct"].toDouble(), 0.25) && near(t[p[0]]["ogw_pct"].toDouble(), 1.0));
@@ -488,9 +488,10 @@ private slots:
         // Magic's column of the same name can really be shown as a number
         QCOMPARE(swiss::tiebreakText("MTG", "ogw_pct", 0.0), QString("0.000"));
 
-        // still being played: nothing saved for it yet (the results were written the old way)
+        // still being played, with nothing saved for it yet, as an earlier version left it
         QList<qint64> q;
         const qint64 live = oppOppEvent("POKEMON", &q);
+        db::exec("UPDATE enrollments SET ogw_pct = 0 WHERE tournament_id = ?", {live});
         for (const Row &row : saved(live))
             QCOMPARE(row["ogw_pct"].toDouble(), 0.0);
         const Rows liveBefore = saved(live);

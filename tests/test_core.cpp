@@ -1028,8 +1028,8 @@ private slots:
         QCOMPARE(played.size(), 2);              // one bye for five players
         std::sort(everyone.begin(), everyone.end());
         QCOMPARE(everyone, pids);
-        tdb::reportMatchResult(played[0]["match_id"].toLongLong(), "PLAYER1");
-        tdb::reportMatchResult(played[1]["match_id"].toLongLong(), "DRAW");
+        swiss::reportResult(played[0]["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(played[1]["match_id"].toLongLong(), "DRAW");
         swiss::calculateTiebreakers(tid, "MTG");
         QHash<qint64, Row> table;
         for (const Row &p : swiss::standings(tid, "MTG"))
@@ -1049,7 +1049,7 @@ private slots:
         // finishing saves placings and the completed status
         for (const Row &p : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
             if (!p["player2_id"].isNull())
-                tdb::reportMatchResult(p["match_id"].toLongLong(), "PLAYER2");
+                swiss::reportResult(p["match_id"].toLongLong(), "PLAYER2");
         const Rows final = swiss::finalizeTournament(tid, "MTG");
         QCOMPARE(final.size(), 5);
         QCOMPARE(tdb::tournamentById(tid)["status"].toString(), QString("COMPLETED"));
@@ -1085,7 +1085,7 @@ private slots:
                 const QPair<qint64, qint64> key{qMin(a, b), qMax(a, b)};
                 QVERIFY2(!seen.contains(key), "two players met twice");
                 seen.insert(key);
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
             }
             if (r < 3)
                 swiss::advanceToNextRound(tid, r);
@@ -1120,12 +1120,11 @@ private slots:
         tdb::enrollPlayer(tid, b);
         swiss::startTournament(tid);
         const Row m = tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong())[0];
-        tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(tid, "POKEMON");
         const qint64 winner = m["player1_id"].toLongLong();
         QCOMPARE(pdb::matchHistory(winner, tid)[0]["result"].toString(), QString("WIN"));
         QCOMPARE(pdb::tournamentHistory(winner)[0]["final_placement"].toInt(), 1);
-        QCOMPARE(pdb::lifetimeStats(winner)[0]["championships"].toInt(), 1);
         pdb::removePlayer(pdb::addPlayer("temp"));
         QCOMPARE(pdb::allPlayers().size(), 2);
     }
@@ -1176,7 +1175,7 @@ private slots:
         tdb::updateTournamentStatus(op, "IN_PROGRESS");
         for (const Row &m : tdb::roundPairings(tdb::currentRound(poke)["round_id"].toLongLong()))
             if (!m["player2_id"].isNull())
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(poke, "POKEMON");
         played = pdb::gamesPlayed();
         QCOMPARE(played.value(p[0]), (QStringList{"ONEPIECE", "POKEMON", "MTG"}));      // tdb::supportedGames() order
@@ -1293,7 +1292,7 @@ private:
     {
         for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
             if (!m["player2_id"].isNull())
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
     }
 
     int count(const QString &table, qint64 tid)
@@ -1356,25 +1355,25 @@ private slots:
             (m["player2_id"].isNull() ? bye : played) = m["match_id"].toLongLong();
         auto winner = [](qint64 match) { return db::value("SELECT winner FROM matches WHERE match_id = ?", {match}).toString(); };
 
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(played, "PLAYER3"));
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(played, "BYE"));
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(played, "player1"));
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(987654, "PLAYER1"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(played, "PLAYER3"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(played, "BYE"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(played, "player1"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(987654, "PLAYER1"));
         QCOMPARE(winner(played), QString("PENDING"));
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(bye, "PLAYER2"));    // a bye stays a bye
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(bye, "PLAYER2"));    // a bye stays a bye
         QCOMPARE(winner(bye), QString("BYE"));
 
         // a result can be entered, changed and cleared while its round is the one in play
-        tdb::reportMatchResult(played, "PLAYER1");
-        tdb::reportMatchResult(played, "DRAW");
+        swiss::reportResult(played, "PLAYER1");
+        swiss::reportResult(played, "DRAW");
         QCOMPARE(winner(played), QString("DRAW"));
-        tdb::reportMatchResult(played, "");
+        swiss::reportResult(played, "");
         QCOMPARE(winner(played), QString("PENDING"));
 
         // once the next round is paired from it, it is fixed
         reportWholeRound(tid);
         swiss::advanceToNextRound(tid, 1);
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(played, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(played, "PLAYER2"));
         QCOMPARE(winner(played), QString("PLAYER1"));
         reportWholeRound(tid);
         swiss::finalizeTournament(tid, "MTG");
@@ -1382,7 +1381,7 @@ private slots:
         for (const Row &m : tdb::roundPairings(tdb::currentRound(tid)["round_id"].toLongLong()))
             if (!m["player2_id"].isNull())
                 last = m["match_id"].toLongLong();
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(last, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(last, "PLAYER2"));
         QCOMPARE(winner(last), QString("PLAYER1"));
     }
 
@@ -1404,13 +1403,14 @@ private slots:
         db::exec("DROP TRIGGER test_fail_match");
         swiss::startTournament(tid);
         reportWholeRound(tid);
+        const QList<Rows> reported = savedResults(tid);
         db::exec("CREATE TRIGGER test_fail_match BEFORE INSERT ON matches WHEN NEW.table_number = 2 "
                  "BEGIN SELECT RAISE(ABORT, 'forced failure'); END");
         QVERIFY_THROWS_EXCEPTION(db::Error, swiss::advanceToNextRound(tid, 1));
         QCOMPARE(count("rounds", tid), 1);                                              // no empty round 2
         QCOMPARE(count("matches", tid), 2);
         QVERIFY2(tdb::currentRound(tid)["ended_at"].isNull(), "round 1 is still the open round");
-        QCOMPARE(db::value("SELECT COALESCE(SUM(match_points), 0) FROM enrollments WHERE tournament_id = ?", {tid}).toInt(), 0);
+        QCOMPARE(savedResults(tid), reported);          // records and results as they were before the attempt
         db::exec("DROP TRIGGER test_fail_match");
         swiss::advanceToNextRound(tid, 1);                                              // and the retry works
         QCOMPARE(count("rounds", tid), 2);
@@ -1646,7 +1646,7 @@ private slots:
         for (const Row &m : tdb::roundPairings(rid)) {
             if (m["player2_id"].isNull())
                 continue;
-            tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+            swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
             if (m["player1_id"].toLongLong() == target || m["player2_id"].toLongLong() == target)
                 opponent = m["player1_id"].toLongLong() == target ? m["player2_id"].toLongLong() : m["player1_id"].toLongLong();
         }
@@ -1673,7 +1673,7 @@ private slots:
         const QList<Rows> before = everything();
         const Rows standings = swiss::viewStandings(swissTid, "POKEMON");
         const QVariantList cmdStandings = cdb::getStandings(cmd), cmdRounds = cdb::getRounds(cmd);
-        const Rows opponentMatches = pdb::matchHistory(opponent, swissTid), opponentStats = pdb::lifetimeStats(opponent);
+        const Rows opponentMatches = pdb::matchHistory(opponent, swissTid), opponentEvents = pdb::tournamentHistory(opponent);
         const tdb::GameStats stats = tdb::gameStats("POKEMON");
         const QHash<qint64, QStringList> played = pdb::gamesPlayed();
         QVERIFY(!played.value(target).isEmpty());
@@ -1704,7 +1704,7 @@ private slots:
         QCOMPARE(cdb::getStandings(cmd), cmdStandings);
         QCOMPARE(cdb::getRounds(cmd), cmdRounds);               // pods and seats, names included
         QCOMPARE(pdb::matchHistory(opponent, swissTid), opponentMatches);
-        QCOMPARE(pdb::lifetimeStats(opponent), opponentStats);
+        QCOMPARE(pdb::tournamentHistory(opponent), opponentEvents);
         QCOMPARE(tdb::gameStats("POKEMON").gamesPlayed, stats.gamesPlayed);
         QCOMPARE(tdb::gameStats("POKEMON").players, stats.players);
         QCOMPARE(pdb::gamesPlayed(), played);                   // history still counts them
@@ -1723,7 +1723,7 @@ private slots:
         // a new player with the same name is somebody else: a new id and no history
         const qint64 namesake = pdb::addPlayer("R001");
         QVERIFY(namesake > p.last());
-        QVERIFY(pdb::tournamentHistory(namesake).isEmpty() && pdb::lifetimeStats(namesake).isEmpty());
+        QVERIFY(pdb::tournamentHistory(namesake).isEmpty());
         QVERIFY(!pdb::gamesPlayed().contains(namesake));
         QCOMPARE(pdb::playersNamed("R001").size(), 1);
         QVERIFY(pdb::directoryDuplicates().isEmpty());          // the removed one is not in the directory to clash with
@@ -1768,7 +1768,7 @@ private slots:
         QVERIFY2(refused(p[1]).contains("Modern Monday") && refused(p[1]).contains("not reported yet"), qPrintable(refused(p[1])));
         const Row match = tdb::roundPairings(tdb::currentRound(running)["round_id"].toLongLong()).first();
         QCOMPARE(match["result"], QVariant());                  // no result was invented
-        tdb::reportMatchResult(match["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(match["match_id"].toLongLong(), "PLAYER1");
         QVERIFY2(refused(p[1]).contains("finish that tournament, or end it early"), qPrintable(refused(p[1])));
         QVERIFY(!pdb::isRemoved(p[1]));
         QCOMPARE(count("enrollments", running), 2);
@@ -1819,7 +1819,7 @@ private slots:
             names << m["player1_name"].toString();
             if (!m["player2_name"].isNull()) {
                 names << m["player2_name"].toString();
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
             }
         }
         names.sort();
@@ -1884,7 +1884,7 @@ private slots:
         const auto saved = [tid] { return db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}); };
 
         // while it is played: the table follows the results, but showing it writes nothing
-        tdb::reportMatchResult(pairings[0]["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(pairings[0]["match_id"].toLongLong(), "PLAYER1");
         const Rows untouched = saved();
         const Rows live = swiss::viewStandings(tid, "POKEMON");
         QCOMPARE(live.first()["player_id"], pairings[0]["player1_id"]);
@@ -1895,7 +1895,7 @@ private slots:
         QCOMPARE(saved(), untouched);
 
         // once finished: the saved figures and placings are the result, however often they are shown
-        tdb::reportMatchResult(pairings[1]["match_id"].toLongLong(), "PLAYER2");
+        swiss::reportResult(pairings[1]["match_id"].toLongLong(), "PLAYER2");
         const Rows final = swiss::finalizeTournament(tid, "POKEMON");
         const Rows finished = saved();
         const Rows shown = swiss::viewStandings(tid, "POKEMON");
@@ -2034,7 +2034,7 @@ private:
         const qint64 rid = tdb::currentRound(tid)["round_id"].toLongLong();
         for (const Row &m : tdb::roundPairings(rid)) {
             if (!m["player2_id"].isNull()) {
-                tdb::reportMatchResult(m["match_id"].toLongLong(), "PLAYER1");
+                swiss::reportResult(m["match_id"].toLongLong(), "PLAYER1");
                 break;
             }
         }
@@ -2069,7 +2069,6 @@ private slots:
         QCOMPARE(db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}), enrolled);
         QCOMPARE(tdb::pendingMatchCount(rid), 1);
         QCOMPARE(db::value("SELECT COUNT(*) FROM enrollments WHERE tournament_id = ? AND final_placement IS NOT NULL", {tid}).toInt(), 0);
-        QVERIFY(pdb::lifetimeStats(pids[0]).isEmpty());                 // not counted as a completed tournament
         QCOMPARE(pdb::tournamentHistory(pids[0]).first()["status"].toString(), tdb::TERMINATED);
         QCOMPARE(pdb::gamesPlayed().value(pids[0]), QStringList{"POKEMON"});   // they did play
 
@@ -2097,8 +2096,8 @@ private slots:
         const Rows matches = tdb::allMatches(tid);
         const qint64 late = pdb::addPlayer("Latecomer");
 
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(open, "PLAYER2"));
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(reported, {}));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(open, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(reported, {}));
         QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::enrollPlayer(tid, late));
         QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(tid, late));
         QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::advanceToNextRound(tid, 1));
@@ -2114,7 +2113,7 @@ private slots:
         for (qint64 p : addPlayers(2, "F"))
             tdb::enrollPlayer(done, p);
         swiss::startTournament(done);
-        tdb::reportMatchResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(done, "POKEMON");
         QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::terminateTournament(done));
         QCOMPARE(tdb::tournamentById(done)["status"].toString(), tdb::COMPLETED);
@@ -2163,7 +2162,7 @@ private slots:
         swiss::startTournament(done);
         const qint64 rid = tdb::currentRound(done)["round_id"].toLongLong();
         timerdb::start(timerdb::Kind::OneOnOne, rid);
-        tdb::reportMatchResult(tdb::roundPairings(rid).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(tdb::roundPairings(rid).first()["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(done, "POKEMON");
         QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, rid).closed);
         QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, rid).state == timerdb::State::Stopped);
@@ -2317,7 +2316,7 @@ private slots:
         for (qint64 p : addPlayers(2, "F"))
             tdb::enrollPlayer(done, p);
         swiss::startTournament(done);
-        tdb::reportMatchResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
+        swiss::reportResult(tdb::roundPairings(tdb::currentRound(done)["round_id"].toLongLong()).first()["match_id"].toLongLong(), "PLAYER1");
         swiss::finalizeTournament(done, "POKEMON");
         const qint64 ended = runningSwiss();
         tdb::terminateTournament(ended);
@@ -2357,7 +2356,7 @@ private slots:
         QCOMPARE(tdb::tournamentById(done)["status"].toString(), tdb::COMPLETED);
         QCOMPARE(tdb::tournamentById(ended)["status"].toString(), tdb::TERMINATED);
         const qint64 anyMatch = tdb::allMatches(ended).first()["match_id"].toLongLong();
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(anyMatch, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(anyMatch, "PLAYER2"));
         QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, tdb::currentRound(ended)["round_id"].toLongLong()).closed);
         QVERIFY(timerdb::get(timerdb::Kind::OneOnOne, tdb::currentRound(running)["round_id"].toLongLong()).state
                 == timerdb::State::Running);                                // the running clock kept running
@@ -2450,13 +2449,13 @@ private slots:
         const qint64 match = tdb::roundPairings(rid).first()["match_id"].toLongLong();
         timerdb::start(timerdb::Kind::OneOnOne, rid);
         QVERIFY_THROWS_EXCEPTION(swiss::RuleError, swiss::advanceToNextRound(tid, 1));       // a result is missing
-        tdb::reportMatchResult(match, "PLAYER1");
+        swiss::reportResult(match, "PLAYER1");
         swiss::advanceToNextRound(tid, 1);
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(987654, "PLAYER1"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(987654, "PLAYER1"));
         tdb::renameTournament(tid, "Secret Spring Cup");
         tdb::terminateTournament(tid);
         QVERIFY(!tdb::terminateTournament(tid));
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(match, "PLAYER2"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(match, "PLAYER2"));
         pdb::renamePlayer(link, "Link Ordon");
         pdb::removePlayer(link);
         // Commander
@@ -2682,7 +2681,7 @@ private slots:
             if (!m["player2_id"].isNull())
                 match = m["match_id"].toLongLong();
         QVERIFY(match);
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(match, "NONSENSE"));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(match, "NONSENSE"));
         const QStringList bad = logged("match_result=NONSENSE");
         QCOMPARE(bad.size(), 2);
         QVERIFY(bad[1].contains("status=failed") && bad[1].contains(" WARN "));
@@ -2710,8 +2709,8 @@ private slots:
         QVERIFY(applog::errorReference(&op) != ref);
         QVERIFY(op.isEmpty());
         // a later successful action clears an unreported failure, so it is never attached to the wrong error
-        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, tdb::reportMatchResult(match, "NONSENSE"));
-        tdb::reportMatchResult(match, "PLAYER1");
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, swiss::reportResult(match, "NONSENSE"));
+        swiss::reportResult(match, "PLAYER1");
         QVERIFY(applog::errorReference(&op).startsWith("R-") && op.isEmpty());
 
         // simultaneous attempts on the same tournament: eight ids, each with its own matched outcome
@@ -3095,7 +3094,7 @@ private slots:
         const QList<Rows> final = savedResults(tid);
         QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(m1, "PLAYER2"));
         QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(m2, QString()));
-        QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::reportMatchResult(m1, "DRAW"));
+        QVERIFY_THROWS_EXCEPTION(std::logic_error, swiss::reportResult(m1, "DRAW"));
         QCOMPARE(savedResults(tid), final);
         QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::COMPLETED);
         swiss::viewStandings(tid, "MTG");                       // and looking at the standings writes nothing
@@ -3573,6 +3572,7 @@ private slots:
         QCOMPARE(cdb::getStandings(cid).size(), seated.size() + 1);
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::setCheckedIn(cid, extra, false));
         QVERIFY_THROWS_EXCEPTION(std::logic_error, tdb::unenrollPlayer(cid, extra));
+    }
 
     // the suites run with db::requireChosenPath(): losing the test folder must never mean
     // falling back to the organizer's own data
@@ -3602,7 +3602,6 @@ private slots:
             qputenv("TCG_DATA_DIR", chosen);
         db::setPath(test);
         QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 0);     // the test's own database again
-    }
     }
 };
 

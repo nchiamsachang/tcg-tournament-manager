@@ -40,7 +40,6 @@ QString tiebreakText(const QString &game, const QString &column, double value);
 // are derived from them and can be rebuilt at any time.
 void calculateTiebreakers(qint64 tournamentId, const QString &game);
 db::Rows standings(qint64 tournamentId, const QString &game);     // from the stored figures; each row gains "standing"
-db::Rows currentStandings(qint64 tournamentId, const QString &game);   // calculateTiebreakers, then standings
 // The standings to show or print.  It never writes: looking at a table cannot change one.
 // A finished tournament shows the figures and placings saved when it was finalized; one
 // still being played, or ended early, shows them worked out from its matches in memory.

@@ -363,12 +363,6 @@ qint64 writeMatchResult(qint64 matchId, const QString &result)
     return match["tournament_id"].toLongLong();
 }
 
-void reportMatchResult(qint64 matchId, const QString &result)
-{
-    applog::Action log("result.report", {{"match", matchId}, {"match_result", result.isEmpty() ? QStringLiteral("CLEARED") : result}});
-    writeMatchResult(matchId, result);
-}
-
 Rows allMatches(qint64 tournamentId)
 {
     return db::query("SELECT m.*, r.round_number, r.round_type FROM matches m JOIN rounds r ON r.round_id = m.round_id "

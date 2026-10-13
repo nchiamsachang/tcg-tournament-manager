@@ -99,9 +99,8 @@ db::Rows roundPairings(qint64 roundId);                          // with names; 
 // writeMatchResult is the step: it checks and writes the match row, joining the caller's
 // transaction, and returns the tournament's id.  It does not touch the standings kept with
 // the registrations.  The app saves a result through swiss::reportResult, which does both in
-// one transaction.  reportMatchResult is that step on its own, as a logged action.
+// one transaction.
 qint64 writeMatchResult(qint64 matchId, const QString &result);
-void reportMatchResult(qint64 matchId, const QString &result);
 db::Rows allMatches(qint64 tournamentId);
 int pendingMatchCount(qint64 roundId);
 

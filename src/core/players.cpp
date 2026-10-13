@@ -148,23 +148,6 @@ Rows podHistory(qint64 playerId, qint64 tournamentId)
         "WHERE s.tournament_id = ? AND s.player_id = ? ORDER BY r.round_number ASC", {tournamentId, playerId});
 }
 
-Rows lifetimeStats(qint64 playerId)
-{
-    return db::query(R"sql(
-        SELECT t.game,
-               COUNT(DISTINCT e.tournament_id)                    AS tournaments_played,
-               SUM(e.match_wins)                                  AS total_wins,
-               SUM(e.match_losses)                                AS total_losses,
-               SUM(e.match_draws)                                 AS total_draws,
-               MIN(e.final_placement)                             AS best_placement,
-               COUNT(CASE WHEN e.final_placement = 1 THEN 1 END)  AS championships
-        FROM enrollments e
-        JOIN tournaments t ON t.tournament_id = e.tournament_id
-        WHERE e.player_id = ? AND t.status = 'COMPLETED'
-        GROUP BY t.game
-    )sql", {playerId});
-}
-
 QHash<qint64, QStringList> gamesPlayed()
 {
     QHash<qint64, QStringList> out;

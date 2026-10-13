@@ -47,7 +47,6 @@ db::Rows matchHistory(qint64 playerId, qint64 tournamentId);
 // One row per Commander pod the player sat in, in round order: stage, stage_round,
 // pod_number, seat_number and result (WIN, LOSS, DRAW, or empty while unreported).
 db::Rows podHistory(qint64 playerId, qint64 tournamentId);
-db::Rows lifetimeStats(qint64 playerId);
 // The distinct games each player has actually played, for every player in one query.
 // "Played" means the player was paired in at least one round (a match, a pod seat
 // or a bye) of a tournament that was not cancelled.  Being registered is not enough.

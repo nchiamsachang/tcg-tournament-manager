@@ -134,20 +134,17 @@ void run(const Size &s)
         pdb::directoryDuplicates();
     });
     measure(s.name, "player search", 200, [&] { pdb::searchPlayers("1"); });
-    measure(s.name, "player profile: history and lifetime stats", 100, [&] {
-        pdb::tournamentHistory(players.first());
-        pdb::lifetimeStats(players.first());
-    });
+    measure(s.name, "player profile: tournament history", 100, [&] { pdb::tournamentHistory(players.first()); });
     measure(s.name, "tab bar poll: live round status", 200, [&] { live::roundStatus(live); });
     db::closeThreadConnection();
 }
 
 } // namespace
 
-    db::requireChosenPath();
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
+    db::requireChosenPath();
     applog::setDirectory(QString());        // no log file: entries are held in memory and dropped
     std::printf("%-6s | %-46s | %9s | %9s | calls\n", "data", "operation", "median ms", "worst ms");
     // "noindex" times the schema without the index on matches(round_id), for comparison
