@@ -13,7 +13,7 @@ of them end tournaments, remove players and restart the app on purpose.
 - Sample players are listed in TEST_PLAN.md.
 
 The rules these cases expect are the ones the project documents and implements
-(`README.md`, `docs/COMMANDER.md`, `src/core/swiss.cpp`):
+(`docs/STANDINGS.md`, `docs/COMMANDER.md`, `src/core/swiss.cpp`):
 
 | | One-on-one (Modern, One Piece, Pokémon) | Commander |
 |---|---|---|
