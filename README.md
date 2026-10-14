@@ -6,8 +6,7 @@ C++17 with Qt 6 Widgets and keeps everything in a local SQLite database, so it w
 without an internet connection or a server.
 
 Current version: **0.2.3**. See [Project status](#project-status) for what has and has
-not been verified. (No screenshot yet; one taken with fictional players could be added
-later.)
+not been verified.
 
 ## Features
 
@@ -112,6 +111,9 @@ Needs:
 
 - Windows with Visual Studio 2022 and its "Desktop development with C++" workload, which
   supplies the compiler, CMake and Ninja.
+- CMake 3.24 or newer. `build.bat` uses `cmake --fresh` to set up a build folder again
+  when the Qt kit changes, and that option needs 3.24. The CMake that comes with a
+  current Visual Studio 2022 is newer than that (3.27 on the PC this was written on).
 - Qt 6 for MSVC 2022 64-bit, with the Core, Gui, Widgets, Sql, PrintSupport, Svg and
   Test modules. The scripts look for `C:\Qt\6.11.3\msvc2022_64`. Qt 6.10.x is affected
   by a Qt SVG security advisory (CVE-2026-6210); 6.11.3 includes the fix.
