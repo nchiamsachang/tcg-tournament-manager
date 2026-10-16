@@ -168,13 +168,12 @@ separately, as the Git commit in Settings and in diagnostic reports.
 
 ## Project status
 
-Version 0.2.3 is packaged from committed source, but it is **not fully verified**. On
-the packaged build the core suite (101 passed) and rules suite (18 passed) are clean.
-The UI suite passed in full (42 passed) on the same source in another build folder, but
-on the packaged build two runs each failed one keyboard-focus test while the PC was in
-use, and a clean run there has not yet been recorded.
-The packaged app also passed a manual run of a one-on-one and a Commander event. The
-details and the remaining step are in
+Version 0.2.3 is packaged from committed source and its release checks are done. On the
+packaged build's own binaries the core suite (101 passed), rules suite (18 passed) and
+UI suite (42 passed) are clean, with nothing failed or skipped. The packaged app also
+passed a manual run of a one-on-one and a Commander event. Two keyboard-focus UI tests
+had failed in earlier runs while the PC was in use and passed in the final run; they may
+still fail occasionally on a PC that is being used during the tests. The details are in
 [docs/qa/TEST_REPORT.md](docs/qa/TEST_REPORT.md).
 
 Known limitations:

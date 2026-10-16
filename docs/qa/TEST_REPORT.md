@@ -236,3 +236,42 @@ the same steps.
   recorded only as today's behaviour (`lateEnrollmentAsItWorksToday`); the policy is undecided.
 - Buttons pressed behind an open dialog by an accessibility or automation tool still act;
   they no longer crash the app.
+
+## Addendum 4, 2026-10-15: packaged UI suite rerun for 0.2.3
+
+This closes the open item in Addendum 3. **Status: the release checks for 0.2.3 are done.**
+That covers the three automated suites and the manual packaged-app run in Addendum 3; it
+is not a claim that the app has no remaining defects.
+
+### Which binaries were tested
+
+The test programs were run straight from the folder that produced the package
+(`build-release`), without rebuilding, so the build identifier stayed `dc395042`
+(commit `dc39504`). The program in that folder, the one in
+`dist\TcgTournamentManager-0.2.3` and the one inside
+`TcgTournamentManager-0.2.3-win64.zip` have the same SHA-256 (`23ba3879...42b0a3`), and
+the ZIP's SHA-256 is unchanged (`d26359e0...a1c795`). No source, test or build file has
+changed since `dc39504`; the later commits are documentation only. Qt 6.11.3, from the
+kit the package was built with. `TCG_DATA_DIR` pointed at an empty disposable folder,
+and each test uses its own temporary database.
+
+### Result
+
+| Program | Passed | Failed | Expected failures | Skipped |
+|---|---:|---:|---:|---:|
+| `test_core` | 101 | 0 | 0 | 0 |
+| `test_rules` | 18 | 0 | 0 | 0 |
+| `test_ui` | 42 | 0 | 0 | 0 |
+
+One run, 22:47 to 22:54. Both tests that failed in Addendum 3
+(`tournamentsCanBeRenamedFromTheirPagesInEveryState` and
+`ordinaryActionsLeaveThePageWhereItIs`) passed.
+
+### Conditions
+
+A log of keyboard and mouse activity was kept during the run. It recorded real input
+for most of it, with other windows (a browser, VS Code, the Windows task switcher and
+Run box) in the foreground at times, so the PC was not idle. The suite passed anyway.
+The earlier failures are therefore not explained by this run alone: they depend on
+keyboard focus and may still appear occasionally when the PC is in use. If one does,
+log it with the activity at the time rather than rerunning until it passes.
