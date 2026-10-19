@@ -1,88 +1,155 @@
 TCG Tournament Manager @VERSION@
 ================================
 
-Runs trading card game tournaments for a club: One Piece, Pokemon and Magic (Modern and
-Commander). Please report problems at
-https://github.com/nchiamsachang/tcg-tournament-manager/issues
+Runs trading card game tournaments for a club, on one Windows PC, without internet:
+
+  - One Piece, Pokemon and Magic: The Gathering Modern: one-on-one Swiss rounds
+  - Magic: The Gathering Commander: pods of 3 or 4 players
+
+It pairs each round, keeps a round clock, records results, works out standings and
+prints pairings. The scoring is this club's own setup (see "Known limitations"); it
+is not certified by Bandai, The Pokemon Company or Wizards of the Coast.
+
+Made for 64-bit Windows 10 and 11. It has been tested on Windows 11 only.
 
 
-How to run it
--------------
-1. Extract the WHOLE zip (right-click the zip > Extract All). Do not run the program
-   from inside the zip window: it needs the other files in this folder.
-2. Open the extracted folder and double-click TcgTournamentManager.exe.
+Getting started
+---------------
+1. Download TcgTournamentManager-@VERSION@-win64.zip from the project's release page:
+   https://github.com/nchiamsachang/tcg-tournament-manager/releases
+2. Right-click the ZIP and choose Extract All. Extract everything; do not start the
+   program from inside the ZIP window, because it needs the other files with it.
+3. Open the extracted folder and double-click TcgTournamentManager.exe.
 
-Keep every file and folder that came in the zip together with the .exe. Nothing has to
-be installed. Needs 64-bit Windows 10 or 11.
+Nothing has to be installed. Keep every file and folder from the ZIP together.
 
-The program is not code-signed, so Windows may show a "Windows protected your PC"
-notice the first time you start it.
+The program is not code-signed, so Windows may say "Windows protected your PC" the
+first time. Before running it, check that the ZIP came from the release page above and
+that its SHA-256 checksum matches the one on that page. In PowerShell:
+
+    Get-FileHash .\TcgTournamentManager-@VERSION@-win64.zip
+
+If they match, choose "More info" and then "Run anyway" for this program. Do not turn
+off antivirus or other Windows protection.
 
 
-Where your data is stored
--------------------------
-Tournaments, players, results and settings are kept in your own Windows user folder,
-not in this folder:
+Running a tournament
+--------------------
+One-on-one (One Piece, Pokemon, Magic Modern):
+
+1. On the home page, choose Open Hub on the game, then New Tournament.
+2. Enter a name, the number of rounds and the round length in minutes, then
+   Create & register players. The number of rounds you set is the whole tournament.
+3. Add players: type a new name and choose Add & enroll, or find an existing player
+   with the search box and choose Enroll. Remove takes someone off the list.
+4. Choose Start tournament. Round 1 is paired: each table shows two players.
+5. Report a result by clicking the winner's name. To fix a mistake choose Undo,
+   confirm, and click the right player.
+6. When every table has a result, choose End round to pair the next round.
+7. In the last round, choose Finalize tournament instead. Final Standings appears.
+   You can open it again later from History on the game's hub.
+
+Commander:
+
+1. Choose Open Hub on Magic, then New Tournament, and set Format to Commander.
+2. Add players as above. Everyone starts checked in: click "Checked in" next to anyone
+   who has not arrived (it changes to "Check in") and click it again when they do.
+   Only checked-in players are seated.
+3. Choose Start tournament. Round 1 shows the pods and seats.
+4. Report each pod: "Wins" beside the winner, or "Draw..." and then tick anyone who
+   was already eliminated when the game was drawn. Change and Clear fix a result.
+5. Choose Finalize Round, then Start Round for the next one. Players & drops lets
+   someone drop between rounds.
+6. After the last round choose Finish tournament for the final standings.
+
+Ending early: "End tournament early" stops a tournament and keeps everything played so
+far as a read-only record. Nothing is invented for unplayed matches.
+
+
+The round clock
+---------------
+Start, Pause, Resume and Reset are beside each round. The clock is saved, so it keeps
+going if you move between pages or restart the program.
+
+When time runs out the clock says "Time expired" and the program shows a notice. It
+does not decide any result and does not end the round: you report results and choose
+End round (or Finalize Round) yourself. In Settings, under Round-end alerts, you can
+also turn on a sound.
+
+
+Printing and exporting
+----------------------
+On a round, choose Print. Under "What to print" pick:
+
+  - Pairings, by table (or by pod)
+  - Pairings, by player name
+  - Table-number signs (or pod-number signs)
+
+choose Letter or A4, then "Print..." for a printer or "Save as PDF...".
+
+Standings: one-on-one standings have Export PDF and Export CSV. Commander standings
+have Export CSV.
+
+
+Where your data is saved
+------------------------
+Tournaments, players, results and settings are kept in your Windows user folder, not
+in the program folder:
 
     %LOCALAPPDATA%\TcgTournamentManager
 
-    tcg_tournament.db    tournaments, players and results
-    settings.json        appearance and round-length settings
-    backups\             copies made automatically before a database update
-    logs\                a log of what the app did and of any errors
+Paste that line into the File Explorer address bar to open it. Settings (the gear,
+top right) shows the exact file under Data.
 
-Paste the line above into the File Explorer address bar to open it. The exact location
-is also shown in the program under Settings > Data, where "Export database backup"
-saves a copy wherever you choose.
-
-The first launch creates an empty database. If you used an earlier build that kept
-tcg_tournament.db beside the program, put this folder where the old one was (or inside
-it): on first launch that database and its settings are copied into the folder above.
-The old files are left as they were, and an existing database is never overwritten.
+To make a backup, choose Settings > Export database backup... and save the copy on a
+USB stick or another safe place. The program also saves a copy by itself in the
+backups folder before an update changes the database format.
 
 
 Updating to a newer version
 ---------------------------
 1. Close the program.
-2. Delete this folder, or leave it; it holds no data.
-3. Extract the newer zip and run the .exe from the new folder.
+2. Download and extract the new ZIP into a new folder.
+3. Start TcgTournamentManager.exe from the new folder.
 
-Your tournaments, players, results and settings stay in the user folder above and are
-picked up by the new version. If a new version has to change the database format, it
-first saves a copy in the backups folder.
-
-To remove everything, delete this folder and the user folder above.
+Your tournaments and players stay in the user folder above and the new version picks
+them up. You can delete the old program folder afterwards; it holds no data. Do not
+delete the user folder unless you want to remove everything.
 
 
 Reporting a problem
 -------------------
-If something goes wrong, the error message ends with a short reference such as
-R-7K3QF2. In the program, open Settings > Diagnostics > Export diagnostic report. It
-shows you a report, which you can save and attach to a bug report together with that
-reference. Settings also shows the exact build you are running; include that too.
+An error message ends with a reference such as R-7K3QF2. Then:
 
-The report has version details and recent log entries. It never includes your database
-and nothing is sent automatically. Actions are recorded by number, not by name, but
-error messages may contain personal information. Player and tournament names the
-program recognises are replaced by numbers; short or unrecognised names can remain, so
-please read the report before sharing it.
+1. In Settings, under Diagnostics, choose "Export diagnostic report...". The report is
+   shown before you save it.
+2. Read it before sharing. It never contains the database and nothing is sent
+   automatically. Player and tournament names the program recognises are replaced by
+   numbers, but short or unusual names and other typed text can remain.
+3. Report the problem at https://github.com/nchiamsachang/tcg-tournament-manager/issues
+   (or "Report a bug" at the bottom of the program), with the reference, the report,
+   and the version and build shown at the bottom of Settings.
 
-The log makes problems easier to trace, but it does not capture everything: if the
-program stops unexpectedly or the computer loses power, the last entries may be missing.
+The log helps trace problems but may miss the last moments if the program or the PC
+stops unexpectedly.
 
 
 Known limitations
 -----------------
-- Not code-signed (see above).
-- No installer, Start-menu shortcut or automatic updates: you replace the folder by hand.
-- The program has no icon of its own yet; Windows shows its default program icon.
-- English only.
-- Data is kept on this PC for this Windows user only. Nothing is synced or shared
-  between computers.
-- Tested on Windows 11 only.
+- Club scoring, not official rules:
+    Magic Modern  3 points a win, 1 a draw; tiebreakers OMW%, GW%, OGW%
+    One Piece     3 points a win;           tiebreakers OMW%, GW%
+    Pokemon       1 point a win;            tiebreakers Opp Win%, Opp Opp Win%
+    Commander     5 points a win, 1 a draw (per pod); see Rules in a Commander event
+- A one-on-one match can only be reported as a win for one player: there is no way to
+  enter a draw on the round screen in this version.
+- Players cannot be added once a tournament has started; register everyone first.
+- One PC and one Windows user: nothing is shared between computers.
+- English only. No installer or automatic updates; you replace the folder by hand.
+- Not code-signed (see "Getting started"). The program has no icon of its own yet.
 
 
 Licences
 --------
-This program uses Qt 6 under the LGPL version 3, SQLite and the Microsoft Visual C++
-runtime. See the licenses folder.
+This program uses Qt 6 under the LGPL version 3, SQLite, the Microsoft Visual C++
+runtime and Lucide icons. See the licenses folder.

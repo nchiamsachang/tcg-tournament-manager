@@ -275,3 +275,28 @@ Run box) in the foreground at times, so the PC was not idle. The suite passed an
 The earlier failures are therefore not explained by this run alone: they depend on
 keyboard focus and may still appear occasionally when the PC is in use. If one does,
 log it with the activity at the time rather than rerunning until it passes.
+
+## Addendum 5, 2026-10-18: 0.2.3 release ZIP with the organizer README
+
+The ZIP for the GitHub release is the verified 0.2.3 package with only `README.txt`
+replaced by the organizer guide from `packaging/README.txt`. It was made by extracting
+the verified ZIP and zipping it again; nothing was rebuilt.
+
+| | |
+|---|---|
+| Release ZIP | `dist\release-0.2.3\TcgTournamentManager-0.2.3-win64.zip` |
+| Release ZIP SHA-256 | `D61CDB50EE72B3B3756603207FD54B56A5654F0756E2154F1406B5FF1351767B` |
+| Verified ZIP, kept unchanged | `dist\TcgTournamentManager-0.2.3-win64.zip`, SHA-256 `D26359E0...A1C795` |
+| `TcgTournamentManager.exe` SHA-256, in both | `23BA3879BD0F18EDB2808419C64481104D65D9AE7778168FDCC6766E1F42B0A3` |
+| Build identifier | `dc395042`, source commit `dc39504` |
+
+Checks on the release ZIP:
+
+| Check | Result |
+|---|---|
+| Compared file by file with the verified ZIP | 30 files in each; only `README.txt` differs |
+| Contents | Program, 14 Qt 6.11.3 files, Microsoft C++ runtime, organizer README, licence notices; no databases, logs, settings, test or assistant files |
+| Extracted and started with only Windows folders on PATH, on a disposable data folder | Pass. Shows v0.2.3 and build `dc395042` |
+| Create a tournament, enroll four players, report round 1, finalize, restart | Pass. Final standings shown; after the restart the tournament is listed as completed |
+
+The test suites were not run again: no code or runtime file changed.

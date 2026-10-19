@@ -49,10 +49,12 @@ Windows 11 only.
 
 Where to get the ZIP:
 
-- **GitHub releases** currently hold only older preview builds (0.2.0-preview and
-  0.2.1-preview). Version 0.2.3 has not been published there.
+- **GitHub releases:** download it from the newest release on the
+  [releases page](https://github.com/nchiamsachang/tcg-tournament-manager/releases), and
+  compare its SHA-256 (`Get-FileHash` in PowerShell) with the one in the release notes.
+  Releases marked as pre-release (0.2.0-preview, 0.2.1-preview) were early test builds.
 - **A local build:** `package.bat` makes the ZIP in `dist\` from the source (see
-  [Packaging](#packaging)).
+  [Packaging](#packaging)). A local build is not a published release.
 
 The ZIP includes a short README for the people you send it to
 ([packaging/README.txt](packaging/README.txt)).
