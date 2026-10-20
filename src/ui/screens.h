@@ -262,10 +262,13 @@ public:
     qint64 winner() const;
     QList<qint64> eliminated() const;
     QString reason() const;
+    qint64 secondPlace() const;         // 0 when not recorded, and always for a draw
     QComboBox *outcomeCombo = nullptr;
+    QComboBox *secondCombo = nullptr;
 
 private:
     QWidget *elimBox_ = nullptr;
+    QWidget *secondBox_ = nullptr;
     QHash<qint64, QCheckBox *> checks_;
     QLineEdit *reason_ = nullptr;
 };
@@ -276,7 +279,8 @@ class CommanderEventScreen : public T::Screen {
 public:
     CommanderEventScreen(MainWindow *mw, qint64 tournamentId, int viewRound = 0);
     void refresh();
-    void report(const QVariantMap &pod, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminated);
+    void report(const QVariantMap &pod, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminated,
+                qint64 secondPlaceId = 0);
     void finalizeRound(const QVariantMap &round);
     void finish(const QVariantMap &round);
     void publish(int expectedRound);

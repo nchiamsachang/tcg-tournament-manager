@@ -1525,7 +1525,8 @@ QWidget *PlayerProfileScreen::detailPanel(qint64 tournamentId)
         Line line;
         line.when = stage == "SWISS" ? QStringLiteral("Round %1").arg(p["stage_round"].toInt())
                   : stage == "SEMIFINAL" ? QString("Semifinal (earlier version)") : QString("Final pod (earlier version)");
-        line.where = QStringLiteral("Pod %1  ·  seat %2").arg(p["pod_number"].toInt()).arg(p["seat_number"].toInt());
+        line.where = QStringLiteral("Pod %1  ·  seat %2").arg(p["pod_number"].toInt()).arg(p["seat_number"].toInt())
+                   + (p["second_place"].toInt() ? QStringLiteral("  ·  2nd") : QString());
         line.result = res == "WIN" ? "Win" : res == "LOSS" ? "Loss" : res == "DRAW" ? "Draw" : "Pending";
         line.color = res == "WIN" ? T::GREEN : res == "LOSS" ? T::RED : res == "DRAW" ? T::AMBER : T::MUTED;
         lines << line;

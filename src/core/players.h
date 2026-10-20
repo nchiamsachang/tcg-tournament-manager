@@ -45,7 +45,8 @@ db::Rows tournamentHistory(qint64 playerId);
 // round_number, table_number, opponent_name and result (WIN, LOSS, DRAW, BYE or PENDING).
 db::Rows matchHistory(qint64 playerId, qint64 tournamentId);
 // One row per Commander pod the player sat in, in round order: stage, stage_round,
-// pod_number, seat_number and result (WIN, LOSS, DRAW, or empty while unreported).
+// pod_number, seat_number, result (WIN, LOSS, DRAW, or empty while unreported) and
+// second_place (1 when the organizer recorded this player as the pod's second).
 db::Rows podHistory(qint64 playerId, qint64 tournamentId);
 // The distinct games each player has actually played, for every player in one query.
 // "Played" means the player was paired in at least one round (a match, a pod seat

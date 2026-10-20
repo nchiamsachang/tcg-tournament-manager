@@ -300,3 +300,57 @@ Checks on the release ZIP:
 | Create a tournament, enroll four players, report round 1, finalize, restart | Pass. Final standings shown; after the restart the tournament is listed as completed |
 
 The test suites were not run again: no code or runtime file changed.
+
+## Addendum 6, 2026-10-19: optional second place in Commander pods (not a release)
+
+A build with optional second-place recording for Commander pods. It still shows version
+0.2.3 because that was requested, but it is **not** the published 0.2.3: that release is
+build `dc395042` (Addendum 5) and stays as it was. Tell the two apart by the build
+identifier in Settings.
+
+| | |
+|---|---|
+| Build identifier | `229ef86a-modified-20261019-2252` (commit `229ef86` plus the uncommitted feature changes) |
+| Package | `dist\second-place-229ef86a-modified-20261019-2252\TcgTournamentManager-0.2.3-229ef86a-modified-20261019-2252-win64.zip` |
+| Package SHA-256 | `875E5CDE44D136DF19CE10B5D8169A23B0736B2777CD649F886548E2C417E962` |
+| `TcgTournamentManager.exe` SHA-256 | `A74C0B670CF383D648AFF456440CFACDA64D288B7A83DA0508A6C021EB9453CE` |
+| Published 0.2.3 ZIP and exe | Unchanged: `D61CDB50...1767B` and `23BA3879...B0A3`, checked before and after packaging |
+
+The package holds the binaries the suites below ran on (same exe checksum); it was not
+rebuilt in between. Compared with the published 0.2.3 package: the same 30 files, and only
+`TcgTournamentManager.exe` and `README.txt` differ.
+
+### Test suites
+
+| Program | Passed | Failed | Skipped |
+|---|---|---|---|
+| `test_core` | 110 | 0 | 0 |
+| `test_rules` | 18 | 0 | 0 |
+| `test_ui` | 43 | 0 | 0 |
+
+`run_tests.bat` built the program and ran `test_ui`, but its shell could not start
+`test_core.exe` and `test_rules.exe` by bare name and printed the old result files from
+2026-10-12. Those two were then run directly on the same build. The script does not notice
+when a test program fails to start; that is not fixed here.
+
+New tests: core `secondPlaceIsSavedWithTheResultAndEarnsNothing`,
+`anInvalidSecondPlaceIsRefusedAndChangesNothing`, `secondPlaceIsCorrectedAndClearedWithTheResult`,
+`secondPlaceInAFinalizedRoundIsCorrectedWithoutTouchingLaterRounds`,
+`secondPlaceInACompletedEventLeavesTheFinalPlacingsAlone`,
+`standingsAndPairingsAreIdenticalWithAndWithoutSecondPlace`,
+`aFailedSaveKeepsNeitherTheResultNorItsSecondPlace`, `aRemovedPlayerKeepsTheirSecondPlaceAndName`,
+`olderResultsGainNoSecondPlaceWhenTheDatabaseIsUpdated`; ui
+`commanderPodsRecordAnOptionalSecondPlace`. `existingDatabaseIsUpgradedInPlace` now expects
+seven updates.
+
+### The package on older data
+
+On a disposable copy of a database made by the published 0.2.3 build (one finished Commander
+event of two rounds, five players), with only Windows folders on PATH:
+
+| Check | Result |
+|---|---|
+| First start | Pass. Update 7 applied; a copy was saved in `backups` first, without the new column |
+| Existing results | Pass. Seats, points, final placings, final standings and status identical to the backup; no second place filled in |
+| "Correct result..." on round 1, Second place = a losing player, with a reason | Pass. "2nd" shown beside that player, points unchanged, no Keep or Rebuild question although round 2 exists, event still complete, one audit entry |
+| Restart | Pass. The badge is still there; no second backup; Settings shows `v0.2.3 · build 229ef86a-modified-20261019-2252` |

@@ -42,6 +42,18 @@ ResultDialog::ResultDialog(QWidget *parent, const QVariantMap &pod, const QStrin
     outcomeCombo->addItem(QStringLiteral("Draw — no winner"), qint64(0));
     v->addWidget(outcomeCombo);
 
+    // recognition only: the core gives it no points and no tiebreaker
+    secondBox_ = new QWidget;
+    auto *sb = new QVBoxLayout(secondBox_);
+    sb->setContentsMargins(0, 4, 0, 0);
+    sb->setSpacing(4);
+    sb->addWidget(T::caps("Second place"));
+    secondCombo = T::combo();
+    secondCombo->setAccessibleName("Second place");
+    sb->addWidget(secondCombo);
+    sb->addWidget(T::lbl("Optional recognition; no extra points.", T::MUTED, 12, 400, true));
+    v->addWidget(secondBox_);
+
     elimBox_ = new QWidget;
     auto *ev = new QVBoxLayout(elimBox_);
     ev->setContentsMargins(0, 0, 0, 0);
@@ -84,15 +96,33 @@ ResultDialog::ResultDialog(QWidget *parent, const QVariantMap &pod, const QStrin
         outcomeCombo->setCurrentIndex(outcomeCombo->count() - 1);
     else if (savedWinner)
         outcomeCombo->setCurrentIndex(outcomeCombo->findData(savedWinner));
-    auto syncElim = [this] { elimBox_->setVisible(outcomeCombo->currentData().toLongLong() == 0); };
-    connect(outcomeCombo, &QComboBox::currentIndexChanged, this, syncElim);
-    syncElim();
+    // the winner is never offered as second, so a new winner drops a choice that named them
+    auto fillSecond = [this, seats](qint64 keep) {
+        const QSignalBlocker block(secondCombo);
+        secondCombo->clear();
+        secondCombo->addItem("Not recorded", qint64(0));
+        for (const QVariant &sv : seats) {
+            const QVariantMap s = sv.toMap();
+            if (s["player_id"].toLongLong() != winner())
+                secondCombo->addItem(s["display_name"].toString(), s["player_id"].toLongLong());
+        }
+        secondCombo->setCurrentIndex(std::max(0, secondCombo->findData(keep)));
+    };
+    fillSecond(pod["second_place_player_id"].toLongLong());
+    auto sync = [this, fillSecond] {
+        fillSecond(secondCombo->currentData().toLongLong());
+        elimBox_->setVisible(winner() == 0);
+        secondBox_->setVisible(winner() != 0);
+    };
+    connect(outcomeCombo, &QComboBox::currentIndexChanged, this, sync);
+    sync();
     outcomeCombo->setFocus();
 }
 
 QString ResultDialog::outcome() const { return winner() ? "WIN" : "DRAW"; }
 qint64 ResultDialog::winner() const { return outcomeCombo->currentData().toLongLong(); }
 QString ResultDialog::reason() const { return reason_ ? reason_->text().trimmed() : QString(); }
+qint64 ResultDialog::secondPlace() const { return winner() ? secondCombo->currentData().toLongLong() : 0; }
 
 QList<qint64> ResultDialog::eliminated() const
 {
@@ -572,6 +602,12 @@ QWidget *CommanderEventScreen::podCard(const QVariantMap &pod, const QVariantMap
             names->addWidget(T::lbl(QStringLiteral("%1 pts").arg(points.value(pid)), T::MUTED, 11, 400, false, true));
         }
         row->addLayout(names, 1);
+        if (reported && pid == pod["second_place_player_id"].toLongLong()) {
+            QLabel *second = T::pill("2nd", T::PURPLE_LT, false);
+            second->setToolTip("Second place, recorded for recognition. No extra points.");
+            second->setAccessibleName(QStringLiteral("Second place in pod %1").arg(podNumber));
+            row->addWidget(second);
+        }
         if (reported) {
             if (result == "WIN")
                 row->addWidget(T::lbl(legacy ? QString("WIN") : QStringLiteral("WIN  +%1").arg(settings["win_points"].toInt()),
@@ -648,10 +684,12 @@ template <typename F> void CommanderEventScreen::completeWith(F fn)
         mw_->navigateTo("standings", {{"tournament_id", tournamentId_}});
 }
 
-void CommanderEventScreen::report(const QVariantMap &pod, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminated)
+void CommanderEventScreen::report(const QVariantMap &pod, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminated,
+                                  qint64 secondPlaceId)
 {
-    guard([&] { cdb::reportPodResult(pod["pod_id"].toLongLong(), outcome, winnerId, eliminated, pod["result_version"].toInt()); },
-          "Result");
+    guard([&] {
+        cdb::reportPodResult(pod["pod_id"].toLongLong(), outcome, winnerId, eliminated, pod["result_version"].toInt(), secondPlaceId);
+    }, "Result");
 }
 
 void CommanderEventScreen::dialogReport(const QVariantMap &pod, bool startAsDraw)
@@ -659,7 +697,7 @@ void CommanderEventScreen::dialogReport(const QVariantMap &pod, bool startAsDraw
     ResultDialog d(this, pod, QStringLiteral("Pod %1 result").arg(pod["pod_number"].toInt()),
                    state["event"].toMap()["settings"].toMap()["draw_policy"].toString(), startAsDraw);
     if (d.exec() == QDialog::Accepted)
-        report(pod, d.outcome(), d.winner(), d.eliminated());
+        report(pod, d.outcome(), d.winner(), d.eliminated(), d.secondPlace());
 }
 
 void CommanderEventScreen::correct(const QVariantMap &pod)
@@ -670,10 +708,10 @@ void CommanderEventScreen::correct(const QVariantMap &pod)
         return;
     const qint64 podId = pod["pod_id"].toLongLong();
     const QString outcome = d.outcome(), reason = d.reason();
-    const qint64 winner = d.winner();
+    const qint64 winner = d.winner(), second = d.secondPlace();
     const QList<qint64> eliminated = d.eliminated();
     try {
-        cdb::correctResult(podId, outcome, winner, eliminated, {}, reason);
+        cdb::correctResult(podId, outcome, winner, eliminated, {}, reason, second);
     } catch (const cdb::ResolutionRequired &e) {
         QMessageBox box(this);
         box.setWindowTitle("Later rounds depend on this result");
@@ -690,7 +728,7 @@ void CommanderEventScreen::correct(const QVariantMap &pod)
         if (!choice.isEmpty()) {
             if (choice == "REBUILD")
                 view_ = 0;
-            guard([&] { cdb::correctResult(podId, outcome, winner, eliminated, choice, reason); }, "Correction");
+            guard([&] { cdb::correctResult(podId, outcome, winner, eliminated, choice, reason, second); }, "Correction");
         }
         return;
     } catch (const cdb::CommanderError &e) {

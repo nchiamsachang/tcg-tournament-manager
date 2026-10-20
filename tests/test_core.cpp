@@ -1197,7 +1197,8 @@ private slots:
         db::exec("INSERT INTO enrollments (tournament_id, player_id, match_points) VALUES (1, 1, 9)");
         restart();
         const Rows versions = db::query("SELECT version, name FROM schema_migrations ORDER BY version");
-        QCOMPARE(versions.size(), 6);
+        QCOMPARE(versions.size(), 7);
+        QCOMPARE(versions[6]["name"].toString(), QString("commander_second_place"));
         QCOMPARE(versions[5]["name"].toString(), QString("matches_round_index"));
         QCOMPARE(versions[4]["name"].toString(), QString("player_removed"));
         QCOMPARE(versions[2]["name"].toString(), QString("commander_fixed_rounds"));
@@ -3602,6 +3603,366 @@ private slots:
             qputenv("TCG_DATA_DIR", chosen);
         db::setPath(test);
         QCOMPARE(db::value("SELECT COUNT(*) FROM players").toInt(), 0);     // the test's own database again
+    }
+private:
+    static qint64 savedSecond(qint64 pod)
+    {
+        return db::value("SELECT second_place_player_id FROM commander_pods WHERE pod_id = ?", {pod}).toLongLong();
+    }
+
+    QList<Rows> savedCommander(qint64 tid)
+    {
+        return {db::query("SELECT * FROM commander_pods WHERE tournament_id = ? ORDER BY pod_id", {tid}),
+                db::query("SELECT * FROM commander_seats WHERE tournament_id = ? ORDER BY pod_id, seat_number", {tid}),
+                db::query("SELECT * FROM enrollments WHERE tournament_id = ? ORDER BY enrollment_id", {tid}),
+                db::query("SELECT * FROM commander_audit WHERE tournament_id = ? ORDER BY audit_id", {tid})};
+    }
+
+    // everything scoring and pairing depend on, with ids that are the same in a fresh database
+    QStringList commanderOutcome(qint64 tid)
+    {
+        const auto json = [](const QVariant &v) { return QString::fromUtf8(QJsonDocument::fromVariant(v).toJson()); };
+        QStringList out{json(cdb::getStandings(tid))};
+        for (const QVariant &rv : cdb::getRounds(tid)) {
+            QVariantList pods;
+            for (const QVariant &pv : rv.toMap()["pods"].toList())
+                pods << pv.toMap()["seats"];
+            out << json(pods) << json(rv.toMap()["byes"]);
+        }
+        for (const Row &r : db::query("SELECT pairing_inputs_json FROM commander_rounds WHERE tournament_id = ? "
+                                      "ORDER BY round_number", {tid}))
+            out << r["pairing_inputs_json"].toString();
+        out << db::value("SELECT final_standings_json FROM commander_events WHERE tournament_id = ?", {tid}).toString();
+        for (const Row &r : db::query("SELECT player_id, match_points, match_wins, match_losses, match_draws, final_placement "
+                                      "FROM enrollments WHERE tournament_id = ? ORDER BY player_id", {tid}))
+            out << json(r);
+        return out;
+    }
+
+private slots:
+    // optional second place in a Commander pod: recognition only, never points
+
+    void secondPlaceIsSavedWithTheResultAndEarnsNothing()
+    {
+        auto [tid, pids] = makeEvent(8, 2);
+        const QVariantMap pod = podAt(currentRound(tid), 0);
+        const QList<qint64> seated = ids(pod["seats"].toList());
+        const int v = cdb::reportPodResult(podId(pod), "WIN", seated[0], {}, cdb::NONE, seated[2]);
+        QCOMPARE(savedSecond(podId(pod)), seated[2]);
+        const QVariantMap shown = podAt(currentRound(tid), 0);
+        QCOMPARE(shown["second_place_player_id"].toLongLong(), seated[2]);
+        QCOMPARE(shown["result_version"].toInt(), v);
+        QHash<qint64, QVariantMap> table;
+        for (const QVariant &r : cdb::getStandings(tid))
+            table.insert(r.toMap()["player_id"].toLongLong(), r.toMap());
+        QCOMPARE(table[seated[2]]["points"].toInt(), 0);              // second place is still a loss
+        QCOMPARE(table[seated[2]]["losses"].toInt(), 1);
+        QCOMPARE(table[seated[2]]["points"], table[seated[1]]["points"]);
+        QCOMPARE(table[seated[2]]["losses"], table[seated[1]]["losses"]);
+        QCOMPARE(table[seated[0]]["points"].toInt(), 5);
+        const QVariantMap entry = cdb::getAudit(tid)[0].toMap();
+        QCOMPARE(entry["action"].toString(), QString("RESULT_REPORTED"));
+        QCOMPARE(entry["detail"].toMap()["second_place"].toLongLong(), seated[2]);
+        QVERIFY(entry["detail"].toMap()["second_place_before"].isNull());
+        QCOMPARE(cdb::reportPodResult(podId(pod), "WIN", seated[0], {}, cdb::NONE, seated[2]), v);    // a repeat is a no-op
+
+        // not recorded is the default, and a pod without one finalizes like any other
+        const QVariantMap other = podAt(currentRound(tid), 1);
+        cdb::reportPodResult(podId(other), "WIN", seatPlayer(other, 1));
+        QVERIFY(db::value("SELECT second_place_player_id FROM commander_pods WHERE pod_id = ?", {podId(other)}).isNull());
+        QVERIFY(cdb::finalizeRound(currentRound(tid)["round_id"].toLongLong()));
+
+        // kept by permanent id across a restart, and shown in the player's pod history
+        restart();
+        QCOMPARE(podAt(cdb::getRounds(tid)[0].toMap(), 0)["second_place_player_id"].toLongLong(), seated[2]);
+        const Rows history = pdb::podHistory(seated[2], tid);
+        QCOMPARE(history.size(), 1);
+        QCOMPARE(history[0]["result"].toString(), QString("LOSS"));
+        QCOMPARE(history[0]["second_place"].toInt(), 1);
+        QCOMPARE(pdb::podHistory(seated[1], tid)[0]["second_place"].toInt(), 0);
+        QCOMPARE(pdb::podHistory(seated[0], tid)[0]["second_place"].toInt(), 0);
+        Q_UNUSED(pids);
+    }
+
+    void anInvalidSecondPlaceIsRefusedAndChangesNothing()
+    {
+        auto [tid, pids] = makeEvent(5, 2);
+        const QVariantMap rnd = currentRound(tid);
+        const QVariantMap pod = podAt(rnd, 0);
+        const QList<qint64> seated = ids(pod["seats"].toList());
+        QCOMPARE(rnd["byes"].toList().size(), 1);
+        const qint64 bye = rnd["byes"].toList()[0].toMap()["player_id"].toLongLong();
+        const qint64 outsider = pdb::addPlayer("Not Enrolled");
+        const QList<Rows> before = savedCommander(tid);
+        const auto refused = [&](const QString &outcome, qint64 winner, qint64 second, const char *why) {
+            try {
+                cdb::reportPodResult(podId(pod), outcome, winner, {}, cdb::NONE, second);
+                QFAIL(why);
+            } catch (const cdb::CommanderError &e) {
+                QVERIFY2(!e.message.isEmpty(), why);
+            }
+            QCOMPARE(savedCommander(tid), before);
+        };
+        refused("WIN", seated[0], seated[0], "the winner as second");
+        refused("WIN", seated[0], bye, "a player on a bye");
+        refused("WIN", seated[0], outsider, "a player from outside the tournament");
+        refused("WIN", seated[0], 987654, "an unknown id");
+        refused("DRAW", 0, seated[1], "a drawn pod");
+        refused("WIN", 0, seated[1], "no winner");
+
+        // a player from another pod
+        const qint64 big = makeEvent(8, 1).first;
+        const QVariantMap a = podAt(currentRound(big), 0), b = podAt(currentRound(big), 1);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
+                                 cdb::reportPodResult(podId(a), "WIN", seatPlayer(a, 0), {}, cdb::NONE, seatPlayer(b, 1)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
+                                 cdb::correctResult(podId(a), "WIN", seatPlayer(a, 0), {}, {}, {}, seatPlayer(b, 1)));
+        QCOMPARE(podAt(currentRound(big), 0)["status"].toString(), QString("PENDING"));
+        QVERIFY(auditActions(big).filter("RESULT").isEmpty());
+        Q_UNUSED(pids);
+    }
+
+    void secondPlaceIsCorrectedAndClearedWithTheResult()
+    {
+        auto [tid, pids] = makeEvent(8, 2);
+        const QVariantMap pod = podAt(currentRound(tid), 0);
+        const qint64 id = podId(pod);
+        const QList<qint64> seated = ids(pod["seats"].toList());
+        const int v1 = cdb::reportPodResult(id, "WIN", seated[0], {}, cdb::NONE, seated[1]);
+        const QVariantList standings = cdb::getStandings(tid);
+
+        // changing only second place is a correction like any other, with no effect on the standings
+        QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::reportPodResult(id, "WIN", seated[0], {}, cdb::NONE, seated[2]));
+        const int v2 = cdb::reportPodResult(id, "WIN", seated[0], {}, v1, seated[2]);
+        QCOMPARE(v2, v1 + 1);
+        QCOMPARE(savedSecond(id), seated[2]);
+        QCOMPARE(cdb::getStandings(tid), standings);
+        QVariantMap entry = cdb::getAudit(tid)[0].toMap();
+        QCOMPARE(entry["action"].toString(), QString("RESULT_CORRECTED"));
+        QCOMPARE(entry["detail"].toMap()["second_place_before"].toLongLong(), seated[1]);
+        QCOMPARE(entry["detail"].toMap()["second_place"].toLongLong(), seated[2]);
+
+        // and back to not recorded
+        const int v3 = cdb::reportPodResult(id, "WIN", seated[0], {}, v2, 0);
+        QCOMPARE(savedSecond(id), qint64(0));
+        QCOMPARE(cdb::getStandings(tid), standings);
+
+        // a new winner never keeps a second place that was given for the old one
+        const int v4 = cdb::reportPodResult(id, "WIN", seated[0], {}, v3, seated[3]);
+        const int v5 = cdb::reportPodResult(id, "WIN", seated[3], {}, v4);
+        QCOMPARE(savedSecond(id), qint64(0));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(id, "WIN", seated[3], {}, v5, seated[3]));
+
+        // a draw has no second place
+        const int v6 = cdb::reportPodResult(id, "WIN", seated[3], {}, v5, seated[0]);
+        QCOMPARE(savedSecond(id), seated[0]);
+        const int v7 = cdb::reportPodResult(id, "DRAW", 0, {seated[1]}, v6);
+        QCOMPARE(savedSecond(id), qint64(0));
+
+        // clearing a pod's result, its undo, removes it along with the result
+        const int v8 = cdb::reportPodResult(id, "WIN", seated[1], {}, v7, seated[2]);
+        QCOMPARE(savedSecond(id), seated[2]);
+        cdb::clearPodResult(id, v8);
+        QCOMPARE(savedSecond(id), qint64(0));
+        QCOMPARE(podAt(currentRound(tid), 0)["status"].toString(), QString("PENDING"));
+        entry = cdb::getAudit(tid)[0].toMap();
+        QCOMPARE(entry["action"].toString(), QString("RESULT_CLEARED"));
+        QCOMPARE(entry["detail"].toMap()["second_place_before"].toLongLong(), seated[2]);
+        Q_UNUSED(pids);
+    }
+
+    void secondPlaceInAFinalizedRoundIsCorrectedWithoutTouchingLaterRounds()
+    {
+        auto [tid, pids] = makeEvent(8, 3);
+        const QVariantMap r1 = playRound(tid);
+        const qint64 id = podId(podAt(r1, 0));
+        const QList<qint64> seated = ids(podAt(r1, 0)["seats"].toList());
+        cdb::publishNextRound(tid);
+        const QStringList before = commanderOutcome(tid);
+        const int rounds = cdb::getRounds(tid).size();
+
+        // second place alone changes no points, so there is no keep-or-rebuild question
+        QVERIFY(cdb::correctResult(id, "WIN", seated[0], {}, {}, "second recorded late", seated[1]));
+        QCOMPARE(savedSecond(id), seated[1]);
+        QCOMPARE(commanderOutcome(tid), before);
+        QCOMPARE(cdb::getRounds(tid).size(), rounds);
+        QVERIFY2(!cdb::correctResult(id, "WIN", seated[0], {}, {}, {}, seated[1]), "no change, nothing to do");
+
+        // a correction to a draw changes points, so the question is asked as before, and it clears second place
+        QVERIFY_THROWS_EXCEPTION(cdb::ResolutionRequired, cdb::correctResult(id, "DRAW", 0, {}));
+        QCOMPARE(savedSecond(id), seated[1]);
+        QVERIFY(cdb::correctResult(id, "DRAW", 0, {}, "KEEP"));
+        QCOMPARE(savedSecond(id), qint64(0));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(id, "DRAW", 0, {}, "KEEP", {}, seated[1]));
+        Q_UNUSED(pids);
+    }
+
+    void secondPlaceInACompletedEventLeavesTheFinalPlacingsAlone()
+    {
+        auto [tid, pids] = makeEvent(8, 1);
+        const QVariantMap r1 = playRound(tid);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::COMPLETED);
+        const qint64 id = podId(podAt(r1, 0));
+        const QList<qint64> seated = ids(podAt(r1, 0)["seats"].toList());
+        const QStringList before = commanderOutcome(tid);
+        const int entries = auditActions(tid).size();
+        QVERIFY(cdb::correctResult(id, "WIN", seated[0], {}, {}, {}, seated[3]));
+        QCOMPARE(savedSecond(id), seated[3]);
+        QCOMPARE(commanderOutcome(tid), before);
+        QCOMPARE(auditActions(tid).size(), entries + 1);               // the correction only, no new final standings
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::COMPLETED);
+
+        // an event ended early stays read-only for second place too
+        const qint64 ended = makeEvent(8, 2).first;
+        const QVariantMap pod = podAt(currentRound(ended), 0);
+        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0));
+        QVERIFY(tdb::terminateTournament(ended));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
+                                 cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, {}, {}, seatPlayer(pod, 1)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
+                                 cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, cdb::NONE, seatPlayer(pod, 1)));
+        QCOMPARE(savedSecond(podId(pod)), qint64(0));
+        Q_UNUSED(pids);
+    }
+
+    void standingsAndPairingsAreIdenticalWithAndWithoutSecondPlace()
+    {
+        // the same event twice from an empty database: no second places, then one in every pod
+        const auto play = [this](const QString &file, bool withSecond) {
+            db::closeThreadConnection();
+            db::setPath(tmp_->filePath(file));
+            db::initialize();
+            const qint64 tid = makeEvent(11, 3, true, 4242).first;
+            for (int number = 1; number <= 3; ++number) {
+                const QVariantMap rnd = currentRound(tid);
+                for (const QVariant &pv : rnd["pods"].toList()) {
+                    const QVariantMap pod = pv.toMap();
+                    cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, number % 3), {}, cdb::NONE,
+                                         withSecond ? seatPlayer(pod, (number + 1) % 3) : 0);
+                }
+                cdb::finalizeRound(rnd["round_id"].toLongLong());
+                if (number < 3)
+                    cdb::publishNextRound(tid, number + 1);
+            }
+            const int seconds = db::value("SELECT COUNT(second_place_player_id) FROM commander_pods").toInt();
+            return qMakePair(commanderOutcome(tid), seconds);
+        };
+        const auto without = play("plain.db", false);
+        const auto with = play("second.db", true);
+        QCOMPARE(without.second, 0);
+        QCOMPARE(with.second, 9);                                       // three pods in each of three rounds
+        QCOMPARE(with.first.size(), without.first.size());
+        for (int i = 0; i < with.first.size(); ++i)
+            QCOMPARE(with.first[i], without.first[i]);
+        QVERIFY(!with.first.filter("final_placement").isEmpty());
+    }
+
+    void aFailedSaveKeepsNeitherTheResultNorItsSecondPlace()
+    {
+        auto [tid, pids] = makeEvent(8, 2);
+        const QVariantMap pod = podAt(currentRound(tid), 0);
+        const qint64 id = podId(pod);
+        const QList<Rows> before = savedCommander(tid);
+        for (const char *when : {"BEFORE UPDATE OF match_points ON enrollments", "BEFORE INSERT ON commander_audit"}) {
+            db::exec(QStringLiteral("CREATE TRIGGER break_save %1 BEGIN SELECT RAISE(ABORT, 'cannot be saved'); END").arg(when));
+            QVERIFY_THROWS_EXCEPTION(db::Error,
+                                     cdb::reportPodResult(id, "WIN", seatPlayer(pod, 0), {}, cdb::NONE, seatPlayer(pod, 1)));
+            QCOMPARE(savedCommander(tid), before);
+            db::exec("DROP TRIGGER break_save");
+        }
+        const int v = cdb::reportPodResult(id, "WIN", seatPlayer(pod, 0), {}, cdb::NONE, seatPlayer(pod, 1));
+        const QList<Rows> reported = savedCommander(tid);
+        db::exec("CREATE TRIGGER break_save BEFORE INSERT ON commander_audit BEGIN SELECT RAISE(ABORT, 'cannot be saved'); END");
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::reportPodResult(id, "WIN", seatPlayer(pod, 0), {}, v, seatPlayer(pod, 2)));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::clearPodResult(id, v));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::correctResult(id, "DRAW", 0, {}));
+        QCOMPARE(savedCommander(tid), reported);
+        QCOMPARE(savedSecond(id), seatPlayer(pod, 1));
+        db::exec("DROP TRIGGER break_save");
+        Q_UNUSED(pids);
+    }
+
+    void aRemovedPlayerKeepsTheirSecondPlaceAndName()
+    {
+        auto [tid, pids] = makeEvent(8, 1);
+        const QVariantMap pod = podAt(currentRound(tid), 0);
+        const qint64 second = seatPlayer(pod, 2);
+        const QString name = db::value("SELECT display_name FROM players WHERE player_id = ?", {second}).toString();
+        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, cdb::NONE, second);
+        playRound(tid);
+        QCOMPARE(tdb::tournamentById(tid)["status"].toString(), tdb::COMPLETED);
+        QVERIFY(pdb::removePlayer(second));
+        restart();
+        QCOMPARE(savedSecond(podId(pod)), second);
+        const QVariantMap shown = podAt(cdb::getRounds(tid)[0].toMap(), 0);
+        QCOMPARE(shown["second_place_player_id"].toLongLong(), second);
+        QString shownName;
+        for (const QVariant &s : shown["seats"].toList())
+            if (s.toMap()["player_id"].toLongLong() == second)
+                shownName = s.toMap()["display_name"].toString();
+        QCOMPARE(shownName, name);
+        QCOMPARE(pdb::podHistory(second, tid)[0]["second_place"].toInt(), 1);
+        Q_UNUSED(pids);
+    }
+
+    void olderResultsGainNoSecondPlaceWhenTheDatabaseIsUpdated()
+    {
+        auto [tid, pids] = makeEvent(8, 2);
+        playRound(tid);
+        cdb::publishNextRound(tid);
+        playRound(tid, false);
+
+        // rebuild the pods table as an older version left it, before update 7
+        const QString current = db::value("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'commander_pods'").toString();
+        QString older = current;
+        older.replace(QRegularExpression(",\\s*second_place_player_id INTEGER REFERENCES players\\(player_id\\)"), "");
+        older.replace("CREATE TABLE commander_pods", "CREATE TABLE commander_pods_older");
+        QVERIFY2(older != current && !older.contains("second_place"), qPrintable(older));
+        const QString kept = "pod_id, round_id, tournament_id, pod_number, status, outcome, advancing_player_id, "
+                             "result_version, reported_at, confirmed_at";
+        const Rows podsBefore = db::query("SELECT " + kept + " FROM commander_pods ORDER BY pod_id");
+        const auto results = [] {
+            return QList<Rows>{db::query("SELECT * FROM commander_seats ORDER BY pod_id, seat_number"),
+                               db::query("SELECT * FROM enrollments ORDER BY enrollment_id"),
+                               db::query("SELECT * FROM commander_audit ORDER BY audit_id")};
+        };
+        const QList<Rows> resultsBefore = results();
+        const QVariantList standings = cdb::getStandings(tid);
+        db::exec("PRAGMA foreign_keys = OFF");
+        db::exec(older);
+        db::exec("INSERT INTO commander_pods_older SELECT " + kept + " FROM commander_pods");
+        db::exec("DROP TABLE commander_pods");
+        db::exec("ALTER TABLE commander_pods_older RENAME TO commander_pods");
+        db::exec("CREATE INDEX idx_cmd_pods_round ON commander_pods(round_id)");
+        db::exec("PRAGMA foreign_keys = ON");
+        db::exec("DELETE FROM schema_migrations WHERE version = 7");
+        QCOMPARE(db::query("SELECT * FROM commander_pods ORDER BY pod_id"), podsBefore);
+
+        restart();
+        QCOMPARE(db::value("SELECT name FROM schema_migrations WHERE version = 7").toString(), QString("commander_second_place"));
+        QCOMPARE(db::query("SELECT " + kept + " FROM commander_pods ORDER BY pod_id"), podsBefore);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_pods WHERE second_place_player_id IS NOT NULL").toInt(), 0);
+        QCOMPARE(results(), resultsBefore);
+        QCOMPARE(cdb::getStandings(tid), standings);
+        QVERIFY(db::query("PRAGMA foreign_key_check").isEmpty());
+
+        // a copy was saved before the update, and it is the older database
+        const QStringList backups = QDir(db::dataDir() + "/backups").entryList({"*.db"}, QDir::Files);
+        QCOMPARE(backups.size(), 1);
+        const QString live = db::path();
+        db::closeThreadConnection();
+        db::setPath(db::dataDir() + "/backups/" + backups.first());
+        QVERIFY(!db::value("SELECT 1 FROM schema_migrations WHERE version = 7").isValid());
+        QVERIFY(!db::value("SELECT sql FROM sqlite_master WHERE name = 'commander_pods'").toString().contains("second_place"));
+        db::closeThreadConnection();
+        db::setPath(live);
+
+        // an older finalized result can be given one by correction, still without points
+        const QVariantMap pod = podAt(cdb::getRounds(tid)[0].toMap(), 0);
+        QVERIFY(cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, {}, {}, seatPlayer(pod, 1)));
+        QCOMPARE(savedSecond(podId(pod)), seatPlayer(pod, 1));
+        QCOMPARE(cdb::getStandings(tid), standings);
+        Q_UNUSED(pids);
     }
 };
 

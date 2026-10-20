@@ -143,7 +143,8 @@ Rows matchHistory(qint64 playerId, qint64 tournamentId)
 Rows podHistory(qint64 playerId, qint64 tournamentId)
 {
     return db::query(
-        "SELECT r.stage, r.stage_round, p.pod_number, s.seat_number, s.result, p.status FROM commander_seats s "
+        "SELECT r.stage, r.stage_round, p.pod_number, s.seat_number, s.result, p.status, "
+        "p.second_place_player_id = s.player_id AS second_place FROM commander_seats s "
         "JOIN commander_pods p ON p.pod_id = s.pod_id JOIN commander_rounds r ON r.round_id = s.round_id "
         "WHERE s.tournament_id = ? AND s.player_id = ? ORDER BY r.round_number ASC", {tournamentId, playerId});
 }

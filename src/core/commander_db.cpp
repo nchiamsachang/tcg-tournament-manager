@@ -484,13 +484,39 @@ static Results resolve(const QVariantMap &pod, const QVariantMap &settings, cons
     }
 }
 
-static void applyResults(const QVariantMap &pod, const QString &outcome, const Results &results)
+// second place is a player of this pod other than the winner, and only when the pod has a winner
+static void checkSecondPlace(const QVariantMap &pod, const QString &outcome, qint64 winnerId, qint64 secondPlaceId)
+{
+    if (!secondPlaceId)
+        return;
+    if (outcome != "WIN")
+        throw CommanderError("Second place can only be recorded when the pod has a winner.");
+    if (secondPlaceId == winnerId)
+        throw CommanderError("The winner cannot also be second.");
+    for (const QVariant &s : pod["seats"].toList())
+        if (s.toMap().value("player_id").toLongLong() == secondPlaceId)
+            return;
+    throw CommanderError("Second place must be a player in this pod.");
+}
+
+static qint64 savedSecondPlace(const QVariantMap &pod)
+{
+    return pod["second_place_player_id"].toLongLong();
+}
+
+static QVariant idOrNull(qint64 id)
+{
+    return id ? QVariant(id) : QVariant();
+}
+
+static void applyResults(const QVariantMap &pod, const QString &outcome, const Results &results, qint64 secondPlaceId)
 {
     for (auto it = results.begin(); it != results.end(); ++it)
         db::exec("UPDATE commander_seats SET result = ?, eliminated = ? WHERE pod_id = ? AND player_id = ?",
                  {it.value().result, it.value().eliminated, pod["pod_id"], it.key()});
-    db::exec("UPDATE commander_pods SET status = 'REPORTED', outcome = ?, result_version = result_version + 1, "
-             "reported_at = DATETIME('now') WHERE pod_id = ?", {outcome, pod["pod_id"]});
+    db::exec("UPDATE commander_pods SET status = 'REPORTED', outcome = ?, second_place_player_id = ?, "
+             "result_version = result_version + 1, reported_at = DATETIME('now') WHERE pod_id = ?",
+             {outcome, idOrNull(secondPlaceId), pod["pod_id"]});
 }
 
 static QVariant resultsDetail(const std::optional<Results> &r)
@@ -514,9 +540,9 @@ static QVariantList refreshCache(qint64 tournamentId, QVariantMap *evOut = nullp
 }
 
 int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminatedIds,
-                    int expectedVersion)
+                    int expectedVersion, qint64 secondPlaceId)
 {
-    applog::Action log("result.report", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId}});
+    applog::Action log("result.report", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId}, {"second", secondPlaceId}});
     db::Tx tx;
     const QVariantMap pod = loadPod(podId);
     if (pod["stage"].toString() != "SWISS")
@@ -526,17 +552,19 @@ int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const
     const qint64 tid = pod["tournament_id"].toLongLong();
     const QVariantMap ev = loadOpenEvent(tid);
     const Results results = resolve(pod, ev["settings"].toMap(), outcome, winnerId, eliminatedIds);
+    checkSecondPlace(pod, outcome, winnerId, secondPlaceId);
     const std::optional<Results> before = currentResults(pod);
     const int version = pod["result_version"].toInt();
-    if (before && *before == results)
+    if (before && *before == results && savedSecondPlace(pod) == secondPlaceId)
         return version;
     if (expectedVersion != NONE && expectedVersion != version)
         throw ConflictError("This pod's result was changed elsewhere. Reload it and try again.");
     if (before && expectedVersion == NONE)
         throw ConflictError("This pod already has a different result. Reload it to correct that result.");
-    applyResults(pod, outcome, results);
+    applyResults(pod, outcome, results, secondPlaceId);
     audit(tid, before ? "RESULT_CORRECTED" : "RESULT_REPORTED",
-          {{"before", resultsDetail(before)}, {"after", resultsDetail(results)}, {"outcome", outcome}},
+          {{"before", resultsDetail(before)}, {"after", resultsDetail(results)}, {"outcome", outcome},
+           {"second_place_before", idOrNull(before ? savedSecondPlace(pod) : 0)}, {"second_place", idOrNull(secondPlaceId)}},
           pod["round_id"], podId);
     refreshCache(tid);
     tx.commit();
@@ -561,8 +589,9 @@ int clearPodResult(qint64 podId, int expectedVersion)
     const qint64 tid = pod["tournament_id"].toLongLong();
     db::exec("UPDATE commander_seats SET result = NULL, eliminated = 0 WHERE pod_id = ?", {podId});
     db::exec("UPDATE commander_pods SET status = 'PENDING', outcome = NULL, advancing_player_id = NULL, "
-             "result_version = result_version + 1, reported_at = NULL WHERE pod_id = ?", {podId});
-    audit(tid, "RESULT_CLEARED", {{"before", resultsDetail(currentResults(pod))}, {"after", QVariant()}},
+             "second_place_player_id = NULL, result_version = result_version + 1, reported_at = NULL WHERE pod_id = ?", {podId});
+    audit(tid, "RESULT_CLEARED", {{"before", resultsDetail(currentResults(pod))}, {"after", QVariant()},
+                                  {"second_place_before", idOrNull(savedSecondPlace(pod))}},
           pod["round_id"], podId);
     refreshCache(tid);
     tx.commit();
@@ -680,9 +709,10 @@ static bool hasPlayoffRounds(qint64 tournamentId)
 }
 
 bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminatedIds,
-                   const QString &resolution, const QString &reason)
+                   const QString &resolution, const QString &reason, qint64 secondPlaceId)
 {
-    applog::Action log("result.correct", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId}, {"resolution", resolution}});
+    applog::Action log("result.correct", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId}, {"second", secondPlaceId},
+                                          {"resolution", resolution}});
     if (!resolution.isEmpty() && resolution != "KEEP" && resolution != "REBUILD")
         throw CommanderError("Resolution must be KEEP or REBUILD.");
     db::Tx tx;
@@ -690,8 +720,11 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
     const qint64 tid = pod["tournament_id"].toLongLong();
     QVariantMap ev = loadOpenEvent(tid);
     const Results results = resolve(pod, ev["settings"].toMap(), outcome, winnerId, eliminatedIds);
+    checkSecondPlace(pod, outcome, winnerId, secondPlaceId);
     const std::optional<Results> before = currentResults(pod);
-    if (before && *before == results)
+    // second place alone changes no points, so later rounds and final placings stay as they are
+    const bool resultsChanged = !before || !(*before == results);
+    if (!resultsChanged && savedSecondPlace(pod) == secondPlaceId)
         return false;
     const int roundNumber = pod["round_number"].toInt();
     QVariantList later, laterNumbers;
@@ -705,7 +738,7 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
         laterPlayoff = laterPlayoff || r["stage"].toString() != "SWISS";
     }
     const bool finalized = pod["round_status"].toString() == "FINALIZED";
-    if (finalized && !later.isEmpty() && resolution.isEmpty())
+    if (finalized && !later.isEmpty() && resultsChanged && resolution.isEmpty())
         throw ResolutionRequired(
             QStringLiteral("Round %1 is finalized and round%2 %3 %4 already published from it. "
                            "Choose KEEP (leave later rounds as published) or REBUILD (discard and redo them).")
@@ -713,7 +746,7 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
                 .arg(later.size() > 1 ? "were" : "was"),
             later);
 
-    if (finalized && !later.isEmpty() && resolution == "REBUILD") {
+    if (finalized && !later.isEmpty() && resultsChanged && resolution == "REBUILD") {
         if (laterPlayoff)
             throw CommanderError("Later rounds include a playoff kept from an earlier version, "
                                  "which is never deleted. Use KEEP.");
@@ -730,16 +763,17 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
         db::exec("UPDATE enrollments SET final_placement = NULL WHERE tournament_id = ?", {tid});
     }
 
-    applyResults(pod, outcome, results);
+    applyResults(pod, outcome, results, secondPlaceId);
     audit(tid, "RESULT_CORRECTED",
           {{"before", resultsDetail(before)}, {"after", resultsDetail(results)}, {"outcome", outcome}, {"reason", reason},
+           {"second_place_before", idOrNull(before ? savedSecondPlace(pod) : 0)}, {"second_place", idOrNull(secondPlaceId)},
            {"resolution", resolution.isEmpty() ? QVariant() : QVariant(resolution)}, {"later_rounds", laterNumbers}},
           pod["round_id"], podId);
 
     refreshCache(tid, &ev);
     // a finished event's placings are its standings, so they follow the correction
     // (unless they came from a legacy playoff, which is left exactly as it was played)
-    if (ev["stage"].toString() == "COMPLETE" && !hasPlayoffRounds(tid))
+    if (resultsChanged && ev["stage"].toString() == "COMPLETE" && !hasPlayoffRounds(tid))
         complete(tid, "FINAL_STANDINGS_UPDATED");
     tx.commit();
     return true;

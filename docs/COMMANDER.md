@@ -115,6 +115,17 @@ One game per pod. A pod is *pending* until reported, then either:
 Each player's own result is stored, so standings never infer anything from the
 pod-level outcome. A bye is worth 5.
 
+**Second place (optional).** For a pod with a winner the organizer may name one
+other player of that pod as second, for recognition only. It is saved by player
+ID in `commander_pods.second_place_player_id` (migration 7; results saved before
+it have none). It earns no points, is not a tiebreaker and is not a pairing input:
+that player's result is still a loss. The core refuses it for a draw, an
+unreported pod, a player on a bye or in another pod, and the winner. When several
+players were knocked out together it is left unrecorded. Clearing a result or
+changing it to a draw removes it, and it is saved, corrected and audited together
+with the result. Changing only the second place of a finalized round asks no
+Keep or Rebuild question and leaves a finished event's final standings as they are.
+
 ## Standings and tiebreakers
 
 Always recomputed from saved results.

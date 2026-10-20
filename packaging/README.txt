@@ -58,6 +58,9 @@ Commander:
 3. Choose Start tournament. Round 1 shows the pods and seats.
 4. Report each pod: "Wins" beside the winner, or "Draw..." and then tick anyone who
    was already eliminated when the game was drawn. Change and Clear fix a result.
+   Optional: after the winner is in, choose Change and pick a Second place. It is
+   shown as "2nd" and earns no points. Leave it as Not recorded for a draw, or when
+   several players were knocked out at the same time.
 5. Choose Finalize Round, then Start Round for the next one. Players & drops lets
    someone drop between rounds.
 6. After the last round choose Finish tournament for the final standings.

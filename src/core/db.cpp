@@ -580,6 +580,13 @@ static void migration006MatchesRoundIndex()
     exec("CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(round_id)");
 }
 
+// optional second place of a Commander pod, by permanent player id; earlier results get none
+static void migration007CommanderSecondPlace()
+{
+    if (!columns("commander_pods").contains("second_place_player_id"))
+        exec("ALTER TABLE commander_pods ADD COLUMN second_place_player_id INTEGER REFERENCES players(player_id)");
+}
+
 const QList<Migration> &migrations()
 {
     static const QList<Migration> list = {
@@ -589,6 +596,7 @@ const QList<Migration> &migrations()
         {4, "tournament_terminated", migration004TournamentTerminated, true},
         {5, "player_removed", migration005PlayerRemoved},
         {6, "matches_round_index", migration006MatchesRoundIndex},
+        {7, "commander_second_place", migration007CommanderSecondPlace},
     };
     return list;
 }

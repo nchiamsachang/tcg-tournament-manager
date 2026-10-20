@@ -63,8 +63,9 @@ qint64 startEvent(qint64 tournamentId);                 // closes registration, 
 qint64 publishNextRound(qint64 tournamentId, int expectedRoundNumber = NONE);
 
 // outcome "WIN" + winnerId, or "DRAW" + eliminatedIds.  Returns the pod's new result_version.
+// secondPlaceId: another player of the pod recognized as second, worth no points; 0 for none, always 0 for a draw.
 int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId = 0, const QList<qint64> &eliminatedIds = {},
-                    int expectedVersion = NONE);
+                    int expectedVersion = NONE, qint64 secondPlaceId = 0);
 int clearPodResult(qint64 podId, int expectedVersion = NONE);
 bool finalizeRound(qint64 roundId);                     // false if it was already final
 // The organizer's "Finish tournament": finalizes the last configured round and
@@ -72,7 +73,7 @@ bool finalizeRound(qint64 roundId);                     // false if it was alrea
 bool finishTournament(qint64 tournamentId);
 // resolution: "" | "KEEP" | "REBUILD".  Returns true if anything changed.
 bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId = 0, const QList<qint64> &eliminatedIds = {},
-                   const QString &resolution = {}, const QString &reason = {});
+                   const QString &resolution = {}, const QString &reason = {}, qint64 secondPlaceId = 0);
 
 void dropPlayer(qint64 tournamentId, qint64 playerId);
 void reinstatePlayer(qint64 tournamentId, qint64 playerId);
