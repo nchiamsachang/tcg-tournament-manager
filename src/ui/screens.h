@@ -2,8 +2,10 @@
 // or refreshed; none of them keeps tournament state of its own.
 #pragma once
 
+#include "commander_db.h"
 #include "dialogs.h"
 #include "main_window.h"
+#include "printing.h"
 #include "store.h"
 #include "theme.h"
 
@@ -121,8 +123,10 @@ public:
     void confirmStart() override;
     QSpinBox *roundsSpin = nullptr;
     QComboBox *drawCombo = nullptr, *shortCombo = nullptr;
+    QCheckBox *finalCheck = nullptr;        // "Add a top-four final"; hidden for events with earlier rules
     QLabel *recLabel = nullptr, *warnLabel = nullptr;
     QLabel *roundsHint = nullptr, *drawHint = nullptr, *shortHint = nullptr;    // a few words on each setting
+    QLabel *finalHint = nullptr, *scoringLabel = nullptr;
     QPushButton *resetBtn = nullptr;
 
 protected:
@@ -253,18 +257,22 @@ private:
 };
 
 // Pick one winner or a draw (ticking anyone already eliminated).  Used for draws and corrections.
+// scoring: the event awards points for a clear second place, so "no clear second" is a choice
+// of its own; decide: a finalized round, where not recording it is no longer allowed.
 class ResultDialog : public QDialog {
     Q_OBJECT
 public:
     ResultDialog(QWidget *parent, const QVariantMap &pod, const QString &title, const QString &drawPolicy,
-                 bool startAsDraw = false, bool askReason = false);
+                 bool startAsDraw = false, bool askReason = false, bool scoring = false, bool decide = false);
     QString outcome() const;
     qint64 winner() const;
     QList<qint64> eliminated() const;
     QString reason() const;
-    qint64 secondPlace() const;         // 0 when not recorded, and always for a draw
+    cdb::SecondPlace secondPlace() const;     // never recorded for a draw
     QComboBox *outcomeCombo = nullptr;
     QComboBox *secondCombo = nullptr;
+    // combo data for the two decisions that are not a player
+    static constexpr qint64 NOT_RECORDED = 0, NO_CLEAR_SECOND = -1;
 
 private:
     QWidget *elimBox_ = nullptr;
@@ -280,7 +288,11 @@ public:
     CommanderEventScreen(MainWindow *mw, qint64 tournamentId, int viewRound = 0);
     void refresh();
     void report(const QVariantMap &pod, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminated,
-                qint64 secondPlaceId = 0);
+                const cdb::SecondPlace &second = {});
+    void createFinal();
+    void recordElimination();
+    void undoElimination();
+    void recordFinal(bool correction);
     void finalizeRound(const QVariantMap &round);
     void finish(const QVariantMap &round);
     void publish(int expectedRound);
@@ -294,14 +306,19 @@ public:
 protected:
     void reflow() override;
 
+    static constexpr int FINAL_VIEW = -1;   // view_ for the top-four final
+
 private:
     QVariantMap currentRound() const;       // empty when no round exists
+    bool showingFinal() const;
+    void buildFinalCreate();
+    void buildFinal();
     void buildStrip();
     QPushButton *chipButton(const QString &text, bool selected, const QString &color, bool enabled);
     QWidget *banner(const QString &text, const QString &color, const QString &icon = {});
     void buildLegacyNotice();
     void buildRound(const QVariantMap &round);
-    QWidget *podCard(const QVariantMap &pod, const QVariantMap &round, const QHash<qint64, int> &points);
+    QWidget *podCard(const QVariantMap &pod, const QVariantMap &round, const QHash<qint64, double> &points);
     void fillGrid(QGridLayout *grid, const QList<QWidget *> &cards);
     template <typename F> void guard(F fn, const QString &title);
     template <typename F> void completeWith(F fn);
@@ -320,16 +337,41 @@ private:
     QList<QPair<QPointer<QGridLayout>, QList<QWidget *>>> grids_;
 };
 
+// the places and result of a top-four final, one choice per finalist: won, out in the first,
+// second or third group, or still in at the end.  it shows the four places the choice gives
+// before anything is saved.
+class FinalResultDialog : public QDialog {
+    Q_OBJECT
+public:
+    FinalResultDialog(QWidget *parent, qint64 tournamentId, const QVariantMap &final, bool correction);
+    QList<QList<qint64>> groups() const;
+    QString outcome() const;                // WIN or NO_WINNER
+    qint64 winner() const;
+    QString reason() const;
+    QHash<qint64, QComboBox *> choices;     // by player id: WIN, OUT1, OUT2, OUT3 or IN
+    QLabel *preview = nullptr, *problem = nullptr;
+    QPushButton *confirmBtn = nullptr;
+
+private:
+    void update();
+    qint64 tournamentId_;
+    QList<qint64> seeds_;
+    QLineEdit *reason_ = nullptr;
+};
+
 class CommanderStandingsScreen : public T::Screen {
     Q_OBJECT
 public:
     CommanderStandingsScreen(MainWindow *mw, qint64 tournamentId);
     QVariantMap state;
-    QVariantList rows;                      // each row gains "place"
+    QVariantList rows;                      // each row gains "place" and "note"
+    printing::Doc pdfDoc() const;           // what Save PDF writes
 
 private:
-    QWidget *standingRow(const QVariantMap &r, const QHash<qint64, int> &seeds, bool last);
+    QWidget *standingRow(const QVariantMap &r, bool last);
     void exportCsv();
+    void savePdf();
+    QList<QPair<QString, int>> cols_;      // heading and width; 0 is the stretching player column
     MainWindow *mw_;
     qint64 tournamentId_;
 };

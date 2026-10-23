@@ -16,7 +16,17 @@ static const char *DB_NOW = "(julianday('now') - 2440587.5) * 86400.0";
 
 static QString tableFor(Kind kind)
 {
-    return kind == Kind::Commander ? "commander_rounds" : "rounds";
+    return kind == Kind::Commander ? "commander_rounds" : kind == Kind::CommanderFinal ? "commander_finals" : "rounds";
+}
+
+static QString keyFor(Kind kind)
+{
+    return kind == Kind::CommanderFinal ? "final_id" : "round_id";
+}
+
+static QString kindName(Kind kind)
+{
+    return kind == Kind::Commander ? "commander" : kind == Kind::CommanderFinal ? "commander-final" : "one-on-one";
 }
 
 static double localNow()
@@ -64,8 +74,8 @@ Timer get(Kind kind, qint64 roundId)
 {
     const Row row = db::one(
         QStringLiteral("SELECT r.timer_state, r.timer_elapsed_secs, r.timer_started_at, t.round_time_mins, t.status, %1 AS now "
-                       "FROM %2 r JOIN tournaments t ON t.tournament_id = r.tournament_id WHERE r.round_id = ?")
-            .arg(DB_NOW, tableFor(kind)),
+                       "FROM %2 r JOIN tournaments t ON t.tournament_id = r.tournament_id WHERE r.%3 = ?")
+            .arg(DB_NOW, tableFor(kind), keyFor(kind)),
         {roundId});
     Timer t;
     if (row.isEmpty())
@@ -95,7 +105,7 @@ enum class Change { Start, Pause, Reset };
 static Timer change(Kind kind, qint64 roundId, Change what)
 {
     applog::Action log(what == Change::Start ? "clock.start" : what == Change::Pause ? "clock.pause" : "clock.reset",
-                       {{"kind", kind == Kind::Commander ? "commander" : "one-on-one"}, {"round", roundId}});
+                       {{"kind", kindName(kind)}, {kind == Kind::CommanderFinal ? "final" : "round", roundId}});
     db::Tx tx;
     Timer t = get(kind, roundId);
     if (!t.valid || t.closed)
@@ -123,7 +133,7 @@ static Timer change(Kind kind, qint64 roundId, Change what)
         break;
     }
     db::exec(QStringLiteral("UPDATE %1 SET timer_state = ?, timer_elapsed_secs = ?, timer_started_at = ? "
-                            "WHERE round_id = ?").arg(tableFor(kind)),
+                            "WHERE %2 = ?").arg(tableFor(kind), keyFor(kind)),
              {stateText(t.state), t.elapsed, t.hasStart ? QVariant(t.startedAt) : QVariant(), roundId});
     tx.commit();
     return t;

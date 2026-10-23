@@ -443,7 +443,7 @@ QWidget *HubScreen::tournamentRow(const db::Row &t)
         clock->addWidget(c.caption);
         clock->addStretch();
         sl->addLayout(clock);
-        sl->addWidget(T::pill("Round in progress", T::LIVE), 0, Qt::AlignLeft);
+        sl->addWidget(T::pill(round.finalRound ? "Final in progress" : "Round in progress", T::LIVE), 0, Qt::AlignLeft);
     } else if (inProgress) {
         sl->addWidget(T::pill(round.needsFinish ? "Needs finishing" : "Between rounds", T::PURPLE_LT),
                       0, Qt::AlignLeft);

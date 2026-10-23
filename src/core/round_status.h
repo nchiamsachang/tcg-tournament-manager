@@ -14,6 +14,7 @@ struct RoundStatus {
     int roundNumber = 1;
     int totalRounds = 0;        // the configured number of rounds, which is the whole tournament
     bool needsFinish = false;   // every round is played but the event was never closed (earlier-version playoffs)
+    bool finalRound = false;    // a Commander top-four final: roundId is the final's id and kind is CommanderFinal
     bool terminated = false;    // ended early: nothing is being played and no clock applies
 };
 

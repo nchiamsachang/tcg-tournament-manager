@@ -37,7 +37,13 @@ Commander events work the same way and already did: `cdb::reportPodResult`,
 `clearPodResult`, `correctResult`, `finalizeRound` and `finishTournament` each
 own one transaction that covers the seats, the pod, the audit entry, the
 standings kept with the registrations and, on the last round, the placings and
-completed status.
+completed status. The top-four final follows the same rule: `cdb::createFinal`
+(the final, its players and seeds, the audit entry), `saveFinalEliminations` (the
+groups and the audit entry) and `confirmFinal` (the places, the outcome, the audit
+entry, the placings and the completed status) each own one transaction. A correction
+that discards a final that has not begun does so inside `correctResult`'s
+transaction. Screens ask their questions before calling these, never while a change
+is open.
 
 Things worth knowing:
 

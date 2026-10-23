@@ -14,7 +14,7 @@
 
 namespace cmdr {
 
-const char *const RULES_VERSION = "commander-rules-3";
+const char *const RULES_VERSION = "commander-rules-4";
 const char *const PAIRING_ALGORITHM = "cmdr-swiss-2";
 const char *const LEGACY_THREE_POD_PLACEMENT = "BEST_MATCH";
 
@@ -27,6 +27,8 @@ QVariantMap defaultSettings()
         {"loss_points", 0},
         {"draw_points", 1},
         {"bye_points", 5},
+        // club policy from commander-rules-4: a clear second place in a won pod; still a loss
+        {"second_place_points", 2.5},
         // ELIMINATED_LOSE: players already eliminated when the game is drawn take a loss.
         // ALL_DRAW: everyone seated in the pod receives the draw.
         {"draw_policy", "ELIMINATED_LOSE"},
@@ -51,6 +53,22 @@ bool isDrawPolicy(const QString &s)
 bool isThreePodPlacement(const QString &s)
 {
     return s == "LOW" || s == "HIGH" || s == "BEST_MATCH";
+}
+
+bool scoresSecondPlace(const QVariantMap &settings)
+{
+    return settings.value("second_place_points").toDouble() > 0;
+}
+
+QString pointsText(double points)
+{
+    return QString::number(points, 'f', std::fmod(points, 1.0) == 0.0 ? 0 : 1);
+}
+
+// points as whole half points, so sums of 2.5 stay exact
+static int halves(const QVariant &points)
+{
+    return int(std::lround(points.toDouble() * 2));
 }
 
 int recommendedRounds(int n)
@@ -140,7 +158,7 @@ QMap<qint64, SeatResult> seatResults(const QList<qint64> &playerIds, const QStri
 namespace {
 struct Record {
     qint64 id = 0;
-    int points = 0, wins = 0, losses = 0, draws = 0, byes = 0, played = 0;
+    int halves = 0, wins = 0, losses = 0, draws = 0, byes = 0, seconds = 0, played = 0;
     QList<qint64> opponents;
     double mw = 0, omw = 0;
     qint64 key = 0;
@@ -151,10 +169,11 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
                               qint64 baseSeed)
 {
     const double floor = settings.value("tiebreak_floor").toDouble();
-    const int winPts = settings.value("win_points").toInt();
-    const int lossPts = settings.value("loss_points").toInt();
-    const int drawPts = settings.value("draw_points").toInt();
-    const int byePts = settings.value("bye_points").toInt();
+    const int winPts = halves(settings.value("win_points"));
+    const int lossPts = halves(settings.value("loss_points"));
+    const int drawPts = halves(settings.value("draw_points"));
+    const int byePts = halves(settings.value("bye_points"));
+    const int secondPts = halves(settings.value("second_place_points"));
     const int phantom = settings.value("bye_phantom_opponents").toInt();
 
     QList<Record> recs;
@@ -173,6 +192,7 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
             if (!pod.value("reported").toBool())
                 continue;
             const QVariantList seats = pod.value("seats").toList();
+            const qint64 second = secondPts ? pod.value("second_place_player_id").toLongLong() : 0;
             QList<qint64> ids;
             for (const QVariant &s : seats)
                 ids << s.toMap().value("player_id").toLongLong();
@@ -184,9 +204,10 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
                     continue;
                 Record &r = recs[*it];
                 const QString res = s.value("result").toString();
-                if (res == "WIN") { r.points += winPts; r.wins++; }
-                else if (res == "LOSS") { r.points += lossPts; r.losses++; }
-                else { r.points += drawPts; r.draws++; }
+                if (res == "WIN") { r.halves += winPts; r.wins++; }
+                else if (res == "LOSS") { r.halves += lossPts; r.losses++; }
+                else { r.halves += drawPts; r.draws++; }
+                if (second && pid == second && res == "LOSS") { r.halves += secondPts; r.seconds++; }
                 r.played++;
                 for (qint64 o : ids)
                     if (o != pid)
@@ -197,7 +218,7 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
             auto it = at.constFind(b.toLongLong());
             if (it != at.constEnd()) {
                 Record &r = recs[*it];
-                r.points += byePts;
+                r.halves += byePts;
                 r.byes++;
                 r.played++;
             }
@@ -209,7 +230,7 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
         if (it == at.constEnd() || !recs[*it].played)
             return floor;
         const Record &r = recs[*it];
-        return std::max(floor, std::min(1.0, double(r.points) / (winPts * r.played)));
+        return std::max(floor, std::min(1.0, double(r.halves) / (double(winPts) * r.played)));
     };
 
     for (Record &r : recs) {
@@ -223,17 +244,93 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
     }
 
     std::stable_sort(recs.begin(), recs.end(), [](const Record &a, const Record &b) {
-        return std::make_tuple(-a.points, -a.omw, -a.mw, a.key) < std::make_tuple(-b.points, -b.omw, -b.mw, b.key);
+        return std::make_tuple(-a.halves, -a.omw, -a.mw, a.key) < std::make_tuple(-b.halves, -b.omw, -b.mw, b.key);
     });
 
     QVariantList out;
     for (int i = 0; i < recs.size(); ++i) {
         const Record &r = recs[i];
-        out << QVariantMap{{"player_id", r.id}, {"points", r.points}, {"wins", r.wins}, {"losses", r.losses},
-                           {"draws", r.draws}, {"byes", r.byes}, {"played", r.played}, {"mw_pct", r.mw},
+        out << QVariantMap{{"player_id", r.id}, {"points", r.halves / 2.0}, {"wins", r.wins}, {"losses", r.losses},
+                           {"draws", r.draws}, {"byes", r.byes}, {"seconds", r.seconds}, {"played", r.played}, {"mw_pct", r.mw},
                            {"omw_pct", r.omw}, {"random_key", r.key}, {"standing", i + 1}};
     }
     return out;
+}
+
+static void checkFinalGroups(const QList<qint64> &seeds, const QList<QList<qint64>> &groups)
+{
+    if (seeds.size() != 4 || QSet<qint64>(seeds.begin(), seeds.end()).size() != 4)
+        throw std::invalid_argument("A final has exactly four different players.");
+    QSet<qint64> seen;
+    for (const QList<qint64> &group : groups) {
+        if (group.isEmpty())
+            throw std::invalid_argument("An elimination group needs at least one player.");
+        for (qint64 p : group) {
+            if (!seeds.contains(p))
+                throw std::invalid_argument("Only the four finalists can be recorded in the final.");
+            if (seen.contains(p))
+                throw std::invalid_argument("A player can only be eliminated once.");
+            seen.insert(p);
+        }
+    }
+    if (seen.size() > 3)
+        throw std::invalid_argument("At most three players can be eliminated: the last player left wins the final.");
+}
+
+void checkFinalProgress(const QList<qint64> &seeds, const QList<QList<qint64>> &groups)
+{
+    checkFinalGroups(seeds, groups);
+}
+
+QVariantList placeFinal(const QList<qint64> &seeds, const QList<QList<qint64>> &groups, const QString &outcome,
+                        qint64 winnerId)
+{
+    checkFinalGroups(seeds, groups);
+    QSet<qint64> out;
+    for (const QList<qint64> &group : groups)
+        for (qint64 p : group)
+            out.insert(p);
+    QList<qint64> still;
+    for (qint64 p : seeds)
+        if (!out.contains(p))
+            still << p;
+    if (outcome == "WIN") {
+        if (!seeds.contains(winnerId))
+            throw std::invalid_argument("The winner must be one of the four finalists.");
+        if (out.contains(winnerId))
+            throw std::invalid_argument("The winner cannot also be recorded as eliminated.");
+        if (still.size() != 1)
+            throw std::invalid_argument("Every player except the winner must be in an elimination group.");
+    } else if (outcome == "NO_WINNER") {
+        if (winnerId)
+            throw std::invalid_argument("A final without a winner cannot also have a winner.");
+        if (still.size() < 2)
+            throw std::invalid_argument("A final with one player left has a winner: record that player as the winner.");
+    } else {
+        throw std::invalid_argument(QStringLiteral("Unknown final outcome: '%1'").arg(outcome).toStdString());
+    }
+
+    const auto bySeed = [&seeds](QList<qint64> players) {
+        std::sort(players.begin(), players.end(), [&seeds](qint64 a, qint64 b) { return seeds.indexOf(a) < seeds.indexOf(b); });
+        return players;
+    };
+    QVariantList placed;
+    int bottom = 4;     // the lowest place not yet given
+    for (const QList<qint64> &group : groups) {
+        const QList<qint64> ordered = bySeed(group);
+        const int top = bottom - int(ordered.size()) + 1;
+        for (int i = 0; i < ordered.size(); ++i)
+            placed << QVariantMap{{"player_id", ordered[i]}, {"place", top + i}, {"basis", "ELIMINATION"}};
+        bottom = top - 1;
+    }
+    const QList<qint64> rest = bySeed(still);
+    for (int i = 0; i < rest.size(); ++i)
+        placed << QVariantMap{{"player_id", rest[i]}, {"place", i + 1},
+                              {"basis", outcome == "WIN" ? "WINNER" : "QUALIFYING_RANK"}};
+    std::sort(placed.begin(), placed.end(), [](const QVariant &a, const QVariant &b) {
+        return a.toMap().value("place").toInt() < b.toMap().value("place").toInt();
+    });
+    return placed;
 }
 
 QVariantMap pairingInputs(const QVariantList &activeStandings, const QVariantList &rounds, int roundNumber,
@@ -280,7 +377,7 @@ QVariantMap pairingInputs(const QVariantList &activeStandings, const QVariantLis
         QVariantList seatCounts;
         for (int c : seats.value(id, {0, 0, 0, 0}))
             seatCounts << c;
-        players << QVariantMap{{"player_id", id}, {"points", r.value("points").toInt()}, {"rank", i + 1},
+        players << QVariantMap{{"player_id", id}, {"points", r.value("points").toDouble()}, {"rank", i + 1},
                                {"byes", byes.value(id)}, {"three_pods", threes.value(id)}, {"seats", seatCounts}};
     }
     QVariantList met;
@@ -391,9 +488,11 @@ const int RESTARTS_LARGE = 4;
 const int DEFAULT_PLACEMENT_WEIGHT = 200;
 
 namespace {
+// points are whole or half points; with whole points every sum below equals the integer one
 struct Info {
     qint64 id = 0;
-    int points = 0, rank = 0, byes = 0, threePods = 0;
+    double points = 0;
+    int rank = 0, byes = 0, threePods = 0;
     int seats[4] = {0, 0, 0, 0};
 };
 using Pod = std::vector<int>;       // indexes into the player table
@@ -415,7 +514,7 @@ QVariantMap pairRound(const QVariantMap &inputs, qint64 seed)
         const QVariantMap p = pv.toMap();
         Info i;
         i.id = p.value("player_id").toLongLong();
-        i.points = p.value("points").toInt();
+        i.points = p.value("points").toDouble();
         i.rank = p.value("rank").toInt();
         i.byes = p.value("byes").toInt();
         i.threePods = p.value("three_pods").toInt();
@@ -470,20 +569,20 @@ QVariantMap pairRound(const QVariantMap &inputs, qint64 seed)
     // sharing short pods fairly still work inside the group.
     const QString placement = inputs.value("three_pod_placement", LEGACY_THREE_POD_PLACEMENT).toString();
     const int shortSeats = 3 * int(std::count(sizes.begin(), sizes.end(), 3));
-    std::vector<int> misplaced;
+    std::vector<double> misplaced;
     if ((placement == "LOW" || placement == "HIGH") && shortSeats > 0 && shortSeats < int(order.size())) {
-        std::vector<int> byPoints;
+        std::vector<double> byPoints;
         for (int p : order)
             byPoints.push_back(info[p].points);
         if (placement == "HIGH")
-            std::sort(byPoints.begin(), byPoints.end(), std::greater<int>());
+            std::sort(byPoints.begin(), byPoints.end(), std::greater<double>());
         else
             std::sort(byPoints.begin(), byPoints.end());
-        const int cutoff = byPoints[shortSeats - 1];
-        misplaced.assign(count, 0);
+        const double cutoff = byPoints[shortSeats - 1];
+        misplaced.assign(count, 0.0);
         for (int p : order) {
-            const int gap = info[p].points - cutoff;
-            misplaced[p] = std::max(0, placement == "LOW" ? gap : -gap);
+            const double gap = info[p].points - cutoff;
+            misplaced[p] = std::max(0.0, placement == "LOW" ? gap : -gap);
         }
     }
 
@@ -492,7 +591,7 @@ QVariantMap pairRound(const QVariantMap &inputs, qint64 seed)
         for (size_t i = 0; i < members.size(); ++i) {
             for (size_t j = i + 1; j < members.size(); ++j) {
                 const int a = members[i], b = members[j];
-                const int d = info[a].points - info[b].points;
+                const double d = info[a].points - info[b].points;
                 const int m = met[size_t(a) * count + b];
                 c += wScore * d * d + wRematch * m * m;
             }
@@ -502,7 +601,7 @@ QVariantMap pairRound(const QVariantMap &inputs, qint64 seed)
             for (int p : members) threes += info[p].threePods;
             c += wThree * threes;
             if (!misplaced.empty()) {
-                int wrong = 0;
+                double wrong = 0;
                 for (int p : members) wrong += misplaced[p];
                 c += wPlace * wrong;
             }
@@ -666,13 +765,14 @@ QVariantMap pairRound(const QVariantMap &inputs, qint64 seed)
     }
 
     auto podRank = [&](const Pod &pod) {
-        int sum = 0, top = info[pod[0]].points, rank = info[pod[0]].rank;
+        double sum = 0, top = info[pod[0]].points;
+        int rank = info[pod[0]].rank;
         for (int p : pod) {
             sum += info[p].points;
             top = std::max(top, info[p].points);
             rank = std::min(rank, info[p].rank);
         }
-        return std::make_tuple(-double(sum) / double(pod.size()), -top, rank);
+        return std::make_tuple(-sum / double(pod.size()), -top, rank);
     };
     std::stable_sort(seated.begin(), seated.end(), [&](const Pod &a, const Pod &b) { return podRank(a) < podRank(b); });
 
@@ -690,7 +790,7 @@ QVariantMap pairRound(const QVariantMap &inputs, qint64 seed)
             for (size_t j = i + 1; j < pod.size(); ++j) {
                 if (met[size_t(pod[i]) * count + pod[j]])
                     ++rematchPairs;
-                const int d = info[pod[i]].points - info[pod[j]].points;
+                const double d = info[pod[i]].points - info[pod[j]].points;
                 scoreCost += wScore * d * d;
             }
         }

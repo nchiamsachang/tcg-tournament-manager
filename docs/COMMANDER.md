@@ -15,9 +15,11 @@ References: [TopDeck multiplayer addendum](https://topdeck.gg/mtr-ipg-addendum),
 | Rule | Source |
 |---|---|
 | Win 5, loss 0, draw 1; a bye counts as a win | TopDeck addendum |
+| Clear second place 2.5 (still a loss), with "no clear second" when the last players went out together | **Custom** club policy (rules `commander-rules-4`) |
+| Optional top-four final pod; its placing order and the drawn-final fallback | **Custom** club policy; TopDeck seats a top cut in seed order, which the final follows |
 | Tiebreak floor of 20%; a bye adds 3 opponents at 20% | TopDeck addendum |
 | Recommended number of rounds by player count | TopDeck addendum |
-| The configured rounds are the whole event: no playoff, top cut or final | **Custom** (TopDeck events normally cut to a playoff) |
+| The configured rounds are the whole event, plus one top-four final only when the organizer chose it before the start | **Custom** (TopDeck events normally cut to a playoff) |
 | Any number of three-player pods so everyone plays | **Custom** (TopDeck allows at most one per round) |
 | Three-player pods go to the lowest standings by default | **Custom** default; TopDeck's software offers low or high as an option |
 | How match-win % is computed and the tiebreaker order | **Custom** reading — the addendum does not spell it out |
@@ -36,10 +38,11 @@ with the most four-player pods. Pods are only ever three or four players.
 
 ## Rounds
 
-**The configured number of rounds is the total.** A 3-round event is Round 1,
-Round 2 and Round 3; it ends when Round 3 is finalized and the standings after
-that round are the final placings. There is no playoff, top cut, semifinal or
-separate final, and nothing can be created after the last round.
+**The configured number of rounds is the total of qualifying rounds.** A 3-round
+event is Round 1, Round 2 and Round 3. Without a final it ends when Round 3 is
+finalized, and the standings after that round are the final placings. With the
+optional top-four final (see below) exactly one final pod follows; nothing else can
+be created after the last round, and there is no semifinal or other playoff.
 
 The number is recommended from the checked-in count when registration closes;
 the organizer can override it before starting. It freezes when the event
@@ -115,16 +118,30 @@ One game per pod. A pod is *pending* until reported, then either:
 Each player's own result is stored, so standings never infer anything from the
 pod-level outcome. A bye is worth 5.
 
-**Second place (optional).** For a pod with a winner the organizer may name one
-other player of that pod as second, for recognition only. It is saved by player
-ID in `commander_pods.second_place_player_id` (migration 7; results saved before
-it have none). It earns no points, is not a tiebreaker and is not a pairing input:
-that player's result is still a loss. The core refuses it for a draw, an
-unreported pod, a player on a bye or in another pod, and the winner. When several
-players were knocked out together it is left unrecorded. Clearing a result or
-changing it to a draw removes it, and it is saved, corrected and audited together
-with the result. Changing only the second place of a finalized round asks no
-Keep or Rebuild question and leaves a finished event's final standings as they are.
+**Second place (club rules `commander-rules-4`, events created from this version).**
+A won pod has a second-place decision, saved in `commander_pods.second_place_status`:
+
+| State | Meaning | Points |
+|---|---|---|
+| `PENDING` | not recorded yet (what the quick **Wins** button leaves) | none yet; the pod and the round say the points are provisional |
+| `PLAYER` | `second_place_player_id` names another player of the pod | 2.5, and the result is still a loss |
+| `NONE` | confirmed: no clear second (the last players went out at the same moment) | none |
+
+A drawn or unreported pod, and a bye, has no second place (the state is empty). The
+core refuses the winner, a player of another pod, a player on a bye and anyone not
+seated in the pod. A round cannot be finalized while any of its won pods is
+`PENDING` (checked in the core and by the trigger `commander_round_finalized_complete`),
+and a correction in a finalized round must decide it. Points are added up as whole
+half points, so 2.5 is never rounded; they are shown as 5 or 2.5. A second place
+counts in match points and therefore in MW% and OMW% (both are points ÷ 5 per round),
+but there is no second-place-count tiebreaker. Changing a second place is a score
+change like any other: in a finalized round with later rounds it asks Keep or
+Rebuild, and a finished event's placings follow it.
+
+**Events created by an earlier version** (`commander-rules-3`) keep their rules: a
+second place there is recognition only (no points), "no clear second" is not a
+separate state, and its state column stays empty. Nothing is converted or awarded
+afterwards. They also cannot add a final.
 
 ## Standings and tiebreakers
 
@@ -137,12 +154,62 @@ Always recomputed from saved results.
 4. A random order fixed by the event seed.
 
 Every percentage has a floor of 20%. Dropped players stay in the standings,
-marked.
+marked. MW% and OMW% are point-based: a clear second place counts as 2.5 of 5, not
+as a win.
+
+## Top-four final (optional)
+
+Chosen with **Add a top-four final** before the start (`commander_events.final_enabled`,
+fixed once the event starts, also by the trigger `commander_final_enabled_frozen`).
+Starting needs at least four checked-in players.
+
+1. The qualifying rounds are played and finalized as usual. Finalizing the last one
+   does not complete the event.
+2. **Create final** shows the four best players in the qualifying standings who are
+   checked in and have not dropped, with their seeds, and asks for confirmation.
+   Saving checks again that they are still the qualifiers. The standings are saved
+   with the final (`commander_finals.qualifying_json`) and the players, seeds and
+   seats in `commander_final_players`; seats follow the seeds, seed 1 first. One
+   final per event (unique per tournament, and the trigger `commander_final_allowed`);
+   a repeated request returns the same final.
+3. Eliminations are recorded as they happen, each group being the players
+   eliminated at the same moment. They are saved as they are recorded.
+4. **Record result** sets the ending, a winner or no winner, shows the four places
+   and confirms them. Confirming completes the event.
+
+Places: the first group out takes the lowest places, the next group the places above,
+and so on; the winner is 1st. Inside a group the better qualifying seed takes the better
+place, and only there: a better seed never moves above a player who stayed in longer.
+With no winner (a drawn final, or one ended without a winner under the club's time
+procedure), the players still in take the top places in seed order, marked
+`QUALIFYING_RANK` ("by seed"); nobody is credited with a game win and no points are
+added. Everyone else follows in qualifying order. The final never changes qualifying
+points, percentages, second places or pairing inputs, and the earlier rule that puts
+the best player who has not dropped first does not apply to an event with a final.
+
+If fewer than four eligible players are left when the final is to be created, the app
+says so and offers what already exists: undo a drop made after the last round, or end
+the tournament early. It never fills the final with someone else, drops the option or
+names a champion by itself.
+
+**Corrections around the final.** Its seeds are fixed. A qualifying correction that
+leaves the four finalists and their seeds as they were is saved, and the final stays.
+One that would change them is refused unless the final has not begun (no elimination
+or result saved, clock never started) and the organizer chooses to discard it
+(`REBUILD_FINAL`, audited as `FINAL_DISCARDED`); the final is then created again.
+Once the final has begun, such a correction is refused. A confirmed final can be
+corrected (`FINAL_CORRECTED`, with the earlier places).
+
+**Drops during the final.** A finalist cannot be dropped while the final is being
+played, because the club's rules do not say how a finalist who leaves is placed; the
+organizer records the final as it was played or ends the tournament early. Other
+players can still drop; it changes nothing in the final. A drop cannot be undone once
+the final exists.
 
 ## Finishing
 
-When every pod of the last configured round has a result, the round screen
-offers **Finish tournament**. On confirmation, in one transaction, the app:
+Without a final: when every pod of the last configured round has a result, the
+round screen offers **Finish tournament**. On confirmation, in one transaction, the app:
 
 1. finalizes that round;
 2. recomputes the standings with the event's scoring and tiebreakers;
@@ -153,7 +220,8 @@ offers **Finish tournament**. On confirmation, in one transaction, the app:
 
 The first place goes to the best-placed player who has not dropped; everyone
 else follows in standings order. Finalizing the last round through any other
-path does the same thing. Finishing twice changes nothing.
+path does the same thing. Finishing twice changes nothing. With a final, confirming
+the final does the same, with the final's places for the four finalists.
 
 ## Workflow and safeguards
 
@@ -228,6 +296,14 @@ Migrations are numbered, additive and recorded in `schema_migrations`.
 - `3 commander_fixed_rounds` adds `legacy_playoff`, `final_standings_json` and
   `completed_at` to `commander_events`, flags the events described above and
   adds the three triggers that cap the number of rounds.
+- `7 commander_second_place` adds `commander_pods.second_place_player_id`.
+- `8 commander_scored_second_and_final` adds `commander_pods.second_place_status`,
+  `commander_events.final_enabled`, the tables `commander_finals` and
+  `commander_final_players`, and triggers that keep a second place inside a won pod,
+  stop a round being finalized with a result or second place to report, allow only
+  the one final of an event that chose it, fix its players and seeds, and refuse a
+  confirmed final without four places. Existing rows get no second-place state and
+  no final. Like every update it runs after a backup of the database.
 
 The columns `playoff_cut`, `recommended_cut`, `playoff_seeds_json` and the
 table `commander_advancements` remain only to hold what earlier events saved.
@@ -241,11 +317,13 @@ tests in `tests/test_core.cpp` and `tests/test_ui.cpp`.
 - The app is a single-user desktop program with a local SQLite file. There are
   no accounts, so "organizer" is whoever is at the keyboard and is the actor
   recorded in the audit log. Several windows on the same file are safe.
-- No standings PDF export on Commander screens yet (CSV export works). Pairing sheets and pod signs
-  print from the round's Print menu.
+- Standings can be saved as PDF or CSV. Pairing sheets and pod signs print from the
+  round's Print menu, also for the final pod.
 - Pairing uses local search, so for large fields it finds a good pairing, not a
   provably optimal one.
-- There is no playoff or top cut. An event that needs one has to be run as a
-  separate tournament.
+- The only cut is the optional top-four final. Larger cuts (Top 10, Top 16) are not
+  offered.
+- The final uses the tournament's round length for its clock. TopDeck's addendum
+  gives a top cut 180 minutes; the club has not set a separate final length.
 - A playoff that was part-way through when the app was upgraded cannot be
   resumed (see above).

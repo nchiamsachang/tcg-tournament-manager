@@ -14,6 +14,7 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <algorithm>
+#include <tuple>
 #include <memory>
 #include <random>
 
@@ -743,7 +744,8 @@ private slots:
             for (const QVariant &pv : rnd["pods"].toList()) {
                 const QVariantMap pod = pv.toMap();
                 cdb::reportPodResult(pod["pod_id"].toLongLong(), "WIN",
-                                     pod["seats"].toList()[0].toMap()["player_id"].toLongLong());
+                                     pod["seats"].toList()[0].toMap()["player_id"].toLongLong(), {}, cdb::NONE,
+                                     cdb::SecondPlace::noClearSecond());
             }
             cdb::finalizeRound(rnd["round_id"].toLongLong());
             if (r < rounds) {
@@ -753,6 +755,193 @@ private slots:
         }
         QCOMPARE(cdb::getRounds(tid).size(), rounds);
         QCOMPARE(cdb::getStandings(tid).size(), 10);        // dropped players stay in the standings
+    }
+
+    // commander-rules-4: win 5, clear second 2.5, other losses 0, draw 1, bye 5.  five players,
+    // three rounds of one pod and a bye:
+    //   R1  pod 1 2 3 4: P1 wins, P2 clear second          bye P5
+    //   R2  pod 2 3 4 5: drawn, nobody out                  bye P1
+    //   R3  pod 1 3 4 5: P3 wins, P1 clear second           bye P2
+    // points:  P1 5 + 5 + 2.5 = 12.5   P2 2.5 + 1 + 5 = 8.5   P3 0 + 1 + 5 = 6
+    //          P4 0 + 1 + 0 = 1        P5 5 + 1 + 0 = 6
+    // MW% = points / (5 x 3):  P1 0.833333  P2 0.566667  P3 0.4  P4 0.066667 -> floor 0.2  P5 0.4
+    // OMW% (each opponent once per shared pod, a bye adds three opponents at 0.2):
+    //   P1  2 3 4, 3 4 5, bye:  (0.566667 + 0.4 + 0.2 + 0.4 + 0.2 + 0.4 + 0.6) / 9 = 2.766667 / 9 = 0.307407
+    //   P2  1 3 4, 3 4 5, bye:  (0.833333 + 0.4 + 0.2 + 0.4 + 0.2 + 0.4 + 0.6) / 9 = 3.033333 / 9 = 0.337037
+    //   P3  1 2 4, 2 4 5, 1 4 5: (0.833333 + 0.566667 + 0.2 + 0.566667 + 0.2 + 0.4 + 0.833333 + 0.2 + 0.4) / 9 = 0.466667
+    //   P4  1 2 3, 2 3 5, 1 3 5: (0.833333 + 0.566667 + 0.4 + 0.566667 + 0.4 + 0.4 + 0.833333 + 0.4 + 0.4) / 9 = 0.533333
+    //   P5  bye, 2 3 4, 1 3 4:  (0.6 + 0.566667 + 0.4 + 0.2 + 0.833333 + 0.4 + 0.2) / 9 = 3.2 / 9 = 0.355556
+    // order: P1 12.5, P2 8.5, then P3 and P5 on 6 split by OMW (P3 first), then P4.
+    // with second place as recognition only (commander-rules-3) P1 has 10, P2 6, and P2 ties P3 and P5.
+    void commanderSecondPlacePointsMatchAHandWorkedExample()
+    {
+        const auto seat = [](qint64 player, int number, const char *result) {
+            return QVariantMap{{"player_id", player}, {"seat", number}, {"result", result}};
+        };
+        const auto pod = [](const QVariantList &seats, const QVariant &second) {
+            return QVariantMap{{"reported", true}, {"seats", seats}, {"second_place_player_id", second}};
+        };
+        const QVariantList rounds{
+            QVariantMap{{"pods", QVariantList{pod({seat(1, 1, "WIN"), seat(2, 2, "LOSS"), seat(3, 3, "LOSS"), seat(4, 4, "LOSS")}, 2)}},
+                        {"byes", QVariantList{5}}},
+            QVariantMap{{"pods", QVariantList{pod({seat(2, 1, "DRAW"), seat(3, 2, "DRAW"), seat(4, 3, "DRAW"), seat(5, 4, "DRAW")}, QVariant())}},
+                        {"byes", QVariantList{1}}},
+            QVariantMap{{"pods", QVariantList{pod({seat(1, 1, "LOSS"), seat(3, 2, "WIN"), seat(4, 3, "LOSS"), seat(5, 4, "LOSS")}, 1)}},
+                        {"byes", QVariantList{2}}},
+        };
+        const QVariantList table = cmdr::computeStandings({1, 2, 3, 4, 5}, rounds, cmdr::defaultSettings(), 7);
+        QHash<qint64, QVariantMap> t;
+        QList<qint64> order;
+        for (const QVariant &r : table) {
+            t.insert(r.toMap()["player_id"].toLongLong(), r.toMap());
+            order << r.toMap()["player_id"].toLongLong();
+        }
+        const auto check = [&](qint64 p, double points, int wins, int losses, int draws, int byes, int seconds, double mw, double omw) {
+            const QVariantMap r = t[p];
+            return r["points"].toDouble() == points && r["wins"].toInt() == wins && r["losses"].toInt() == losses
+                   && r["draws"].toInt() == draws && r["byes"].toInt() == byes && r["seconds"].toInt() == seconds
+                   && r["played"].toInt() == 3 && near(r["mw_pct"].toDouble(), mw) && near(r["omw_pct"].toDouble(), omw);
+        };
+        QVERIFY(check(1, 12.5, 1, 1, 0, 1, 1, 0.833333, 0.307407));
+        QVERIFY(check(2, 8.5, 0, 1, 1, 1, 1, 0.566667, 0.337037));
+        QVERIFY(check(3, 6, 1, 1, 1, 0, 0, 0.4, 0.466667));
+        QVERIFY(check(4, 1, 0, 2, 1, 0, 0, 0.2, 0.533333));
+        QVERIFY(check(5, 6, 0, 1, 1, 1, 0, 0.4, 0.355556));
+        QCOMPARE(order, (QList<qint64>{1, 2, 3, 5, 4}));
+
+        QVariantMap earlier = cmdr::defaultSettings();
+        earlier.remove("second_place_points");
+        QHash<qint64, double> recognition;
+        for (const QVariant &r : cmdr::computeStandings({1, 2, 3, 4, 5}, rounds, earlier, 7))
+            recognition.insert(r.toMap()["player_id"].toLongLong(), r.toMap()["points"].toDouble());
+        QCOMPARE(recognition[1], 10.0);
+        QCOMPARE(recognition[2], 6.0);
+        QVERIFY(!cmdr::scoresSecondPlace(earlier) && cmdr::scoresSecondPlace(cmdr::defaultSettings()));
+        // a second place is only scored for a player who lost in that pod
+        QVariantList odd = rounds;
+        QVariantMap r1 = odd[0].toMap();
+        r1["pods"] = QVariantList{pod({seat(1, 1, "WIN"), seat(2, 2, "LOSS"), seat(3, 3, "LOSS"), seat(4, 4, "LOSS")}, 1)};
+        odd[0] = r1;
+        for (const QVariant &r : cmdr::computeStandings({1, 2, 3, 4, 5}, odd, cmdr::defaultSettings(), 7))
+            if (r.toMap()["player_id"].toLongLong() == 1)
+                QCOMPARE(r.toMap()["points"].toDouble(), 12.5);
+    }
+
+    void pointsAreShownWholeOrWithOneHalf()
+    {
+        QCOMPARE(cmdr::pointsText(5), QString("5"));
+        QCOMPARE(cmdr::pointsText(2.5), QString("2.5"));
+        QCOMPARE(cmdr::pointsText(12.5), QString("12.5"));
+        QCOMPARE(cmdr::pointsText(0), QString("0"));
+        QCOMPARE(cmdr::pointsText(30), QString("30"));
+    }
+
+    // seven players: one pod of four and one of three.  points A 5, B 5, C 5, D 2.5, E 2, F 2,
+    // G 2.  with the three-player pod going to the lowest standings, its three seats belong to
+    // E, F and G (2 points each); D on 2.5 is above them.  D is given a low starting rank, so
+    // only reading 2.5 exactly moves D out of the short pod: read as 2, D would tie with
+    // E, F and G and stay where it started.
+    void pairingTreatsHalfPointsAsExactPoints()
+    {
+        QVariantList players;
+        // id, points, starting rank
+        const QList<std::tuple<int, double, int>> field{{1, 5, 1}, {2, 5, 2}, {3, 5, 3}, {5, 2, 4}, {6, 2, 5}, {4, 2.5, 6}, {7, 2, 7}};
+        for (const auto &[id, points, rank] : field)
+            players << QVariantMap{{"player_id", id}, {"points", points}, {"rank", rank}, {"byes", 0},
+                                   {"three_pods", 0}, {"seats", QVariantList{0, 0, 0, 0}}};
+        const QVariantMap inputs{{"round_number", 2}, {"weights", cmdr::defaultSettings()["pairing"]},
+                                 {"three_pod_placement", "LOW"}, {"players", players}, {"meetings", QVariantList()}};
+        for (qint64 seed = 1; seed <= 12; ++seed) {
+            const QVariantMap result = cmdr::pairRound(inputs, seed);
+            for (const QVariant &pv : result["pods"].toList()) {
+                QSet<qint64> members;
+                for (const QVariant &p : pv.toList())
+                    members.insert(p.toLongLong());
+                if (members.size() == 3)
+                    QCOMPARE(members, (QSet<qint64>{5, 6, 7}));
+            }
+            // score cost, worked out here: weight 4 x three pairs of 5 against 2.5, each 2.5 squared
+            QCOMPARE(result["cost"].toMap()["score"].toDouble(), 4 * 3 * 6.25);
+        }
+    }
+
+    // places in a top-four final.  seeds: A 1, B 2, C 3, D 4 (player ids 11 to 14).
+    void topFourFinalPlacesFollowEliminationOrderThenSeeds_data()
+    {
+        QTest::addColumn<QString>("groups");          // "D|B C": D out first, then B and C together
+        QTest::addColumn<QString>("outcome");
+        QTest::addColumn<QString>("winner");
+        QTest::addColumn<QString>("places");          // first to fourth
+        QTest::addColumn<QString>("bases");           // W winner, E elimination order, Q qualifying seed
+
+        // the club's example: Dan out first, Ben and Chris together, Alex wins; Ben has the better seed
+        QTest::newRow("agreed example") << "D|B C" << "WIN" << "A" << "A B C D" << "W E E E";
+        QTest::newRow("one at a time") << "D|C|B" << "WIN" << "A" << "A B C D" << "W E E E";
+        QTest::newRow("the best seed out first") << "A|B C" << "WIN" << "D" << "D B C A" << "W E E E";
+        QTest::newRow("all three opponents together") << "A B D" << "WIN" << "C" << "C A B D" << "W E E E";
+        QTest::newRow("a group of two out first") << "D B|C" << "WIN" << "A" << "A C B D" << "W E E E";
+        QTest::newRow("drawn, all four in") << "" << "NO_WINNER" << "" << "A B C D" << "Q Q Q Q";
+        QTest::newRow("drawn, three in") << "B" << "NO_WINNER" << "" << "A C D B" << "Q Q Q E";
+        QTest::newRow("drawn, two in") << "C|A" << "NO_WINNER" << "" << "B D A C" << "Q Q E E";
+        QTest::newRow("drawn, two in, out together") << "A C" << "NO_WINNER" << "" << "B D A C" << "Q Q E E";
+    }
+
+    void topFourFinalPlacesFollowEliminationOrderThenSeeds()
+    {
+        QFETCH(QString, groups);
+        QFETCH(QString, outcome);
+        QFETCH(QString, winner);
+        QFETCH(QString, places);
+        QFETCH(QString, bases);
+        const auto id = [](const QString &letter) { return qint64(11 + letter.at(0).unicode() - 'A'); };
+        QList<QList<qint64>> g;
+        for (const QString &group : groups.split('|', Qt::SkipEmptyParts)) {
+            QList<qint64> one;
+            for (const QString &p : group.split(' ', Qt::SkipEmptyParts))
+                one << id(p);
+            g << one;
+        }
+        const QVariantList placed = cmdr::placeFinal({11, 12, 13, 14}, g, outcome, winner.isEmpty() ? 0 : id(winner));
+        QStringList gotPlaces, gotBases;
+        for (int i = 0; i < placed.size(); ++i) {
+            const QVariantMap p = placed[i].toMap();
+            QCOMPARE(p["place"].toInt(), i + 1);
+            gotPlaces << QString(QChar('A' + int(p["player_id"].toLongLong() - 11)));
+            gotBases << p["basis"].toString().left(1).replace("Q", "Q");
+        }
+        QCOMPARE(gotPlaces.join(' '), places);
+        QStringList expectedBases;
+        for (const QString &b : bases.split(' '))
+            expectedBases << (b == "W" ? "W" : b == "E" ? "E" : "Q");
+        QCOMPARE(gotBases.join(' '), expectedBases.join(' '));
+    }
+
+    void topFourFinalResultsThatCannotBePlacedAreRefused()
+    {
+        const QList<qint64> seeds{11, 12, 13, 14};
+        const auto refused = [&](const QList<QList<qint64>> &groups, const QString &outcome, qint64 winner) {
+            try {
+                cmdr::placeFinal(seeds, groups, outcome, winner);
+                return false;
+            } catch (const std::invalid_argument &) {
+                return true;
+            }
+        };
+        QVERIFY(refused({{11}, {12, 13}}, "WIN", 11));               // the winner was eliminated
+        QVERIFY(refused({{11}}, "WIN", 12));                         // C and D unaccounted for
+        QVERIFY(refused({{11}, {11}, {12}}, "WIN", 14));             // a player out twice
+        QVERIFY(refused({{11}, {}, {12, 13}}, "WIN", 14));           // an empty group
+        QVERIFY(refused({{15}, {12, 13}}, "WIN", 14));               // not a finalist
+        QVERIFY(refused({{11}, {12, 13}}, "NO_WINNER", 0));          // one player left is the winner
+        QVERIFY(refused({}, "NO_WINNER", 11));                       // no winner, yet a winner
+        QVERIFY(refused({{11}, {12}, {13}}, "WIN", 15));             // the winner is not a finalist
+        QVERIFY(refused({{11, 12}, {13, 14}}, "NO_WINNER", 0));      // everyone out
+        QVERIFY(refused({}, "TIE", 0));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, cmdr::placeFinal({11, 12, 13}, {}, "NO_WINNER", 0));
+        // while the final is played, part of the eliminations can be recorded
+        cmdr::checkFinalProgress(seeds, {{14}});
+        cmdr::checkFinalProgress(seeds, {{14}, {12, 13}});
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, cmdr::checkFinalProgress(seeds, {{11, 12, 13, 14}}));
     }
 };
 

@@ -1,4 +1,5 @@
 // Registration, one-on-one rounds and standings, round review, and the player screens.
+#include "commander.h"
 #include "commander_db.h"
 #include "printing.h"
 #include "screens.h"
@@ -296,6 +297,9 @@ void CommanderRegistrationScreen::buildUi()
     shortCombo->setAccessibleName("Three-player pods");
     shortCombo->setToolTip("Which players sit in three-player pods after round one.\n"
                            "Lowest standings keeps the leaders in four-player pods.");
+    finalCheck = new QCheckBox("Add a top-four final");
+    finalCheck->setAccessibleName("Add a top-four final");
+    finalCheck->setToolTip("After the qualifying rounds, the four best players who are still in play one final pod.");
 
     // One line per setting: the control with its label, and a short explanation beside it
     // (directly below it when the window is narrow).
@@ -315,8 +319,11 @@ void CommanderRegistrationScreen::buildUi()
         pv->addLayout(line);
     };
     addSetting("Rounds", roundsSpin, &roundsHint);
+    addSetting("Final", finalCheck, &finalHint);
     addSetting("Draws", drawCombo, &drawHint);
     addSetting("3-player pods", shortCombo, &shortHint);
+    scoringLabel = T::lbl("", T::MUTED, 12, 400, true);
+    pv->addWidget(scoringLabel);
     warnLabel = T::lbl("", T::AMBER, 12, 400, true);
     pv->addWidget(warnLabel);
 
@@ -340,6 +347,12 @@ void CommanderRegistrationScreen::buildUi()
     connect(roundsSpin, &QSpinBox::valueChanged, this, [this] { configChanged(); });
     connect(drawCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(); });
     connect(shortCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(); });
+    connect(finalCheck, &QCheckBox::toggled, this, [this] {
+        if (loading_)
+            return;
+        configChanged();
+        updateCounts();         // the summary above says whether a final follows
+    });
 }
 
 // Shows one row's check-in state on its own button and name; nothing else is touched.
@@ -411,7 +424,11 @@ void CommanderRegistrationScreen::updateCounts()
 void CommanderRegistrationScreen::updateHints()
 {
     const int n = roundsSpin->value();
-    roundsHint->setText(QStringLiteral("Total rounds. The event ends after Round %1.").arg(n));
+    const bool withFinal = finalCheck->isChecked();
+    roundsHint->setText(withFinal ? QStringLiteral("Qualifying rounds. The top-four final follows Round %1.").arg(n)
+                                  : QStringLiteral("Total rounds. The event ends after Round %1.").arg(n));
+    finalHint->setText(withFinal ? QStringLiteral("%1 qualifying round%2 + 1 final").arg(n).arg(n == 1 ? "" : "s")
+                                 : QStringLiteral("Off: places come from the standings after Round %1.").arg(n));
     drawHint->setText(drawCombo->currentData().toString() == "ELIMINATED_LOSE"
                           ? "Knocked-out players take a loss; survivors share the draw."
                           : "Everyone seated in the pod gets the draw point.");
@@ -429,6 +446,19 @@ void CommanderRegistrationScreen::syncConfig(int checked)
     const int n = ev["swiss_rounds"].toInt();
     loading_ = true;
     roundsSpin->setValue(n);
+    // events created with earlier rules keep them: no final, second place recognition only
+    const bool current = ev["scores_second"].toBool();
+    finalCheck->setChecked(ev["final_enabled"].toBool());
+    finalCheck->setVisible(current);
+    finalHint->setVisible(current);
+    scoringLabel->setText(current
+        ? QStringLiteral("Scoring (club rules): win %1, clear second place %2, other losses %3, draw %4, bye %5. Announce "
+                         "the rules, and whether there is a final, before the tournament starts.")
+              .arg(cmdr::pointsText(settings["win_points"].toDouble()), cmdr::pointsText(settings["second_place_points"].toDouble()),
+                   cmdr::pointsText(settings["loss_points"].toDouble()), cmdr::pointsText(settings["draw_points"].toDouble()),
+                   cmdr::pointsText(settings["bye_points"].toDouble()))
+        : QStringLiteral("This event was created with earlier rules: second place is recognition only and there is no "
+                         "top-four final."));
     drawCombo->setCurrentIndex(settings["draw_policy"].toString() == "ELIMINATED_LOSE" ? 0 : 1);
     shortCombo->setCurrentIndex(qMax(0, shortCombo->findData(settings.value("three_pod_placement", "BEST_MATCH"))));
     loading_ = false;
@@ -442,11 +472,13 @@ void CommanderRegistrationScreen::syncConfig(int checked)
         QStringList pods;
         for (const QVariant &p : rec["pods"].toList())
             pods << p.toString();
+        const QString length = ev["final_enabled"].toBool()
+            ? QStringLiteral("This tournament will be %1 qualifying round%2, then the top-four final.").arg(n).arg(n == 1 ? "" : "s")
+            : QStringLiteral("This tournament will be %1 round%2 in total and ends after Round %1.").arg(n).arg(n == 1 ? "" : "s");
         recLabel->setText(
-            QStringLiteral("%1 checked in  →  pods of %2%3.   Recommended: %4 rounds.   This tournament will be %5 "
-                           "round%6 in total and ends after Round %5.")
+            QStringLiteral("%1 checked in  →  pods of %2%3.   Recommended: %4 rounds.   ")
                 .arg(checked).arg(pods.join(" + "), rec["byes"].toInt() ? QStringLiteral(" and %1 bye").arg(rec["byes"].toInt()) : QString())
-                .arg(rec["rounds"].toInt()).arg(n).arg(n == 1 ? "" : "s"));
+                .arg(rec["rounds"].toInt()) + length);
         recLabel->setStyleSheet("color:" + T::TEXT + ";background:transparent;border:none;");
     }
     const bool overridden = n != rec["rounds"].toInt();
@@ -464,7 +496,7 @@ void CommanderRegistrationScreen::configChanged()
         return;
     try {
         cdb::updateEventConfig(tournamentId, roundsSpin->value(), drawCombo->currentData().toString(),
-                               shortCombo->currentData().toString());
+                               shortCombo->currentData().toString(), finalCheck->isVisible() ? int(finalCheck->isChecked()) : -1);
     } catch (const cdb::CommanderError &e) {
         warn(this, "Setup", e.message);
     }
@@ -1530,6 +1562,24 @@ QWidget *PlayerProfileScreen::detailPanel(qint64 tournamentId)
         line.result = res == "WIN" ? "Win" : res == "LOSS" ? "Loss" : res == "DRAW" ? "Draw" : "Pending";
         line.color = res == "WIN" ? T::GREEN : res == "LOSS" ? T::RED : res == "DRAW" ? T::AMBER : T::MUTED;
         lines << line;
+    }
+    if (cdb::isCommander(tournamentId)) {
+        const QVariantMap fin = cdb::getFinal(tournamentId);
+        for (const QVariant &pv : fin["players"].toList()) {
+            const QVariantMap p = pv.toMap();
+            if (p["player_id"].toLongLong() != playerId_)
+                continue;
+            const int place = p["placement"].toInt();
+            const QString basis = p["placement_basis"].toString();
+            Line line;
+            line.when = "Final";
+            line.where = QStringLiteral("Top-four final  ·  seed %1  ·  seat %2").arg(p["seed"].toInt()).arg(p["seat"].toInt());
+            line.result = !place ? QStringLiteral("Not placed")
+                        : (place == 1 ? "1st" : place == 2 ? "2nd" : place == 3 ? "3rd" : "4th")
+                              + QString(basis == "WINNER" ? ", won" : basis == "QUALIFYING_RANK" ? ", by seed" : "");
+            line.color = basis == "WINNER" ? T::GREEN : place ? T::TEXT : T::MUTED;
+            lines << line;
+        }
     }
     if (lines.isEmpty()) {
         vbox->addWidget(T::lbl("No match details available.", T::MUTED, 13));

@@ -587,6 +587,124 @@ static void migration007CommanderSecondPlace()
         exec("ALTER TABLE commander_pods ADD COLUMN second_place_player_id INTEGER REFERENCES players(player_id)");
 }
 
+// club rules from commander-rules-4: a scored second place with its own reporting state, and an
+// optional top-four final after the qualifying rounds.  earlier events are left exactly as they
+// were: their second places stay recognition only, and their state stays empty, never NONE.
+//   second_place_status: PENDING (not recorded yet), PLAYER (second_place_player_id), NONE
+//     (confirmed no clear second); empty for a pod that is not won, and for earlier events.
+//   commander_finals: at most one final per event, with the qualifying standings it was
+//     seeded from; commander_final_players: its four players, seeds, elimination groups and
+//     confirmed places.
+static void migration008CommanderScoredSecondAndFinal()
+{
+    if (!columns("commander_pods").contains("second_place_status"))
+        exec("ALTER TABLE commander_pods ADD COLUMN second_place_status TEXT "
+             "CHECK (second_place_status IN ('PENDING', 'PLAYER', 'NONE'))");
+    if (!columns("commander_events").contains("final_enabled"))
+        exec("ALTER TABLE commander_events ADD COLUMN final_enabled INTEGER NOT NULL DEFAULT 0 "
+             "CHECK (final_enabled IN (0, 1))");
+    exec(R"sql(
+        CREATE TABLE IF NOT EXISTS commander_finals (
+            final_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            tournament_id      INTEGER NOT NULL UNIQUE REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+            status             TEXT    NOT NULL DEFAULT 'PLAYING' CHECK (status IN ('PLAYING', 'CONFIRMED')),
+            outcome            TEXT    CHECK (outcome IN ('WIN', 'NO_WINNER')),
+            winner_player_id   INTEGER REFERENCES players(player_id),
+            qualifying_json    TEXT    NOT NULL,
+            result_version     INTEGER NOT NULL DEFAULT 0,
+            created_at         TEXT    DEFAULT (DATETIME('now')),
+            confirmed_at       TEXT,
+            timer_state        TEXT    NOT NULL DEFAULT 'STOPPED',
+            timer_elapsed_secs INTEGER NOT NULL DEFAULT 0,
+            timer_started_at   REAL,
+            CHECK ((status = 'CONFIRMED') = (outcome IS NOT NULL)),
+            CHECK ((outcome IS 'WIN') = (winner_player_id IS NOT NULL))
+        )
+    )sql");
+    exec(R"sql(
+        CREATE TABLE IF NOT EXISTS commander_final_players (
+            final_id          INTEGER NOT NULL REFERENCES commander_finals(final_id) ON DELETE CASCADE,
+            tournament_id     INTEGER NOT NULL REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+            player_id         INTEGER NOT NULL REFERENCES players(player_id),
+            seed              INTEGER NOT NULL CHECK (seed BETWEEN 1 AND 4),
+            seat_number       INTEGER NOT NULL CHECK (seat_number BETWEEN 1 AND 4),
+            qualifying_rank   INTEGER NOT NULL CHECK (qualifying_rank >= 1),
+            elimination_group INTEGER CHECK (elimination_group BETWEEN 1 AND 3),
+            placement         INTEGER CHECK (placement BETWEEN 1 AND 4),
+            placement_basis   TEXT    CHECK (placement_basis IN ('WINNER', 'ELIMINATION', 'QUALIFYING_RANK')),
+            PRIMARY KEY (final_id, player_id),
+            UNIQUE (final_id, seed),
+            UNIQUE (final_id, seat_number),
+            UNIQUE (final_id, placement),
+            CHECK ((placement IS NULL) = (placement_basis IS NULL))
+        )
+    )sql");
+    exec("CREATE INDEX IF NOT EXISTS idx_cmd_final_players_tournament ON commander_final_players(tournament_id)");
+
+    // the one final an event that chose it may have, once every qualifying round is finalized;
+    // no trigger here names the tournaments table, which update 4 rebuilds
+    // (an event ended early is refused by the core)
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_final_allowed
+        BEFORE INSERT ON commander_finals
+        WHEN (SELECT final_enabled FROM commander_events WHERE tournament_id = NEW.tournament_id) IS NOT 1
+          OR (SELECT legacy_playoff FROM commander_events WHERE tournament_id = NEW.tournament_id) IS NOT 0
+          OR (SELECT stage FROM commander_events WHERE tournament_id = NEW.tournament_id) IS NOT 'SWISS'
+          OR (SELECT COUNT(*) FROM commander_rounds WHERE tournament_id = NEW.tournament_id AND stage = 'SWISS'
+              AND status = 'FINALIZED') < (SELECT swiss_rounds FROM commander_events WHERE tournament_id = NEW.tournament_id)
+        BEGIN SELECT RAISE(ABORT, 'this event has no final to create'); END
+    )sql");
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_final_player_valid
+        BEFORE INSERT ON commander_final_players
+        WHEN NEW.tournament_id IS NOT (SELECT tournament_id FROM commander_finals WHERE final_id = NEW.final_id)
+          OR NOT EXISTS (SELECT 1 FROM enrollments WHERE tournament_id = NEW.tournament_id AND player_id = NEW.player_id
+                         AND checked_in = 1 AND dropped = 0)
+          OR (SELECT COUNT(*) FROM commander_final_players WHERE final_id = NEW.final_id) >= 4
+        BEGIN SELECT RAISE(ABORT, 'only four checked-in players who have not dropped can play the final'); END
+    )sql");
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_final_players_fixed
+        BEFORE UPDATE OF final_id, tournament_id, player_id, seed, seat_number, qualifying_rank ON commander_final_players
+        BEGIN SELECT RAISE(ABORT, 'the finalists and their seeds are fixed once the final is created'); END
+    )sql");
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_final_confirmed_complete
+        BEFORE UPDATE ON commander_finals
+        WHEN NEW.status = 'CONFIRMED'
+         AND (SELECT COUNT(*) FROM commander_final_players WHERE final_id = NEW.final_id AND placement IS NOT NULL) <> 4
+        BEGIN SELECT RAISE(ABORT, 'a confirmed final places all four players'); END
+    )sql");
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_final_enabled_frozen
+        BEFORE UPDATE OF final_enabled ON commander_events
+        WHEN OLD.stage <> 'REGISTRATION' AND NEW.final_enabled <> OLD.final_enabled
+        BEGIN SELECT RAISE(ABORT, 'the final option is fixed once the event has started'); END
+    )sql");
+    // second place is another player of a won pod, and a decision only a won pod has
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_second_place_valid
+        BEFORE UPDATE ON commander_pods
+        WHEN (NEW.second_place_status IS NOT NULL
+              AND (NEW.outcome IS NOT 'WIN' OR (NEW.second_place_status = 'PLAYER') <> (NEW.second_place_player_id IS NOT NULL)))
+          OR (NEW.second_place_player_id IS NOT NULL
+              AND (NEW.outcome IS NOT 'WIN'
+                   OR NOT EXISTS (SELECT 1 FROM commander_seats WHERE pod_id = NEW.pod_id
+                                  AND player_id = NEW.second_place_player_id AND result = 'LOSS')))
+          OR (NEW.second_place_status = 'PENDING'
+              AND (SELECT status FROM commander_rounds WHERE round_id = NEW.round_id) = 'FINALIZED')
+        BEGIN SELECT RAISE(ABORT, 'second place does not fit this pod result'); END
+    )sql");
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_round_finalized_complete
+        BEFORE UPDATE OF status ON commander_rounds
+        WHEN NEW.status = 'FINALIZED' AND OLD.status IS NOT 'FINALIZED'
+         AND EXISTS (SELECT 1 FROM commander_pods WHERE round_id = NEW.round_id
+                     AND (status = 'PENDING' OR second_place_status = 'PENDING'))
+        BEGIN SELECT RAISE(ABORT, 'a round with a result or a second place still to report cannot be finalized'); END
+    )sql");
+}
+
 const QList<Migration> &migrations()
 {
     static const QList<Migration> list = {
@@ -597,6 +715,7 @@ const QList<Migration> &migrations()
         {5, "player_removed", migration005PlayerRemoved},
         {6, "matches_round_index", migration006MatchesRoundIndex},
         {7, "commander_second_place", migration007CommanderSecondPlace},
+        {8, "commander_scored_second_and_final", migration008CommanderScoredSecondAndFinal},
     };
     return list;
 }

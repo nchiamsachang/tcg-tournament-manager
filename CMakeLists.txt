@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(TcgTournamentManager VERSION 0.2.3 LANGUAGES CXX RC)
+project(TcgTournamentManager VERSION 0.2.4 LANGUAGES CXX RC)
 
 # the one place the version is set: the app, the log, the program's properties and the
 # package name all take it from here.  a release changes the last number (0.2.4, 0.2.5);

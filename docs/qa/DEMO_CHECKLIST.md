@@ -24,12 +24,12 @@ The app keeps its data in `%LOCALAPPDATA%\TcgTournamentManager` unless the
 `TCG_DATA_DIR` environment variable names another folder. Run this checklist on a
 throwaway folder so your own players and tournaments are never opened.
 
-1. Extract the whole ZIP, for example to `C:\Temp\TcgTournamentManager-0.2.3`.
+1. Extract the whole ZIP, for example to `C:\Temp\TcgTournamentManager-0.2.4`.
 2. Open a Command Prompt and run these three lines:
 
    ```
    set TCG_DATA_DIR=%TEMP%\tcg-demo-check
-   cd /d C:\Temp\TcgTournamentManager-0.2.3
+   cd /d C:\Temp\TcgTournamentManager-0.2.4
    start "" TcgTournamentManager.exe
    ```
 
@@ -51,7 +51,7 @@ throwaway folder so your own players and tournaments are never opened.
 | ID | Step | Expected result | Actual | Status |
 |---|---|---|---|---|
 | D-01 | Open Settings (gear, top right) and read the DATA path and the bottom line. | The path ends in `tcg-demo-check\tcg_tournament.db`, not `AppData\Local\TcgTournamentManager`. The bottom line shows the version and a build ID. Write both into Run details. If the path is wrong, stop: close the app and redo "Before you start". | | Not Run |
-| D-02 | Go to Home. | The badge above the title shows the version only (`v0.2.3`), with no build ID beside it. | | Not Run |
+| D-02 | Go to Home. | The badge above the title shows the version only (`v0.2.4`), with no build ID beside it. | | Not Run |
 | D-03 | Open the Pokemon hub, choose New Tournament. Name it `Demo Cup`, set Rounds to 2 and Round length to 1, then Create & register players. | The registration page opens, titled with `Demo Cup`, showing 0 players enrolled. Start tournament is disabled. | | Not Run |
 | D-04 | Add four players with New player name and Add & enroll: `Ada`, `Ben`, `Cal`, `Dee`. | The count reads 4 players enrolled and all four names are listed. Start tournament is enabled. | | Not Run |
 | D-05 | Choose Start tournament and answer Yes. | The question names the tournament and says 4 players. Round 1 of 2 opens with 2 tables, 2 pending. Each of the four players appears exactly once and nobody has a bye. | | Not Run |

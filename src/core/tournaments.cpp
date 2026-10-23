@@ -141,7 +141,7 @@ bool terminateTournament(qint64 tournamentId)
 
     // a running clock keeps the seconds it had run; no clock of this tournament runs again
     static const char *DB_NOW = "(julianday('now') - 2440587.5) * 86400.0";
-    for (const char *table : {"rounds", "commander_rounds"}) {
+    for (const char *table : {"rounds", "commander_rounds", "commander_finals"}) {
         db::exec(QStringLiteral("UPDATE %1 SET timer_elapsed_secs = COALESCE(timer_elapsed_secs, 0) "
                                 "+ CAST(ROUND(MAX(0, %2 - timer_started_at)) AS INTEGER) "
                                 "WHERE tournament_id = ? AND timer_state = 'RUNNING' AND timer_started_at IS NOT NULL")
@@ -152,9 +152,11 @@ bool terminateTournament(qint64 tournamentId)
     db::exec("UPDATE tournaments SET status = 'TERMINATED', terminated_at = DATETIME('now') WHERE tournament_id = ?",
              {tournamentId});
     // Commander events keep an audit trail; other formats have none
+    const QString finalStatus = db::value("SELECT status FROM commander_finals WHERE tournament_id = ?", {tournamentId}).toString();
     db::exec("INSERT INTO commander_audit (tournament_id, action, actor, detail_json) "
-             "SELECT tournament_id, 'EVENT_TERMINATED', 'organizer', '{\"stage\": \"' || stage || '\"}' "
-             "FROM commander_events WHERE tournament_id = ?", {tournamentId});
+             "SELECT tournament_id, 'EVENT_TERMINATED', 'organizer', '{\"stage\": \"' || stage || '\"' || ? || '}' "
+             "FROM commander_events WHERE tournament_id = ?",
+             {finalStatus.isEmpty() ? QString("") : QStringLiteral(", \"final\": \"%1\"").arg(finalStatus), tournamentId});
     tx.commit();
     return true;
 }

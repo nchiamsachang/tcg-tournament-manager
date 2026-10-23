@@ -354,3 +354,101 @@ event of two rounds, five players), with only Windows folders on PATH:
 | Existing results | Pass. Seats, points, final placings, final standings and status identical to the backup; no second place filled in |
 | "Correct result..." on round 1, Second place = a losing player, with a reason | Pass. "2nd" shown beside that player, points unchanged, no Keep or Rebuild question although round 2 exists, event still complete, one audit entry |
 | Restart | Pass. The badge is still there; no second backup; Settings shows `v0.2.3 · build 229ef86a-modified-20261019-2252` |
+
+## Addendum 7, 2026-10-23: club scoring with second place, and the optional top-four final (not a release)
+
+Development build of the agreed Commander rules (`commander-rules-4`): a clear second place
+earns 2.5 points and stays a loss, second place is recorded as not yet recorded, a player,
+or no clear second, and an event may add one top-four final pod after its qualifying rounds.
+The version shown is still 0.2.3, as asked; this is **not** the published 0.2.3 (build
+`dc395042`), and that release's verification does not cover it.
+
+| | |
+|---|---|
+| Starting point | commit `53d63cc`, clean working tree, Qt 6.11.3, MSVC 2022, Release, build folder `build-qt6113` |
+| Baseline before any change | build `53d63cc1-modified-20261023-1222` (only `run_tests.bat` changed): core 110, rules 18, UI 43 passed, 0 failed |
+| Final build tested | `53d63cc1-modified-20261023-1410` (commit `53d63cc` plus the uncommitted changes) |
+| `TcgTournamentManager.exe` SHA-256 (final build) | `527E0181704D4DDAD4957309112864171B86EA4608A6A4B0C1330FDF2EAF5A24` |
+| Package | none: see below |
+
+### Test runner first
+
+`run_tests.bat` had BUG-013: in a shell where Windows does not search the current folder it
+could not start `test_core.exe` and `test_rules.exe`, and printed the result files of
+2026-10-12 as if they were new (seen in Addendum 6). It was fixed first and checked with a
+scratch harness that runs the script's own `:run` block against a missing program, one that
+writes no results, a failing one and a passing one, each with a stale result file present:
+the first three are reported as failed, the last as passed, and the stale totals are never
+shown. Every result below comes from the fixed script, which prints the build id and the
+SHA-256 of each test program it runs.
+
+### Test suites
+
+| Program | Passed | Failed | Skipped |
+|---|---|---|---|
+| `test_core` | 133 | 0 | 0 |
+| `test_rules` | 31 | 0 | 0 |
+| `test_ui` | 45 | 0 | 0 |
+
+One run of `run_tests.bat`, 14:10 to 14:17, exit code 0, on the final build. The run before
+it (build `...-1350`, 13:50 to 13:57) gave the same totals; between the two only the
+registration summary's wording changed.
+
+New tests: core 21 (scoring over rounds, the three second-place states, invalid second
+places, corrections without double awards, a finalized-round correction, pairing from half
+points, earlier events, a removed player, and the final: with and without it, eligibility,
+fully tied seeds, simultaneous creation, places, drawn finals, invalid data, corrections and
+rebuilds, ending early, failed saves, the update of older data, logging and an unusable log
+folder); rules 4 functions with 9 data rows (a hand-worked scoring example, points shown as 5
+and 2.5, pairing with half points, the final's places); UI 2 (second place on the round
+screen; the final from registration to correction, in both themes, both text sizes and a
+narrow window). Existing tests that played rounds now give each won pod a second-place
+decision; the previous feature's second-place tests now use an event with the earlier rules,
+which is what they describe.
+
+Two of the new tests were checked against deliberate faults: reading points as whole numbers
+in pairing, and ordering a group of finalists by the worse seed. Both were caught (the first
+only after the test was changed to compare the pairing's score cost, worked out by hand).
+
+### Smoke test of the program
+
+Run on the development build `53d63cc1-modified-20261023-1350` (`TcgTournamentManager.exe`
+SHA-256 `D2CEB772C3E800E12EE01FBB27E90A4BD39C7C0A9E2079C57C8C9E70369710B4`), started from
+the build folder with the Qt 6.11.3 kit and Windows folders only on PATH, on disposable data
+folders (`TCG_DATA_DIR`), driven through UI Automation. Not a packaged program.
+
+| Check | Result |
+|---|---|
+| New Commander event, 8 players including `=Gus Formula` and a long name, 2 rounds, "Add a top-four final" | Pass. Registration showed "2 qualifying rounds + 1 final" and the scoring; the summary line still said "2 rounds in total": fixed afterwards, see below |
+| Round 1: Wins, then "Record 2nd place…" with a player; second pod with "No clear second" | Pass. Provisional marking and disabled Finalize until both were decided; "2nd +2.5" badge; 2.5 points |
+| Correct round 1 after round 2 was published: second place moved | Pass. Keep or Rebuild asked; Keep moved the 2.5 points; no "not recorded yet" offered for a finalized round |
+| Round 2, finalize the last qualifying round | Pass. Event not finished; four qualifiers with seeds shown |
+| Create final; print the final pod | Pass. Seeds confirmed in a question; one pod seated by seed; print preview showed the four seats |
+| Record an elimination, close and reopen the program | Pass. Still recorded after the restart |
+| Record result: winner while two players were still in | Pass. Preview and saved places Eve 1st (won), Hal 2nd, Chris 3rd (out together, by seed), Dan 4th |
+| Standings: Export CSV and Save PDF | Pass for CSV (places, notes, 7.5, formula-safe name). PDF written, 20,563 bytes; not rendered here (no PDF viewer in this environment) |
+| Correct the final to a drawn final, three still in | Pass. Placed by seed, marked "by seed", banner says nobody won; audit `FINAL_CORRECTED` with the earlier places and the reason |
+| Saved records, read afterwards from the scratch file | Pass. Second-place states, final rows, places 1-8, audit entries, ids-only log entries; foreign keys and integrity check clean |
+| Copy of an older database (update 7, a finished event with a recognised second place) | Pass. Backup written first; update 8 applied; the event kept `commander-rules-3`, no points for its second place, no final, no 2nd column |
+
+Not run by hand: the drawn final with four and with two players still in, the fewer-than-four
+case, ending early during the final, and a failed save. These are covered by core tests only.
+
+The registration summary was changed after the smoke test; the final build was run through
+all three suites, and the UI test checks the new wording. The smoke test itself was not
+repeated on the final build.
+
+### Package
+
+None was made. `package.bat` packages only committed source (or a changed tree with
+`ALLOW_MODIFIED=1`) and always writes `dist\TcgTournamentManager-<version>` and its ZIP, so
+with the version still 0.2.3 it would replace the verified 0.2.3 package. A package needs the
+changes committed and, to keep the published 0.2.3 intact, a new version number.
+
+## Addendum 8, 2026-10-23: version set to 0.2.4
+
+On the branch `release/0.2.4` the version in `CMakeLists.txt` was changed from 0.2.3 to
+0.2.4 for the changes tested in Addendum 7. Nothing else changed. No build carrying 0.2.4 has
+been made or tested yet: the results in Addendum 7 are for builds labelled 0.2.3 from the
+same code, and the release checks for 0.2.4 still have to be run on its packaged build.
+

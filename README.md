@@ -5,8 +5,8 @@ One Piece, Pokémon and Magic: The Gathering (Modern and Commander). It is writt
 C++17 with Qt 6 Widgets and keeps everything in a local SQLite database, so it works
 without an internet connection or a server.
 
-Current version: **0.2.3**. See [Project status](#project-status) for what has and has
-not been verified.
+Current version: **0.2.4** (being prepared; the latest published release is 0.2.3). See
+[Project status](#project-status) for what has and has not been verified.
 
 ## Features
 
@@ -17,8 +17,11 @@ not been verified.
   who has not had one.
 - **Commander pods:** pods of three or four, check-in before the start, drops and
   reinstatements between rounds, byes, result corrections and an audit history.
+  The club's scoring awards a clear second place 2.5 points (still a loss), and an
+  optional top-four final pod can follow the qualifying rounds.
   Pairings are reproducible from a saved seed.
-- **Fixed length:** the configured number of rounds is the whole tournament. A
+- **Fixed length:** the configured number of rounds is the whole tournament (a
+  Commander event may add its one top-four final). A
   tournament can also be ended early and kept as a read-only record.
 - **Round clocks:** start, pause, resume and reset. The clock is saved, so it survives
   moving between pages and restarting the app. At zero the app shows a notice (and can
@@ -170,13 +173,18 @@ separately, as the Git commit in Settings and in diagnostic reports.
 
 ## Project status
 
-Version 0.2.3 is packaged from committed source and its release checks are done. On the
-packaged build's own binaries the core suite (101 passed), rules suite (18 passed) and
-UI suite (42 passed) are clean, with nothing failed or skipped. The packaged app also
-passed a manual run of a one-on-one and a Commander event. Two keyboard-focus UI tests
-had failed in earlier runs while the PC was in use and passed in the final run; they may
-still fail occasionally on a PC that is being used during the tests. The details are in
-[docs/qa/TEST_REPORT.md](docs/qa/TEST_REPORT.md).
+Version 0.2.4 adds the club's Commander scoring (a clear second place earns 2.5 points)
+and the optional top-four final. Its automated suites passed on a development build of
+the same code before the version number was changed (core 133, rules 31, UI 45 passed;
+see TEST_REPORT.md Addendum 7). It has not been packaged or release-checked yet.
+
+Version 0.2.3, the published release, is packaged from committed source and its release
+checks are done. On the packaged build's own binaries the core suite (101 passed), rules
+suite (18 passed) and UI suite (42 passed) are clean, with nothing failed or skipped. The
+packaged app also passed a manual run of a one-on-one and a Commander event. Two
+keyboard-focus UI tests had failed in earlier runs while the PC was in use and passed in
+the final run; they may still fail occasionally on a PC that is being used during the
+tests. The details are in [docs/qa/TEST_REPORT.md](docs/qa/TEST_REPORT.md).
 
 Known limitations:
 

@@ -10,8 +10,9 @@
 
 namespace timerdb {
 
-// Which table the round is in: one-on-one rounds and Commander rounds are stored separately.
-enum class Kind { OneOnOne, Commander };
+// which table the round is in: one-on-one rounds and Commander rounds are stored separately,
+// and a Commander top-four final has its own clock, named by its final id instead of a round id.
+enum class Kind { OneOnOne, Commander, CommanderFinal };
 enum class State { Stopped, Running, Paused };
 
 struct Timer {

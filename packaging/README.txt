@@ -55,15 +55,48 @@ Commander:
 2. Add players as above. Everyone starts checked in: click "Checked in" next to anyone
    who has not arrived (it changes to "Check in") and click it again when they do.
    Only checked-in players are seated.
-3. Choose Start tournament. Round 1 shows the pods and seats.
-4. Report each pod: "Wins" beside the winner, or "Draw..." and then tick anyone who
+3. Set the number of qualifying rounds. Tick "Add a top-four final" if the four best
+   players should play one final pod after them (for example "2 qualifying rounds +
+   1 final"). This cannot be changed once the tournament starts.
+4. Choose Start tournament. Round 1 shows the pods and seats.
+5. Report each pod: "Wins" beside the winner, or "Draw..." and then tick anyone who
    was already eliminated when the game was drawn. Change and Clear fix a result.
-   Optional: after the winner is in, choose Change and pick a Second place. It is
-   shown as "2nd" and earns no points. Leave it as Not recorded for a draw, or when
-   several players were knocked out at the same time.
-5. Choose Finalize Round, then Start Round for the next one. Players & drops lets
+6. Second place: after "Wins", the pod says "2nd place not recorded yet" and the
+   points are provisional. Choose "Record 2nd place..." and pick the player who was
+   eliminated last, or "No clear second" when the last players were eliminated at the
+   same moment. A round cannot be finalized until every won pod has this decision.
+7. Choose Finalize Round, then Start Round for the next one. Players & drops lets
    someone drop between rounds.
-6. After the last round choose Finish tournament for the final standings.
+8. Without a final: after the last round choose Finish tournament.
+   With a final: finalize the last round, check the four players and their seeds, and
+   choose Create final. Record each elimination as it happens ("Record elimination...",
+   ticking everyone eliminated at the same moment), then "Record result..." to set the
+   winner, or no winner, and confirm the places.
+
+Commander scoring (this club's rules for new tournaments):
+- Win 5 points, clear second place 2.5, other losses 0, draw 1, bye 5.
+- Second place is another player of a won pod. It earns 2.5 points but still counts as
+  a loss. There is no second place in a drawn pod, for a bye, or when the last players
+  were eliminated at the same moment.
+- Ranking: points, then opponents' match-win %, then own match-win %, then a random
+  order fixed when the tournament is created.
+
+Top-four final (when chosen):
+- The four best players in the qualifying standings who are checked in and have not
+  dropped play it, seated in seed order: seed 1 takes the first turn. It adds no points.
+- The first player eliminated is 4th, the next 3rd, the last opponent eliminated 2nd
+  and the winner 1st. Players eliminated at the same moment are ordered by their
+  qualifying seed, but only against each other: nobody moves above a player who
+  survived longer.
+- If the final is drawn, or ends without a winner under the club's time procedure,
+  players already eliminated keep the lower places and the players still in are placed
+  by qualifying seed. This is shown as "by seed": nobody is credited with winning.
+- Everyone who did not play the final follows in qualifying order.
+
+These are the club's own rules, not an official Wizards of the Coast or TopDeck
+procedure. Announce them, and whether there is a final, before the tournament starts.
+Tournaments created with an earlier version keep their own rules: second place earns
+nothing there and there is no final.
 
 Ending early: "End tournament early" stops a tournament and keeps everything played so
 far as a read-only record. Nothing is invented for unplayed matches.
@@ -76,7 +109,8 @@ going if you move between pages or restart the program.
 
 When time runs out the clock says "Time expired" and the program shows a notice. It
 does not decide any result and does not end the round: you report results and choose
-End round (or Finalize Round) yourself. In Settings, under Round-end alerts, you can
+End round (or Finalize Round) yourself. The top-four final has its own clock, which
+also only announces the time: you record how the final ended. In Settings, under Round-end alerts, you can
 also turn on a sound.
 
 

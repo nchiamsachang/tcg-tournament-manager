@@ -10,7 +10,7 @@ assignees: ''
 
 ## Version and environment
 
-- App version (home screen or Settings, e.g. `0.2.3`):
+- App version (home screen or Settings, e.g. `0.2.4`):
 - Commit, if built from source (`git rev-parse --short HEAD`):
 - Windows version:
 - Display scaling and window size, for layout problems (e.g. 125 %, 1280 × 720):

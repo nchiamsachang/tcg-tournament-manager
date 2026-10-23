@@ -19,6 +19,11 @@ RoundStatus roundStatus(qint64 tournamentId)
         status.roundId = progress["round_id"].toLongLong();
         status.roundNumber = progress["round_number"].toInt();
         status.needsFinish = progress["needs_finish"].toBool();
+        if (progress["final"].toBool()) {
+            status.finalRound = true;
+            status.kind = timerdb::Kind::CommanderFinal;
+            status.roundId = progress["final_id"].toLongLong();
+        }
         return status;
     }
 

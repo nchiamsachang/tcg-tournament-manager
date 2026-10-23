@@ -501,7 +501,9 @@ MainWindow::TabLabel MainWindow::tabLabel(qint64 tournamentId) const
     label.sep = tight ? QStringLiteral(" · ") : QStringLiteral("  ·  ");
     label.head = m.name.size() > nameMax ? m.name.left(nameMax).trimmed() + QStringLiteral("…") : m.name;
     const int number = m.round.roundNumber, total = m.round.totalRounds;
-    if (tight)
+    if (m.round.finalRound)
+        label.head += label.sep + (tight ? QStringLiteral("Final") : QStringLiteral("Top-four final"));
+    else if (tight)
         label.head += label.sep + (total ? QStringLiteral("R%1/%2").arg(number).arg(total) : QStringLiteral("R%1").arg(number));
     else
         label.head += label.sep + (total ? QStringLiteral("Round %1 of %2").arg(number).arg(total)
