@@ -547,6 +547,7 @@ TournamentSetupScreen::TournamentSetupScreen(MainWindow *mw, const QString &init
     roundsSpin->setRange(1, 15);
     roundsSpin->setValue(3);
     roundsSpin->setAccessibleName("Number of rounds");
+    connect(roundsSpin, &QSpinBox::valueChanged, this, [this] { roundsEdited_ = true; });
     r1->addLayout(field("Rounds", roundsSpin), 1);
     // Round length: only the number goes in the field; the unit sits just outside it.  Anything
     // can be typed while editing (including nothing); it is checked when the tournament is created.
@@ -624,21 +625,29 @@ bool TournamentSetupScreen::isCommander() const
 
 void TournamentSetupScreen::updateSuggestedRounds(int players)
 {
+    const auto suggest = [this](int rounds) {
+        if (roundsEdited_)
+            return;
+        const QSignalBlocker block(roundsSpin);
+        roundsSpin->setValue(rounds);
+    };
     if (!isCommander()) {
-        roundsSpin->setValue(swiss::suggestedRounds(players));
-        suggestionLabel->setText(QStringLiteral("%1 rounds suggested for %2 players.").arg(roundsSpin->value()).arg(players));
+        const int rounds = swiss::suggestedRounds(players);
+        suggest(rounds);
+        suggestionLabel->setText(QStringLiteral("%1 rounds suggested for %2 players.").arg(rounds).arg(players));
         return;
     }
     const QVariantMap rec = cdb::recommendation(players);
-    roundsSpin->setValue(rec["rounds"].toInt());
-    suggestionLabel->setText(QStringLiteral("%1 rounds recommended for %2 players.").arg(rec["rounds"].toInt()).arg(players));
+    suggest(rec["rounds"].toInt());
+    suggestionLabel->setText(QStringLiteral("Suggested for %1 expected players: %2 rounds.").arg(players).arg(rec["rounds"].toInt())
+                             + (roundsEdited_ ? QStringLiteral(" You set the rounds, so they stay as typed.") : QString()));
     QStringList pods;
     for (const QVariant &p : rec["pods"].toList())
         pods << p.toString();
     commanderNote->setText(
         QStringLiteral("Pods for %1 players: %2%3. The number of rounds is the whole tournament: it ends after the last "
-                       "round and the standings are final. Rounds are re-recommended from the checked-in count at "
-                       "registration and freeze when the event starts.")
+                       "round and the standings are final. Until you set the rounds, they follow the checked-in count at "
+                       "registration; they freeze when the event starts.")
             .arg(players).arg(pods.join(" + "), rec["byes"].toInt() ? " and 1 bye" : ""));
 }
 
@@ -665,10 +674,8 @@ void TournamentSetupScreen::createTournament()
     qint64 tid = 0;
     try {
         if (isCommander()) {
-            // only store an override when the organizer changed the suggested values
-            const int n = playerCount->value();
-            const int recommended = cdb::recommendation(n)["rounds"].toInt();
-            tid = cdb::createCommanderTournament(name, n, rounds == recommended ? 0 : rounds, {}, -1, {}, minutes);
+            // rounds the organizer typed are kept; untouched ones follow check-ins at registration
+            tid = cdb::createCommanderTournament(name, playerCount->value(), roundsEdited_ ? rounds : 0, {}, -1, {}, minutes);
         } else {
             tid = tdb::createTournament(name, game(), rounds, formatCombo->currentText(), {}, minutes);
         }

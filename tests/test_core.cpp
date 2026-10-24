@@ -446,6 +446,19 @@ private slots:
         QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::startEvent(tid));
     }
 
+    // the organizer sets the number that happens to be suggested; later check-ins must not change it
+    void roundsTheOrganizerSetAreNotChangedByCheckIns()
+    {
+        auto [tid, pids] = makeEvent(8, 0, false);
+        QCOMPARE(cdb::getEvent(tid)["swiss_rounds"].toInt(), 3);          // suggested for 8
+        cdb::updateEventConfig(tid, 3);
+        for (qint64 p : addPlayers(12, "Late"))
+            tdb::enrollPlayer(tid, p);
+        cdb::syncRecommendation(tid);                                        // 20 checked in: the suggestion is 4
+        QCOMPARE(cdb::getEvent(tid)["swiss_rounds"].toInt(), 3);
+        Q_UNUSED(pids);
+    }
+
     void aPlayoffCannotBeConfigured()
     {
         db::exec("INSERT INTO tournaments (name, game, format, tournament_date, total_rounds) "
@@ -581,15 +594,15 @@ private slots:
         const int v1 = cdb::reportPodResult(podId(pod), "WIN", seated[0]);
         QVERIFY2(cdb::reportPodResult(podId(pod), "WIN", seated[0]) == v1, "repeat is a no-op");
         QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::reportPodResult(podId(pod), "WIN", seated[1]));
-        QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::reportPodResult(podId(pod), "WIN", seated[1], {}, v1 - 1));
-        const int v2 = cdb::reportPodResult(podId(pod), "WIN", seated[1], {}, v1);
+        QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::reportPodResult(podId(pod), "WIN", seated[1], {}, v1 - 1, {}, "test correction"));
+        const int v2 = cdb::reportPodResult(podId(pod), "WIN", seated[1], {}, v1, {}, "test correction");
         QCOMPARE(v2, v1 + 1);
         QHash<qint64, int> table;
         for (const QVariant &r : cdb::getStandings(tid))
             table.insert(r.toMap()["player_id"].toLongLong(), r.toMap()["points"].toInt());
         QCOMPARE(table[seated[0]], 0);
         QCOMPARE(table[seated[1]], 5);
-        const int v3 = cdb::clearPodResult(podId(pod), v2);
+        const int v3 = cdb::clearPodResult(podId(pod), v2, "test correction");
         QCOMPARE(v3, v2 + 1);
         QCOMPARE(podAt(currentRound(tid), 0)["status"].toString(), QString("PENDING"));
         const QStringList actions = auditActions(tid);
@@ -605,7 +618,7 @@ private slots:
         const QList<qint64> seated = ids(pod["seats"].toList());
         // nothing published after it yet: corrects directly
         QVERIFY(cdb::correctResult(podId(pod), "WIN", seated[2], {}, {}, "misreported", cdb::SecondPlace::noClearSecond()));
-        QVERIFY2(!cdb::correctResult(podId(pod), "WIN", seated[2], {}, {}, {}, cdb::SecondPlace::noClearSecond()), "no change, nothing to do");
+        QVERIFY2(!cdb::correctResult(podId(pod), "WIN", seated[2], {}, {}, "test correction", cdb::SecondPlace::noClearSecond()), "no change, nothing to do");
         const QVariantMap entry = cdb::getAudit(tid)[0].toMap();
         QCOMPARE(entry["action"].toString(), QString("RESULT_CORRECTED"));
         QCOMPARE(entry["detail"].toMap()["reason"].toString(), QString("misreported"));
@@ -613,23 +626,23 @@ private slots:
         cdb::publishNextRound(tid);
         const QString before = QString::fromUtf8(QJsonDocument::fromVariant(currentRound(tid)["pods"]).toJson());
         try {
-            cdb::correctResult(podId(pod), "WIN", seated[1], {}, {}, {}, cdb::SecondPlace::noClearSecond());
+            cdb::correctResult(podId(pod), "WIN", seated[1], {}, {}, "test correction", cdb::SecondPlace::noClearSecond());
             QFAIL("a resolution is required");
         } catch (const cdb::ResolutionRequired &e) {
             QCOMPARE(e.laterRounds.size(), 1);
             QCOMPARE(e.laterRounds[0].toMap()["round_number"].toInt(), 2);
         }
-        cdb::correctResult(podId(pod), "WIN", seated[1], {}, "KEEP", {}, cdb::SecondPlace::noClearSecond());
+        cdb::correctResult(podId(pod), "WIN", seated[1], {}, "KEEP", "test correction", cdb::SecondPlace::noClearSecond());
         QCOMPARE(QString::fromUtf8(QJsonDocument::fromVariant(currentRound(tid)["pods"]).toJson()), before);
 
-        cdb::correctResult(podId(pod), "WIN", seated[3], {}, "REBUILD", {}, cdb::SecondPlace::noClearSecond());
+        cdb::correctResult(podId(pod), "WIN", seated[3], {}, "REBUILD", "test correction", cdb::SecondPlace::noClearSecond());
         QCOMPARE(cdb::getRounds(tid).size(), 1);
         QCOMPARE(cdb::getState(tid)["next"].toString(), QString("SWISS"));
         cdb::publishNextRound(tid);
         const QVariantMap r2 = currentRound(tid);
         cdb::reportPodResult(podId(podAt(r2, 0)), "WIN", seatPlayer(podAt(r2, 0), 0));
         try {
-            cdb::correctResult(podId(pod), "WIN", seated[0], {}, "REBUILD", {}, cdb::SecondPlace::noClearSecond());
+            cdb::correctResult(podId(pod), "WIN", seated[0], {}, "REBUILD", "test correction", cdb::SecondPlace::noClearSecond());
             QFAIL("played rounds cannot be rebuilt");
         } catch (const cdb::CommanderError &e) {
             QVERIFY(e.message.contains("already have results"));
@@ -867,7 +880,7 @@ private slots:
         const qint64 finalRound = state["rounds"].toList().last().toMap()["round_id"].toLongLong();
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::publishNextRound(tid));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(pod, "WIN", top4[0]));
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(pod, "WIN", top4[0]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(pod, "WIN", top4[0], {}, {}, "test correction"));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finalizeRound(finalRound));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finishTournament(tid));
 
@@ -896,8 +909,8 @@ private slots:
         QCOMPARE(ids(state["final_standings"].toList()).mid(0, 4), placed);
         // correcting an earlier round changes the numbers but never the playoff or its placings
         const qint64 r2pod = podId(podAt(state["rounds"].toList()[1].toMap(), 0));
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(r2pod, "DRAW", 0, {}, "REBUILD"));
-        cdb::correctResult(r2pod, "DRAW", 0, {}, "KEEP");
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(r2pod, "DRAW", 0, {}, "REBUILD", "test correction"));
+        cdb::correctResult(r2pod, "DRAW", 0, {}, "KEEP", "test correction");
         const QVariantMap after = cdb::getState(tid);
         QCOMPARE(after["rounds"].toList().size(), 3);
         QCOMPARE(ids(after["final_standings"].toList()).mid(0, 4), placed);
@@ -1214,7 +1227,8 @@ private slots:
         db::exec("INSERT INTO enrollments (tournament_id, player_id, match_points) VALUES (1, 1, 9)");
         restart();
         const Rows versions = db::query("SELECT version, name FROM schema_migrations ORDER BY version");
-        QCOMPARE(versions.size(), 8);
+        QCOMPARE(versions.size(), 9);
+        QCOMPARE(versions[8]["name"].toString(), QString("commander_final_play_started"));
         QCOMPARE(versions[7]["name"].toString(), QString("commander_scored_second_and_final"));
         QCOMPARE(versions[6]["name"].toString(), QString("commander_second_place"));
         QCOMPARE(versions[5]["name"].toString(), QString("matches_round_index"));
@@ -2212,8 +2226,8 @@ private slots:
         QVERIFY(cdb::progress(tid)["long"].toString().startsWith("Ended early"));
 
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(podId(pod1), "WIN", seatPlayer(pod1, 0)));
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::clearPodResult(podId(pod0)));
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(podId(pod0), "WIN", seatPlayer(pod0, 1)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::clearPodResult(podId(pod0), cdb::NONE, "test correction"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(podId(pod0), "WIN", seatPlayer(pod0, 1), {}, {}, "test correction"));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finalizeRound(rnd["round_id"].toLongLong()));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finishTournament(tid));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::publishNextRound(tid, 2));
@@ -3144,8 +3158,8 @@ private slots:
         QVERIFY(reported != before);
         db::exec("CREATE TRIGGER break_standings BEFORE UPDATE OF match_points ON enrollments "
                  "BEGIN SELECT RAISE(ABORT, 'standings cannot be saved'); END");
-        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::clearPodResult(podId(pod)));
-        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 1)));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::clearPodResult(podId(pod), cdb::NONE, "test correction"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 1), {}, {}, "test correction"));
         QCOMPARE(saved(), reported);
         db::exec("DROP TRIGGER break_standings");
         Q_UNUSED(pids);
@@ -3734,7 +3748,7 @@ private slots:
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
                                  cdb::reportPodResult(podId(a), "WIN", seatPlayer(a, 0), {}, cdb::NONE, seatPlayer(b, 1)));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
-                                 cdb::correctResult(podId(a), "WIN", seatPlayer(a, 0), {}, {}, {}, seatPlayer(b, 1)));
+                                 cdb::correctResult(podId(a), "WIN", seatPlayer(a, 0), {}, {}, "test correction", seatPlayer(b, 1)));
         QCOMPARE(podAt(currentRound(big), 0)["status"].toString(), QString("PENDING"));
         QVERIFY(auditActions(big).filter("RESULT").isEmpty());
         Q_UNUSED(pids);
@@ -3751,7 +3765,7 @@ private slots:
 
         // changing only second place is a correction like any other, with no effect on the standings
         QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::reportPodResult(id, "WIN", seated[0], {}, cdb::NONE, seated[2]));
-        const int v2 = cdb::reportPodResult(id, "WIN", seated[0], {}, v1, seated[2]);
+        const int v2 = cdb::reportPodResult(id, "WIN", seated[0], {}, v1, seated[2], "test correction");
         QCOMPARE(v2, v1 + 1);
         QCOMPARE(savedSecond(id), seated[2]);
         QCOMPARE(cdb::getStandings(tid), standings);
@@ -3761,26 +3775,26 @@ private slots:
         QCOMPARE(entry["detail"].toMap()["second_place"].toLongLong(), seated[2]);
 
         // and back to not recorded
-        const int v3 = cdb::reportPodResult(id, "WIN", seated[0], {}, v2, 0);
+        const int v3 = cdb::reportPodResult(id, "WIN", seated[0], {}, v2, 0, "test correction");
         QCOMPARE(savedSecond(id), qint64(0));
         QCOMPARE(cdb::getStandings(tid), standings);
 
         // a new winner never keeps a second place that was given for the old one
-        const int v4 = cdb::reportPodResult(id, "WIN", seated[0], {}, v3, seated[3]);
-        const int v5 = cdb::reportPodResult(id, "WIN", seated[3], {}, v4);
+        const int v4 = cdb::reportPodResult(id, "WIN", seated[0], {}, v3, seated[3], "test correction");
+        const int v5 = cdb::reportPodResult(id, "WIN", seated[3], {}, v4, {}, "test correction");
         QCOMPARE(savedSecond(id), qint64(0));
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(id, "WIN", seated[3], {}, v5, seated[3]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(id, "WIN", seated[3], {}, v5, seated[3], "test correction"));
 
         // a draw has no second place
-        const int v6 = cdb::reportPodResult(id, "WIN", seated[3], {}, v5, seated[0]);
+        const int v6 = cdb::reportPodResult(id, "WIN", seated[3], {}, v5, seated[0], "test correction");
         QCOMPARE(savedSecond(id), seated[0]);
-        const int v7 = cdb::reportPodResult(id, "DRAW", 0, {seated[1]}, v6);
+        const int v7 = cdb::reportPodResult(id, "DRAW", 0, {seated[1]}, v6, {}, "test correction");
         QCOMPARE(savedSecond(id), qint64(0));
 
         // clearing a pod's result, its undo, removes it along with the result
-        const int v8 = cdb::reportPodResult(id, "WIN", seated[1], {}, v7, seated[2]);
+        const int v8 = cdb::reportPodResult(id, "WIN", seated[1], {}, v7, seated[2], "test correction");
         QCOMPARE(savedSecond(id), seated[2]);
-        cdb::clearPodResult(id, v8);
+        cdb::clearPodResult(id, v8, "test correction");
         QCOMPARE(savedSecond(id), qint64(0));
         QCOMPARE(podAt(currentRound(tid), 0)["status"].toString(), QString("PENDING"));
         entry = cdb::getAudit(tid)[0].toMap();
@@ -3804,14 +3818,14 @@ private slots:
         QCOMPARE(savedSecond(id), seated[1]);
         QCOMPARE(commanderOutcome(tid), before);
         QCOMPARE(cdb::getRounds(tid).size(), rounds);
-        QVERIFY2(!cdb::correctResult(id, "WIN", seated[0], {}, {}, {}, seated[1]), "no change, nothing to do");
+        QVERIFY2(!cdb::correctResult(id, "WIN", seated[0], {}, {}, "test correction", seated[1]), "no change, nothing to do");
 
         // a correction to a draw changes points, so the question is asked as before, and it clears second place
-        QVERIFY_THROWS_EXCEPTION(cdb::ResolutionRequired, cdb::correctResult(id, "DRAW", 0, {}));
+        QVERIFY_THROWS_EXCEPTION(cdb::ResolutionRequired, cdb::correctResult(id, "DRAW", 0, {}, {}, "test correction"));
         QCOMPARE(savedSecond(id), seated[1]);
-        QVERIFY(cdb::correctResult(id, "DRAW", 0, {}, "KEEP"));
+        QVERIFY(cdb::correctResult(id, "DRAW", 0, {}, "KEEP", "test correction"));
         QCOMPARE(savedSecond(id), qint64(0));
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(id, "DRAW", 0, {}, "KEEP", {}, seated[1]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(id, "DRAW", 0, {}, "KEEP", "test correction", seated[1]));
         Q_UNUSED(pids);
     }
 
@@ -3824,7 +3838,7 @@ private slots:
         const QList<qint64> seated = ids(podAt(r1, 0)["seats"].toList());
         const QStringList before = commanderOutcome(tid);
         const int entries = auditActions(tid).size();
-        QVERIFY(cdb::correctResult(id, "WIN", seated[0], {}, {}, {}, seated[3]));
+        QVERIFY(cdb::correctResult(id, "WIN", seated[0], {}, {}, "test correction", seated[3]));
         QCOMPARE(savedSecond(id), seated[3]);
         QCOMPARE(commanderOutcome(tid), before);
         QCOMPARE(auditActions(tid).size(), entries + 1);               // the correction only, no new final standings
@@ -3836,7 +3850,7 @@ private slots:
         cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0));
         QVERIFY(tdb::terminateTournament(ended));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
-                                 cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, {}, {}, seatPlayer(pod, 1)));
+                                 cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, {}, "test correction", seatPlayer(pod, 1)));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
                                  cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, cdb::NONE, seatPlayer(pod, 1)));
         QCOMPARE(savedSecond(podId(pod)), qint64(0));
@@ -3891,9 +3905,9 @@ private slots:
         const int v = cdb::reportPodResult(id, "WIN", seatPlayer(pod, 0), {}, cdb::NONE, seatPlayer(pod, 1));
         const QList<Rows> reported = savedCommander(tid);
         db::exec("CREATE TRIGGER break_save BEFORE INSERT ON commander_audit BEGIN SELECT RAISE(ABORT, 'cannot be saved'); END");
-        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::reportPodResult(id, "WIN", seatPlayer(pod, 0), {}, v, seatPlayer(pod, 2)));
-        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::clearPodResult(id, v));
-        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::correctResult(id, "DRAW", 0, {}));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::reportPodResult(id, "WIN", seatPlayer(pod, 0), {}, v, seatPlayer(pod, 2), "test correction"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::clearPodResult(id, v, "test correction"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::correctResult(id, "DRAW", 0, {}, {}, "test correction"));
         QCOMPARE(savedCommander(tid), reported);
         QCOMPARE(savedSecond(id), seatPlayer(pod, 1));
         db::exec("DROP TRIGGER break_save");
@@ -3961,7 +3975,7 @@ private slots:
         db::exec("ALTER TABLE commander_pods_older RENAME TO commander_pods");
         db::exec("CREATE INDEX idx_cmd_pods_round ON commander_pods(round_id)");
         db::exec("PRAGMA foreign_keys = ON");
-        db::exec("DELETE FROM schema_migrations WHERE version IN (7, 8)");
+        db::exec("DELETE FROM schema_migrations WHERE version IN (7, 8, 9)");
         QCOMPARE(db::query("SELECT * FROM commander_pods ORDER BY pod_id"), podsBefore);
 
         restart();
@@ -3988,7 +4002,7 @@ private slots:
 
         // an older finalized result can be given one by correction, still without points
         const QVariantMap pod = podAt(cdb::getRounds(tid)[0].toMap(), 0);
-        QVERIFY(cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, {}, {}, seatPlayer(pod, 1)));
+        QVERIFY(cdb::correctResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, {}, "test correction", seatPlayer(pod, 1)));
         QCOMPARE(savedSecond(podId(pod)), seatPlayer(pod, 1));
         QCOMPARE(cdb::getStandings(tid), standings);
         Q_UNUSED(pids);
@@ -4125,7 +4139,7 @@ private:
         db::exec("ALTER TABLE commander_pods_older RENAME TO commander_pods");
         db::exec("CREATE INDEX idx_cmd_pods_round ON commander_pods(round_id)");
         db::exec("PRAGMA foreign_keys = ON");
-        db::exec("DELETE FROM schema_migrations WHERE version = 8");
+        db::exec("DELETE FROM schema_migrations WHERE version IN (8, 9)");
     }
 
 private slots:
@@ -4213,13 +4227,13 @@ private slots:
 
         // confirmed: no clear second
         const int v = podAt(currentRound(tid), 0)["result_version"].toInt();
-        cdb::reportPodResult(podId(a), "WIN", seatPlayer(a, 0), {}, v, cdb::SecondPlace::noClearSecond());
+        cdb::reportPodResult(podId(a), "WIN", seatPlayer(a, 0), {}, v, cdb::SecondPlace::noClearSecond(), "test correction");
         QCOMPARE(state(a).toString(), QString("NONE"));
         QVERIFY(db::value("SELECT second_place_player_id FROM commander_pods WHERE pod_id = ?", {podId(a)}).isNull());
         for (int i : {1, 2, 3})
             QCOMPARE(pts(tid, seatPlayer(a, i)), 0.0);
         const QVariantMap entry = cdb::getAudit(tid)[0].toMap();
-        QCOMPARE(entry["action"].toString(), QString("RESULT_CORRECTED"));
+        QCOMPARE(entry["action"].toString(), QString("SECOND_PLACE_RECORDED"));
         QCOMPARE(entry["detail"].toMap()["second_place_before_state"].toString(), QString("PENDING"));
         QCOMPARE(entry["detail"].toMap()["second_place_state"].toString(), QString("NONE"));
         QVERIFY(cdb::getState(tid)["second_pending"].toList().isEmpty());
@@ -4255,7 +4269,7 @@ private slots:
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
                                  cdb::reportPodResult(podId(a), "WIN", seatPlayer(a, 0), {}, cdb::NONE, seatPlayer(b, 0)));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError,
-                                 cdb::correctResult(podId(a), "WIN", seatPlayer(a, 0), {}, {}, {}, seatPlayer(b, 1)));
+                                 cdb::correctResult(podId(a), "WIN", seatPlayer(a, 0), {}, {}, "test correction", seatPlayer(b, 1)));
         QCOMPARE(podAt(currentRound(big), 0)["status"].toString(), QString("PENDING"));
         // the database refuses a second place who did not lose in that pod
         cdb::reportPodResult(podId(a), "WIN", seatPlayer(a, 0), {}, cdb::NONE, seatPlayer(a, 1));
@@ -4281,20 +4295,20 @@ private slots:
         int v = cdb::reportPodResult(id, "WIN", s[0], {}, cdb::NONE, s[1]);
         QCOMPARE(points(), (QList<double>{5, 2.5, 0, 0}));
         QCOMPARE(cdb::reportPodResult(id, "WIN", s[0], {}, cdb::NONE, s[1]), v);       // a repeated save: once only
-        QCOMPARE(cdb::reportPodResult(id, "WIN", s[0], {}, v, s[1]), v);
+        QCOMPARE(cdb::reportPodResult(id, "WIN", s[0], {}, v, s[1], "test correction"), v);
         QCOMPARE(points(), (QList<double>{5, 2.5, 0, 0}));
-        v = cdb::reportPodResult(id, "WIN", s[0], {}, v, s[2]);
+        v = cdb::reportPodResult(id, "WIN", s[0], {}, v, s[2], "test correction");
         QCOMPARE(points(), (QList<double>{5, 0, 2.5, 0}));
-        v = cdb::reportPodResult(id, "WIN", s[1], {}, v, s[0]);
+        v = cdb::reportPodResult(id, "WIN", s[1], {}, v, s[0], "test correction");
         QCOMPARE(points(), (QList<double>{2.5, 5, 0, 0}));
-        v = cdb::reportPodResult(id, "WIN", s[1], {}, v, cdb::SecondPlace::noClearSecond());
+        v = cdb::reportPodResult(id, "WIN", s[1], {}, v, cdb::SecondPlace::noClearSecond(), "test correction");
         QCOMPARE(points(), (QList<double>{0, 5, 0, 0}));
-        v = cdb::reportPodResult(id, "DRAW", 0, {}, v);
+        v = cdb::reportPodResult(id, "DRAW", 0, {}, v, {}, "test correction");
         QCOMPARE(points(), (QList<double>{1, 1, 1, 1}));
         QVERIFY(db::value("SELECT second_place_status FROM commander_pods WHERE pod_id = ?", {id}).isNull());
-        v = cdb::reportPodResult(id, "WIN", s[3], {}, v, s[2]);
+        v = cdb::reportPodResult(id, "WIN", s[3], {}, v, s[2], "test correction");
         QCOMPARE(points(), (QList<double>{0, 0, 2.5, 5}));
-        cdb::clearPodResult(id, v);
+        cdb::clearPodResult(id, v, "test correction");
         QCOMPARE(points(), (QList<double>{0, 0, 0, 0}));
         QVERIFY(db::value("SELECT second_place_player_id FROM commander_pods WHERE pod_id = ?", {id}).isNull());
         QCOMPARE(auditActions(tid).count("RESULT_REPORTED"), 1);
@@ -4313,9 +4327,9 @@ private slots:
         const QString round2 = db::value("SELECT pairing_inputs_json FROM commander_rounds WHERE tournament_id = ? "
                                          "AND round_number = 2", {tid}).toString();
         // once the round is final its second places are decided
-        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(podId(pod), "WIN", s[0], {}, "KEEP", {}, 0));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(podId(pod), "WIN", s[0], {}, "KEEP", "test correction", 0));
         // moving the award changes points, so round 2 needs a decision like any other score change
-        QVERIFY_THROWS_EXCEPTION(cdb::ResolutionRequired, cdb::correctResult(podId(pod), "WIN", s[0], {}, {}, {}, s[2]));
+        QVERIFY_THROWS_EXCEPTION(cdb::ResolutionRequired, cdb::correctResult(podId(pod), "WIN", s[0], {}, {}, "test correction", s[2]));
         QCOMPARE(pts(tid, s[1]), 2.5);
         QVERIFY(cdb::correctResult(podId(pod), "WIN", s[0], {}, "KEEP", "slip misread", s[2]));
         QCOMPARE(pts(tid, s[1]), 0.0);
@@ -4368,7 +4382,7 @@ private slots:
         QCOMPARE(pts(tid, s[1]), 0.0);
         QVERIFY(db::value("SELECT second_place_status FROM commander_pods WHERE pod_id = ?", {podId(pod)}).isNull());
         // no clear second is not a separate state there: it is saved as nothing, and nothing blocks the round
-        v = cdb::reportPodResult(podId(pod), "WIN", s[0], {}, v, cdb::SecondPlace::noClearSecond());
+        v = cdb::reportPodResult(podId(pod), "WIN", s[0], {}, v, cdb::SecondPlace::noClearSecond(), "test correction");
         QVERIFY(db::value("SELECT second_place_player_id FROM commander_pods WHERE pod_id = ?", {podId(pod)}).isNull());
         QVERIFY(db::value("SELECT second_place_status FROM commander_pods WHERE pod_id = ?", {podId(pod)}).isNull());
         QVERIFY(cdb::getState(tid)["second_pending"].toList().isEmpty());
@@ -4655,16 +4669,74 @@ private slots:
         QCOMPARE(finalStandingIds(tid).mid(0, 4), (QList<qint64>{s[1], s[2], s[3], s[0]}));
 
         // two still in at the end
-        v = cdb::confirmFinal(tid, {{s[1]}, {s[0]}}, "NO_WINNER", 0, v);
+        v = cdb::confirmFinal(tid, {{s[1]}, {s[0]}}, "NO_WINNER", 0, v, "two were still in");
         QCOMPARE(finalOrder(tid), (QList<qint64>{s[2], s[3], s[0], s[1]}));
         // the fourth seed won after the other three were knocked out together: the group comes before any seed
-        v = cdb::confirmFinal(tid, {{s[0], s[1], s[2]}}, "WIN", s[3], v);
+        v = cdb::confirmFinal(tid, {{s[0], s[1], s[2]}}, "WIN", s[3], v, "seed 4 won after all");
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmFinal(tid, {}, "NO_WINNER", 0, v));      // a correction needs a reason
         bases.clear();
         QCOMPARE(finalOrder(tid, &bases), (QList<qint64>{s[3], s[0], s[1], s[2]}));
         QCOMPARE(bases.first(), QString("WINNER"));
         QCOMPARE(cdb::confirmFinal(tid, {{s[1], s[0], s[2]}}, "WIN", s[3], v), v);       // the same result again
         QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::confirmFinal(tid, {}, "NO_WINNER", 0, v - 1));
         QCOMPARE(qualifyingFigures(tid).size(), 8);
+        Q_UNUSED(pids);
+    }
+
+    // a knockout never removes every player still in: the last one left won, or the last ones went
+    // out together and nobody did (the no-winner ending); the refusal says so and changes nothing,
+    // the marker that play started included
+
+    void aKnockoutOfEveryPlayerStillInIsRefusedAndPointsToNoWinner()
+    {
+        auto [tid, pids] = qualified(8, 1);
+        const QList<qint64> s = candidateSeeds(tid);
+        cdb::createFinal(tid, s);
+        int v = cdb::saveFinalEliminations(tid, {{s[3]}}, finalVersion(tid));
+        v = cdb::saveFinalEliminations(tid, {{s[3]}, {s[2], s[1]}}, v);              // two together; one player left
+        const QVariant started = db::value("SELECT play_started_at FROM commander_finals WHERE tournament_id = ?", {tid});
+        QVERIFY(!started.isNull());
+        const QList<Rows> before = savedEvent(tid);
+        const auto refusal = [&](const auto &fn) {
+            try {
+                fn();
+            } catch (const cdb::CommanderError &e) {
+                return e.message;
+            }
+            return QStringLiteral("not refused");
+        };
+        const auto pointsToNoWinner = [](const QString &why) {
+            return why.contains("cannot remove every player still in") && why.contains("choose them as the winner")
+                   && why.contains("No winner / Draw");
+        };
+        // the last player alone, as reporting
+        QString why = refusal([&] { cdb::saveFinalEliminations(tid, {{s[3]}, {s[2], s[1]}, {s[0]}}, v); });
+        QVERIFY2(pointsToNoWinner(why), qPrintable(why));
+        // the last three together, even as a correction with a reason
+        why = refusal([&] { cdb::saveFinalEliminations(tid, {{s[3]}, {s[2], s[1], s[0]}}, v, "they all went out"); });
+        QVERIFY2(pointsToNoWinner(why), qPrintable(why));
+        // and as the final's result
+        why = refusal([&] { cdb::confirmFinal(tid, {{s[3]}, {s[2], s[1]}, {s[0]}}, "NO_WINNER", 0, v); });
+        QVERIFY2(pointsToNoWinner(why), qPrintable(why));
+        QVERIFY(savedEvent(tid) == before);
+        db::closeThreadConnection();                                                   // read back from the file
+        QVERIFY(savedEvent(tid) == before);
+        QCOMPARE(db::value("SELECT play_started_at FROM commander_finals WHERE tournament_id = ?", {tid}), started);
+
+        // the ways out: the player left is the winner, or the last two went out together and nobody won
+        QVariantList places = cdb::previewFinal(tid, {{s[3]}, {s[2], s[1]}}, "WIN", s[0]);
+        QCOMPARE(places[0].toMap()["player_id"].toLongLong(), s[0]);
+        QCOMPARE(places[0].toMap()["basis"].toString(), QString("WINNER"));
+        QCOMPARE(places[1].toMap()["player_id"].toLongLong(), s[1]);                  // out together: seed 2 above seed 3
+        QCOMPARE(places[2].toMap()["player_id"].toLongLong(), s[2]);
+        v = cdb::saveFinalEliminations(tid, {{s[3]}}, v, "the last three were recorded wrongly");
+        places = cdb::previewFinal(tid, {{s[3]}}, "NO_WINNER");
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(places[i].toMap()["player_id"].toLongLong(), s[i]);
+            QCOMPARE(places[i].toMap()["basis"].toString(), QString("QUALIFYING_RANK"));
+        }
+        QCOMPARE(places[3].toMap()["basis"].toString(), QString("ELIMINATION"));
+        QCOMPARE(db::value("SELECT play_started_at FROM commander_finals WHERE tournament_id = ?", {tid}), started);
         Q_UNUSED(pids);
     }
 
@@ -4740,7 +4812,7 @@ private slots:
         // one that changes them offers to discard the final, and saves nothing until asked
         const double before = pts(tid, cs[0]);
         try {
-            cdb::correctResult(podId(c), "WIN", cs[0], {}, {}, {}, cdb::SecondPlace::noClearSecond());
+            cdb::correctResult(podId(c), "WIN", cs[0], {}, {}, "test correction", cdb::SecondPlace::noClearSecond());
             QFAIL("the qualifiers would change");
         } catch (const cdb::FinalAffected &e) {
             QCOMPARE(e.seedsBefore, (QVariantList{seeds[0], seeds[1], seeds[2], seeds[3]}));
@@ -4749,20 +4821,7 @@ private slots:
         QCOMPARE(pts(tid, cs[0]), before);
         QCOMPARE(finalSeedsOf(tid), seeds);
 
-        // once an elimination is recorded the final has begun: such a correction is refused outright
-        int v = cdb::saveFinalEliminations(tid, {{seeds[3]}}, finalVersion(tid));
-        try {
-            cdb::correctResult(podId(c), "WIN", cs[0], {}, "REBUILD_FINAL", {}, cdb::SecondPlace::noClearSecond());
-            QFAIL("the final has begun");
-        } catch (const cdb::FinalAffected &) {
-            QFAIL("a final that has begun is never offered for discarding");
-        } catch (const cdb::CommanderError &e) {
-            QVERIFY2(e.message.contains("already begun"), qPrintable(e.message));
-        }
-        QCOMPARE(pts(tid, cs[0]), before);
-
-        // with the elimination taken back, the organizer can discard the final explicitly
-        v = cdb::saveFinalEliminations(tid, {}, v);
+        // before play has started the organizer can discard the final explicitly
         QVERIFY(cdb::correctResult(podId(c), "WIN", cs[0], {}, "REBUILD_FINAL", "cs0 won pod C",
                                    cdb::SecondPlace::noClearSecond()));
         QVERIFY(cdb::getFinal(tid).isEmpty());
@@ -4773,8 +4832,32 @@ private slots:
         QCOMPARE(discarded["detail"].toMap()["final_id"].toLongLong(), finalId);
         QCOMPARE(discarded["detail"].toMap()["reason"].toString(), QString("cs0 won pod C"));
         QVERIFY(discarded["detail"].toMap()["seeds_after"].toList().contains(cs[0]));
-        cdb::createFinal(tid, candidateSeeds(tid));
+        const QList<qint64> newSeeds = candidateSeeds(tid);
+        const qint64 newFinal = cdb::createFinal(tid, newSeeds);
         QVERIFY(finalSeedsOf(tid).contains(cs[0]));
+
+        // once play has started the seeds are protected, even after the clock is reset and the
+        // knockout is taken back: a correction that would reseed is refused outright
+        timerdb::start(timerdb::Kind::CommanderFinal, newFinal);
+        int v = cdb::saveFinalEliminations(tid, {{newSeeds[3]}}, finalVersion(tid));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::saveFinalEliminations(tid, {}, v));     // taking it back needs a reason
+        v = cdb::saveFinalEliminations(tid, {}, v, "recorded for the wrong player");
+        timerdb::reset(timerdb::Kind::CommanderFinal, newFinal);
+        QVERIFY(cdb::getFinal(tid)["groups"].toList().isEmpty());
+        QVERIFY(cdb::getFinal(tid)["begun"].toBool());
+        const double cs1 = pts(tid, cs[1]);
+        try {
+            cdb::correctResult(podId(c), "WIN", cs[1], {}, "REBUILD_FINAL", "cs1 won instead", cdb::SecondPlace::noClearSecond());
+            QFAIL("the final has begun");
+        } catch (const cdb::FinalAffected &) {
+            QFAIL("a final that has begun is never offered for discarding");
+        } catch (const cdb::CommanderError &e) {
+            QVERIFY2(e.message.contains("already begun"), qPrintable(e.message));
+        }
+        QCOMPARE(pts(tid, cs[1]), cs1);
+        QCOMPARE(finalSeedsOf(tid), newSeeds);
+        QCOMPARE(cdb::getAudit(tid)[0].toMap()["action"].toString(), QString("FINAL_ELIMINATIONS_CORRECTED"));
+        QCOMPARE(cdb::getAudit(tid)[0].toMap()["detail"].toMap()["reason"].toString(), QString("recorded for the wrong player"));
         Q_UNUSED(pids);
     }
 
@@ -4805,7 +4888,7 @@ private slots:
         // a correction that would change who played the final is refused
         const QList<Rows> before = savedEvent(tid);
         try {
-            cdb::correctResult(podId(c), "WIN", cs[2], {}, "REBUILD_FINAL", {}, cdb::SecondPlace::noClearSecond());
+            cdb::correctResult(podId(c), "WIN", cs[2], {}, "REBUILD_FINAL", "test correction", cdb::SecondPlace::noClearSecond());
             QFAIL("the final has been played");
         } catch (const cdb::CommanderError &e) {
             QVERIFY2(e.message.contains("been played"), qPrintable(e.message));
@@ -4958,7 +5041,7 @@ private slots:
         const qint64 rid = rnd["round_id"].toLongLong();
         const int v = cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0));
         QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::finalizeRound(rid));
-        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, v, seatPlayer(pod, 1));
+        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, v, seatPlayer(pod, 1), "test correction");
         cdb::finalizeRound(rid);
         const QList<qint64> s = candidateSeeds(tid);
         cdb::createFinal(tid, s);
@@ -5026,6 +5109,120 @@ private slots:
         QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"));
         QVERIFY(!applog::status().available);
         Q_UNUSED(pids);
+    }
+    // usability pass: settings, corrections with reasons, and a final whose play has started
+
+    void newEventsDefaultToEliminatedPlayersLosingAndKeepTheirChoice()
+    {
+        const qint64 fresh = makeEvent(4, 1, false).first;
+        QCOMPARE(cdb::getEvent(fresh)["settings"].toMap()["draw_policy"].toString(), QString("ELIMINATED_LOSE"));
+        const qint64 chosen = makeEvent(4, 1, false).first;
+        cdb::updateEventConfig(chosen, 0, "ALL_DRAW");
+        restart();
+        QCOMPARE(cdb::getEvent(chosen)["settings"].toMap()["draw_policy"].toString(), QString("ALL_DRAW"));
+        QCOMPARE(cdb::getEvent(fresh)["settings"].toMap()["draw_policy"].toString(), QString("ELIMINATED_LOSE"));
+        // what the default awards in a drawn pod: a draw for each player still in, a loss for anyone already out
+        cdb::startEvent(fresh);
+        const QVariantMap pod = podAt(currentRound(fresh), 0);
+        const QList<qint64> s = ids(pod["seats"].toList());
+        cdb::reportPodResult(podId(pod), "DRAW", 0, {s[3]});
+        QCOMPARE(pts(fresh, s[0]), 1.0);
+        QCOMPARE(pts(fresh, s[2]), 1.0);
+        QCOMPARE(pts(fresh, s[3]), 0.0);
+    }
+
+    void suggestedRoundsFollowCheckInsOnlyUntilTheOrganizerSetsThem()
+    {
+        auto [tid, pids] = makeEvent(8, 0, false);
+        cdb::updateEventConfig(tid, 0, "ALL_DRAW", "HIGH", 1);       // other settings, not the rounds
+        for (qint64 p : addPlayers(12, "More"))
+            tdb::enrollPlayer(tid, p);
+        cdb::syncRecommendation(tid);
+        QCOMPARE(cdb::getEvent(tid)["swiss_rounds"].toInt(), 4);     // not chosen: follows the 20 checked in
+        QVERIFY(!cdb::getEvent(tid)["rounds_chosen"].toBool());
+        cdb::updateEventConfig(tid, 2);                               // chosen
+        QVERIFY(cdb::getEvent(tid)["rounds_chosen"].toBool());
+        for (qint64 p : addPlayers(20, "Even more"))
+            tdb::enrollPlayer(tid, p);
+        cdb::syncRecommendation(tid);
+        QCOMPARE(cdb::getEvent(tid)["swiss_rounds"].toInt(), 2);
+        // "use suggested rounds" sets the suggestion for the 40 checked in, and changes nothing else
+        QCOMPARE(cdb::useSuggestedRounds(tid), 5);
+        const QVariantMap ev = cdb::getEvent(tid);
+        QCOMPARE(ev["swiss_rounds"].toInt(), 5);
+        QVERIFY(!ev["rounds_chosen"].toBool());
+        QCOMPARE(ev["settings"].toMap()["draw_policy"].toString(), QString("ALL_DRAW"));
+        QCOMPARE(ev["settings"].toMap()["three_pod_placement"].toString(), QString("HIGH"));
+        QVERIFY(ev["final_enabled"].toBool());
+        QCOMPARE(cdb::getAudit(tid)[0].toMap()["detail"].toMap()["rounds_before"].toInt(), 2);
+        // without three checked in there is no suggestion, and nothing follows it
+        const qint64 small = makeEvent(2, 3, false).first;
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::useSuggestedRounds(small));
+        cdb::syncRecommendation(small);
+        QCOMPARE(cdb::getEvent(small)["swiss_rounds"].toInt(), 3);
+        cdb::startEvent(tid);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::useSuggestedRounds(tid));
+        Q_UNUSED(pids);
+    }
+
+    void changingASavedPodResultNeedsAReasonAndFinishingASecondPlaceDoesNot()
+    {
+        auto [tid, pids] = makeEvent(8, 2);
+        const QVariantMap pod = podAt(currentRound(tid), 0);
+        const qint64 id = podId(pod);
+        const QList<qint64> s = ids(pod["seats"].toList());
+        int v = cdb::reportPodResult(id, "WIN", s[0]);                    // the quick Winner action
+        v = cdb::reportPodResult(id, "WIN", s[0], {}, v, s[1]);           // finishing the pending second: reporting
+        QVariantMap entry = cdb::getAudit(tid)[0].toMap();
+        QCOMPARE(entry["action"].toString(), QString("SECOND_PLACE_RECORDED"));
+        QVERIFY(!entry["detail"].toMap().contains("reason"));
+        QCOMPARE(pts(tid, s[1]), 2.5);
+        // anything else that changes it is a correction
+        QList<Rows> before = savedCommander(tid);
+        for (const QString &blank : {QString(), QString("   ")}) {
+            QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(id, "WIN", s[0], {}, v, s[2], blank));
+            QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::reportPodResult(id, "WIN", s[3], {}, v, s[1], blank));
+            QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::clearPodResult(id, v, blank));
+        }
+        QCOMPARE(savedCommander(tid), before);
+        v = cdb::reportPodResult(id, "WIN", s[0], {}, v, s[2], "  second was misheard ");
+        entry = cdb::getAudit(tid)[0].toMap();
+        QCOMPARE(entry["action"].toString(), QString("RESULT_CORRECTED"));
+        QCOMPARE(entry["detail"].toMap()["reason"].toString(), QString("second was misheard"));
+        QCOMPARE(entry["detail"].toMap()["second_place_before"].toLongLong(), s[1]);
+        QCOMPARE(entry["detail"].toMap()["second_place"].toLongLong(), s[2]);
+        QCOMPARE(pts(tid, s[1]), 0.0);
+        QCOMPARE(pts(tid, s[2]), 2.5);
+        cdb::clearPodResult(id, v, "reported in the wrong pod");
+        QCOMPARE(cdb::getAudit(tid)[0].toMap()["detail"].toMap()["reason"].toString(), QString("reported in the wrong pod"));
+        // a finalized round and a confirmed final need one as well
+        playWithSeconds(tid);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(id, "WIN", s[1], {}, {}, {}, s[0]));
+        QVERIFY(cdb::correctResult(id, "WIN", s[1], {}, {}, "slip", s[0]));
+        Q_UNUSED(pids);
+    }
+
+    void finalsThatAlreadyStartedAreMarkedByTheUpdate()
+    {
+        auto [played, a] = qualified(8, 1);
+        const QList<qint64> seeds = candidateSeeds(played);
+        cdb::createFinal(played, seeds);
+        cdb::saveFinalEliminations(played, {{seeds[3]}}, finalVersion(played));
+        auto [unplayed, b] = qualified(8, 1, 999);
+        cdb::createFinal(unplayed, candidateSeeds(unplayed));
+        // as the previous version left them: no mark yet
+        db::exec("ALTER TABLE commander_finals DROP COLUMN play_started_at");
+        db::exec("DELETE FROM schema_migrations WHERE version = 9");
+        restart();
+        QVERIFY(!db::value("SELECT play_started_at FROM commander_finals WHERE tournament_id = ?", {played}).isNull());
+        QVERIFY(db::value("SELECT play_started_at FROM commander_finals WHERE tournament_id = ?", {unplayed}).isNull());
+        QVERIFY(cdb::getFinal(played)["begun"].toBool());
+        QVERIFY(!cdb::getFinal(unplayed)["begun"].toBool());
+        // taking the knockout back with a reason leaves the final begun
+        cdb::saveFinalEliminations(played, {}, finalVersion(played), "wrong player");
+        QVERIFY(cdb::getFinal(played)["begun"].toBool());
+        Q_UNUSED(a);
+        Q_UNUSED(b);
     }
 };
 

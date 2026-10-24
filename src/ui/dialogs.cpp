@@ -482,6 +482,46 @@ bool askText(QWidget *parent, const QString &title, const QString &label, const 
     return true;
 }
 
+bool askReason(QWidget *parent, const QString &title, const QString &text, const QString &okText, QString *reason)
+{
+    if (g_autoConfirm) {
+        *reason = QStringLiteral("test correction");
+        return true;
+    }
+    QDialog dlg(parent);
+    dlg.setWindowTitle(title);
+    dlg.setMinimumWidth(qMin(T::px(380), parent->window()->width() - 24));
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->setSpacing(10);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->addWidget(T::lbl(title, T::TEXT, 20, 700, true));
+    layout->addWidget(T::lbl(text, T::TEXT, 13, 400, true));
+    auto *row = new QHBoxLayout;
+    row->setSpacing(8);
+    auto *edit = new QLineEdit;
+    edit->setPlaceholderText("Reason (required)");
+    edit->setAccessibleName("Reason for the correction");
+    row->addWidget(edit, 1);
+    QPushButton *cancel = T::button("Cancel", "ghost");
+    QObject::connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    QPushButton *ok = T::button(okText, "danger");
+    ok->setEnabled(false);
+    QObject::connect(ok, &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(edit, &QLineEdit::textChanged, ok, [ok](const QString &t) { ok->setEnabled(!t.trimmed().isEmpty()); });
+    QObject::connect(edit, &QLineEdit::returnPressed, ok, [ok] {
+        if (ok->isEnabled())
+            ok->click();
+    });
+    row->addWidget(cancel);
+    row->addWidget(ok);
+    layout->addLayout(row);
+    edit->setFocus();
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+    *reason = edit->text().trimmed();
+    return !reason->isEmpty();
+}
+
 bool confirmEndEarly(QWidget *parent, const QString &tournamentName)
 {
     QDialog dlg(parent);

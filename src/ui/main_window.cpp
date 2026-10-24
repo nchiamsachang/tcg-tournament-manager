@@ -98,6 +98,7 @@ MainWindow::MainWindow()
 
     db::initialize();
     applyTheme();
+    T::installWheelGuard();
     buildChrome();
     restoreActiveTabs();
     navigateTo("home");

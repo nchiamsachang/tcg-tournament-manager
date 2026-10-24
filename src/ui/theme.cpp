@@ -15,6 +15,8 @@
 #include <QHash>
 #include <QSvgRenderer>
 #include <QWheelEvent>
+#include <QAbstractScrollArea>
+#include <QAbstractSpinBox>
 #include <QCursor>
 #include <QEvent>
 #include <QKeyEvent>
@@ -424,6 +426,51 @@ QPushButton *choicePill(const QString &text)
     return b;
 }
 
+namespace {
+
+// a wheel turn over a closed combo or spin box goes to the page under it; nothing else is touched
+class WheelGuard : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *obj, QEvent *event) override
+    {
+        if (event->type() != QEvent::Wheel || !obj->isWidgetType())
+            return false;
+        // an open drop-down list is a window of its own, so the walk stops before its combo
+        QWidget *field = nullptr;
+        for (auto *w = static_cast<QWidget *>(obj); w && !field; w = w->isWindow() ? nullptr : w->parentWidget())
+            if (qobject_cast<QComboBox *>(w) || qobject_cast<QAbstractSpinBox *>(w))
+                field = w;
+        if (!field)
+            return false;
+        for (QWidget *w = field->parentWidget(); w; w = w->isWindow() ? nullptr : w->parentWidget()) {
+            auto *area = qobject_cast<QAbstractScrollArea *>(w);
+            if (!area)
+                continue;
+            const auto *wheel = static_cast<QWheelEvent *>(event);
+            QWheelEvent moved(area->viewport()->mapFromGlobal(wheel->globalPosition()), wheel->globalPosition(),
+                              wheel->pixelDelta(), wheel->angleDelta(), wheel->buttons(), wheel->modifiers(),
+                              wheel->phase(), wheel->inverted(), wheel->source(), wheel->pointingDevice());
+            QCoreApplication::sendEvent(area->viewport(), &moved);
+            break;
+        }
+        return true;
+    }
+};
+
+}
+
+void installWheelGuard()
+{
+    static WheelGuard *guard = nullptr;
+    if (guard || !qApp)
+        return;
+    guard = new WheelGuard(qApp);
+    qApp->installEventFilter(guard);
+}
+
 QComboBox *combo()
 {
     auto *c = new QComboBox;
@@ -566,7 +613,7 @@ QString appQss()
            + ";border-radius:10px;font-family:" + MONO + ";font-size:" + P(12) + "px;}";
 }
 
-WrapButton::WrapButton(const QString &text, const QString &kind)
+WrapButton::WrapButton(const QString &text, const QString &kind) : kind_(kind)
 {
     setAccessibleName(text);
     label_ = new QLabel(breakable(text), this);
@@ -584,9 +631,22 @@ WrapButton::WrapButton(const QString &text, const QString &kind)
     paintLabel();
 }
 
+void WrapButton::makeChoice()
+{
+    setCheckable(true);
+    const QString text = label_->text();
+    auto restyle = [this, text](bool on) {
+        label_->setText(on ? QStringLiteral("✓  ") + text : text);
+        label_->setFont(T::font(14, on ? 700 : 500));
+        setStyleSheet(pillQss(on, MIN_HIT).replace("min-height", "min-width:60px;min-height"));
+    };
+    connect(this, &QPushButton::toggled, this, restyle);
+    restyle(isChecked());
+}
+
 void WrapButton::paintLabel()
 {
-    label_->setStyleSheet("color:" + (isEnabled() ? TEXT : MUTED) + ";background:transparent;border:none;");
+    label_->setStyleSheet("color:" + (isEnabled() ? labelColor(kind_) : MUTED) + ";background:transparent;border:none;");
 }
 
 void WrapButton::changeEvent(QEvent *e)

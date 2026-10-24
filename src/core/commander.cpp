@@ -273,8 +273,11 @@ static void checkFinalGroups(const QList<qint64> &seeds, const QList<QList<qint6
             seen.insert(p);
         }
     }
+    // a knockout always leaves someone in: the last player won, or the last ones went out together and nobody did
     if (seen.size() > 3)
-        throw std::invalid_argument("At most three players can be eliminated: the last player left wins the final.");
+        throw std::invalid_argument("A knockout cannot remove every player still in the final. If one player is left, "
+                                    "they won: choose them as the winner. If the last players went out at the same "
+                                    "moment, nobody won: choose No winner / Draw.");
 }
 
 void checkFinalProgress(const QList<qint64> &seeds, const QList<QList<qint64>> &groups)

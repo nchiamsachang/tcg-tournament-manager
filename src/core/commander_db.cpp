@@ -124,11 +124,12 @@ static QList<QList<qint64>> finalGroups(const Rows &finalists)
     return out;
 }
 
-// the final has begun once an elimination or its result is saved, or its clock was started
+// the final has begun once an elimination or its result was saved, or its clock was started;
+// play_started_at keeps that even after the clock is reset or an elimination is taken back
 static bool finalBegun(const Row &fin, const Rows &finalists)
 {
-    if (fin["status"].toString() == "CONFIRMED" || fin["timer_state"].toString() != "STOPPED"
-        || fin["timer_elapsed_secs"].toInt() > 0)
+    if (!fin["play_started_at"].isNull() || fin["status"].toString() == "CONFIRMED"
+        || fin["timer_state"].toString() != "STOPPED" || fin["timer_elapsed_secs"].toInt() > 0)
         return true;
     for (const Row &f : finalists)
         if (!f["elimination_group"].isNull())
@@ -280,6 +281,8 @@ qint64 createCommanderTournament(const QString &name, int expectedPlayers, int s
     if (!tdb::isValidRoundMinutes(roundTimeMins))
         throw CommanderError("Round length must be from 1 to 240 minutes.");
     QVariantMap cfg = cmdr::defaultSettings();
+    // rounds given here were set by the organizer; 0 lets them follow the checked-in count
+    cfg["rounds_chosen"] = swissRounds != 0;
     for (auto it = settings.begin(); it != settings.end(); ++it) {
         // the scoring is the club's rules for every new event, not a per-event choice
         for (const char *fixed : {"rules_version", "win_points", "loss_points", "draw_points", "bye_points",
@@ -313,9 +316,12 @@ qint64 createCommanderTournament(const QString &name, int expectedPlayers, int s
     return tid;
 }
 
+static bool roundsChosen(const QVariantMap &ev);
+
 QVariantMap getEvent(qint64 tournamentId)
 {
     QVariantMap ev = loadEvent(tournamentId);
+    ev["rounds_chosen"] = roundsChosen(ev);
     const Rows players = loadPlayers(tournamentId);
     ev["checked_in_count"] = checkedInCount(players);
     ev["active_count"] = activeCount(players);
@@ -370,6 +376,8 @@ void updateEventConfig(qint64 tournamentId, int swissRounds, const QString &draw
         throw CommanderError("The number of rounds and the scoring are frozen once the event has started.");
     const int rounds = swissRounds == 0 ? ev["swiss_rounds"].toInt() : swissRounds;
     QVariantMap settings = ev["settings"].toMap();
+    if (swissRounds != 0)
+        settings["rounds_chosen"] = true;
     if (!drawPolicy.isEmpty()) {
         if (!cmdr::isDrawPolicy(drawPolicy))
             throw CommanderError("Unknown draw policy: " + drawPolicy);
@@ -399,6 +407,39 @@ void updateEventConfig(qint64 tournamentId, int swissRounds, const QString &draw
     tx.commit();
 }
 
+// whether the rounds are the organizer's choice; events saved before the flag existed count
+// rounds that differ from the last suggestion as chosen
+static bool roundsChosen(const QVariantMap &ev)
+{
+    const QVariantMap settings = ev["settings"].toMap();
+    if (settings.contains("rounds_chosen"))
+        return settings["rounds_chosen"].toBool();
+    return ev["swiss_rounds"].toInt() != ev["recommended_rounds"].toInt();
+}
+
+int useSuggestedRounds(qint64 tournamentId)
+{
+    applog::Action log("event.use_suggested_rounds", {{"tournament", tournamentId}});
+    db::Tx tx;
+    const QVariantMap ev = loadOpenEvent(tournamentId);
+    if (ev["stage"].toString() != "REGISTRATION")
+        throw CommanderError("The number of rounds is fixed once the event has started.");
+    const int n = checkedInCount(loadPlayers(tournamentId));
+    if (n < 3)
+        throw CommanderError("A suggestion needs at least three checked-in players.");
+    const int rounds = cmdr::recommendedRounds(n);
+    QVariantMap settings = ev["settings"].toMap();
+    settings["rounds_chosen"] = false;
+    db::exec("UPDATE commander_events SET swiss_rounds = ?, recommended_rounds = ?, settings_json = ? WHERE tournament_id = ?",
+             {rounds, rounds, toJson(settings), tournamentId});
+    db::exec("UPDATE tournaments SET total_rounds = ? WHERE tournament_id = ?", {rounds, tournamentId});
+    audit(tournamentId, "CONFIG_UPDATED", {{"rounds", rounds}, {"rounds_before", ev["swiss_rounds"]},
+                                           {"suggested_for_checked_in", n}, {"rounds_follow_check_in", true}});
+    tx.commit();
+    log.set("rounds", rounds);
+    return rounds;
+}
+
 QVariantMap syncRecommendation(qint64 tournamentId)
 {
     db::Tx tx;
@@ -406,15 +447,21 @@ QVariantMap syncRecommendation(qint64 tournamentId)
     if (ev["stage"].toString() != "REGISTRATION" || ev["tournament_status"].toString() == tdb::TERMINATED)
         return ev;
     const int n = checkedInCount(loadPlayers(tournamentId));
+    // no suggestion is made for fewer than three players, so nothing follows it either
+    if (n < 3) {
+        ev["rounds_chosen"] = roundsChosen(ev);
+        return ev;
+    }
     const int recRounds = cmdr::recommendedRounds(n);
     const int current = ev["swiss_rounds"].toInt();
-    const int rounds = current == ev["recommended_rounds"].toInt() ? recRounds : current;
+    const int rounds = roundsChosen(ev) ? current : recRounds;
     if (rounds != current || recRounds != ev["recommended_rounds"].toInt()) {
         db::exec("UPDATE commander_events SET swiss_rounds = ?, recommended_rounds = ? WHERE tournament_id = ?",
                  {rounds, recRounds, tournamentId});
         db::exec("UPDATE tournaments SET total_rounds = ? WHERE tournament_id = ?", {rounds, tournamentId});
     }
     ev = loadEvent(tournamentId);
+    ev["rounds_chosen"] = roundsChosen(ev);
     tx.commit();
     return ev;
 }
@@ -677,8 +724,14 @@ static QVariantList refreshCache(qint64 tournamentId, QVariantMap *evOut = nullp
     return table;
 }
 
+static void requireReason(const QString &reason)
+{
+    if (reason.trimmed().isEmpty())
+        throw CommanderError("Changing a saved result is a correction. Give a reason for it.");
+}
+
 int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminatedIds,
-                    int expectedVersion, const SecondPlace &requested)
+                    int expectedVersion, const SecondPlace &requested, const QString &reason)
 {
     applog::Action log("result.report", {{"pod", podId}, {"pod_result", outcome}, {"winner", winnerId},
                                          {"second", requested.playerId}, {"second_decision", int(requested.kind)}});
@@ -704,18 +757,26 @@ int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId, const
         throw ConflictError("This pod's result was changed elsewhere. Reload it and try again.");
     if (before && expectedVersion == NONE)
         throw ConflictError("This pod already has a different result. Reload it to correct that result.");
+    // the winner is saved and only the second place was still to decide: that is reporting
+    const bool completingSecond = before && *before == results && pod["second_place_status"].toString() == "PENDING"
+                                  && second.kind != SecondPlace::NotRecorded;
+    if (before && !completingSecond)
+        requireReason(reason);
     applyResults(pod, outcome, results, scoring, second);
     QVariantMap detail{{"before", resultsDetail(before)}, {"after", resultsDetail(results)}, {"outcome", outcome}};
     addDetail(detail, secondDetail("second_place_before", scoring, pod["outcome"].toString(), before ? previous : SecondPlace()));
     addDetail(detail, secondDetail("second_place", scoring, outcome, second));
-    audit(tid, before ? "RESULT_CORRECTED" : "RESULT_REPORTED", detail, pod["round_id"], podId);
+    if (before && !completingSecond)
+        detail["reason"] = reason.trimmed();
+    audit(tid, !before ? "RESULT_REPORTED" : completingSecond ? "SECOND_PLACE_RECORDED" : "RESULT_CORRECTED", detail,
+          pod["round_id"], podId);
     refreshCache(tid);
     tx.commit();
     log.set("second_state", secondText(secondState(scoring, outcome, second), second.playerId));
     return version + 1;
 }
 
-int clearPodResult(qint64 podId, int expectedVersion)
+int clearPodResult(qint64 podId, int expectedVersion, const QString &reason)
 {
     applog::Action log("result.clear", {{"pod", podId}});
     db::Tx tx;
@@ -730,13 +791,14 @@ int clearPodResult(qint64 podId, int expectedVersion)
         return version;
     if (expectedVersion != NONE && expectedVersion != version)
         throw ConflictError("This pod's result was changed elsewhere. Reload it and try again.");
+    requireReason(reason);
     const qint64 tid = pod["tournament_id"].toLongLong();
     db::exec("UPDATE commander_seats SET result = NULL, eliminated = 0 WHERE pod_id = ?", {podId});
     db::exec("UPDATE commander_pods SET status = 'PENDING', outcome = NULL, advancing_player_id = NULL, "
              "second_place_player_id = NULL, second_place_status = NULL, result_version = result_version + 1, "
              "reported_at = NULL WHERE pod_id = ?", {podId});
     const bool scoring = loadEvent(tid)["scores_second"].toBool();
-    QVariantMap detail{{"before", resultsDetail(currentResults(pod))}, {"after", QVariant()}};
+    QVariantMap detail{{"before", resultsDetail(currentResults(pod))}, {"after", QVariant()}, {"reason", reason.trimmed()}};
     addDetail(detail, secondDetail("second_place_before", scoring, pod["outcome"].toString(), savedSecondPlace(pod)));
     audit(tid, "RESULT_CLEARED", detail, pod["round_id"], podId);
     refreshCache(tid);
@@ -977,6 +1039,7 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
         log.outcome("no-change");
         return false;
     }
+    requireReason(reason);
     const int roundNumber = pod["round_number"].toInt();
     QVariantList later, laterNumbers;
     QStringList laterText;
@@ -1015,7 +1078,7 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
 
     applyResults(pod, outcome, results, scoring, second);
     QVariantMap detail{{"before", resultsDetail(before)}, {"after", resultsDetail(results)}, {"outcome", outcome},
-                       {"reason", reason}, {"resolution", resolution.isEmpty() ? QVariant() : QVariant(resolution)},
+                       {"reason", reason.trimmed()}, {"resolution", resolution.isEmpty() ? QVariant() : QVariant(resolution)},
                        {"later_rounds", laterNumbers}};
     addDetail(detail, secondDetail("second_place_before", scoring, pod["outcome"].toString(), before ? previous : SecondPlace()));
     addDetail(detail, secondDetail("second_place", scoring, outcome, second));
@@ -1289,7 +1352,8 @@ static void saveGroups(qint64 finalId, const QList<QList<qint64>> &groups)
                      {g + 1, finalId, p});
 }
 
-int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &requested, int expectedVersion)
+int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &requested, int expectedVersion,
+                          const QString &reason)
 {
     applog::Action log("final.eliminations", {{"tournament", tournamentId}, {"groups", groupsText(requested)}});
     db::Tx tx;
@@ -1307,10 +1371,17 @@ int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &reque
         log.outcome("no-change");
         return version;
     }
+    // knockouts added after the saved ones are reporting; anything else changes what was saved
+    const bool adding = groups.size() > before.size() && groups.mid(0, before.size()) == before;
+    if (!adding)
+        requireReason(reason);
     saveGroups(finalId, groups);
-    db::exec("UPDATE commander_finals SET result_version = result_version + 1 WHERE final_id = ?", {finalId});
-    audit(tournamentId, "FINAL_ELIMINATIONS_RECORDED", {{"final_id", finalId}, {"groups_before", groupsList(before)},
-                                                        {"groups", groupsList(groups)}});
+    db::exec("UPDATE commander_finals SET result_version = result_version + 1, "
+             "play_started_at = COALESCE(play_started_at, DATETIME('now')) WHERE final_id = ?", {finalId});
+    QVariantMap detail{{"final_id", finalId}, {"groups_before", groupsList(before)}, {"groups", groupsList(groups)}};
+    if (!adding)
+        detail["reason"] = reason.trimmed();
+    audit(tournamentId, adding ? "FINAL_ELIMINATIONS_RECORDED" : "FINAL_ELIMINATIONS_CORRECTED", detail);
     tx.commit();
     return version + 1;
 }
@@ -1359,6 +1430,8 @@ int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &requested, con
         log.outcome("no-change");
         return version;
     }
+    if (correction)
+        requireReason(reason);
     QVariantList previousPlaces;
     for (int place = 1; place <= 4; ++place)
         for (const Row &f : finalists)
@@ -1376,7 +1449,8 @@ int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &requested, con
         bases << p["basis"];
     }
     db::exec("UPDATE commander_finals SET status = 'CONFIRMED', outcome = ?, winner_player_id = ?, "
-             "result_version = result_version + 1, confirmed_at = DATETIME('now') WHERE final_id = ?",
+             "result_version = result_version + 1, confirmed_at = DATETIME('now'), "
+             "play_started_at = COALESCE(play_started_at, DATETIME('now')) WHERE final_id = ?",
              {outcome, idOrNull(winnerId), finalId});
     QVariantMap detail{{"final_id", finalId}, {"outcome", outcome}, {"winner_player_id", idOrNull(winnerId)},
                        {"groups", groupsList(groups)}, {"places", order}, {"bases", bases}};
@@ -1385,7 +1459,7 @@ int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &requested, con
         detail["winner_before"] = fin["winner_player_id"];
         detail["groups_before"] = groupsList(before);
         detail["places_before"] = previousPlaces;
-        detail["reason"] = reason;
+        detail["reason"] = reason.trimmed();
     }
     audit(tournamentId, correction ? "FINAL_CORRECTED" : "FINAL_CONFIRMED", detail);
     complete(tournamentId, correction ? "FINAL_STANDINGS_UPDATED" : "EVENT_COMPLETED");
@@ -1606,8 +1680,8 @@ QStringList rulesText(const QVariantMap &ev)
     const QVariantMap s = ev["settings"].toMap();
     const int n = ev["swiss_rounds"].toInt();
     const QString draw = s["draw_policy"].toString() == "ELIMINATED_LOSE"
-        ? "players still in the game each get the draw; players already eliminated take a loss"
-        : "every player seated in the pod gets the draw";
+        ? "players still in the game each get the full draw points (they are not split); players already eliminated take a loss"
+        : "every player seated in the pod gets the full draw points, including anyone already eliminated";
     const QString placement = s.value("three_pod_placement", cmdr::LEGACY_THREE_POD_PLACEMENT).toString();
     const QString shortPods =
         placement == "LOW" ? "seated from the lowest match-point groups, so the leaders play four-player pods."

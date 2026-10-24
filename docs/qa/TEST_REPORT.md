@@ -452,3 +452,121 @@ On the branch `release/0.2.4` the version in `CMakeLists.txt` was changed from 0
 been made or tested yet: the results in Addendum 7 are for builds labelled 0.2.3 from the
 same code, and the release checks for 0.2.4 still have to be run on its packaged build.
 
+
+## Addendum 9, 2026-10-23: usability pass on the 0.2.4 workflow (not a release)
+
+Changes from the owner's manual test of the 0.2.4 package, on `release/0.2.4`, tested in
+the working tree before they were committed. The version stays 0.2.4. BUG_LOG.md lists the three defects
+found (BUG-014 to BUG-016) and, separately, the usability changes.
+
+- Commander results are entered on the pod cards: Winner +5, then 2nd +2.5 or No clear
+  second, and draws, without a window. Only the saved pod is redrawn.
+- Every change to a saved result needs a non-blank reason, checked in the core
+  (`reportPodResult`, `clearPodResult`, `correctResult`, `saveFinalEliminations`,
+  `confirmFinal`) and kept in the audit entry with the values before and after. Finishing a
+  pending second place is reporting (`SECOND_PLACE_RECORDED`), not a correction.
+- The final is played on its page (Record knockout, one winner or No winner, the places,
+  Confirm final results); a confirmed final is corrected in a smaller window.
+- Update 9 (`commander_final_play_started`) adds `commander_finals.play_started_at`.
+- Rounds: `rounds_chosen`, `cdb::useSuggestedRounds`, "Use suggested rounds".
+- A wheel guard for closed drop-downs and number fields.
+- The draw policy is labelled "Knocked-out players lose" / "Whole pod draws". The default for
+  new events is unchanged (`ELIMINATED_LOSE`).
+
+### Tests
+
+New core tests: `roundsTheOrganizerSetAreNotChangedByCheckIns` (failed on the old code),
+`newEventsDefaultToEliminatedPlayersLosingAndKeepTheirChoice`,
+`suggestedRoundsFollowCheckInsOnlyUntilTheOrganizerSetsThem`,
+`changingASavedPodResultNeedsAReasonAndFinishingASecondPlaceDoesNot`,
+`finalsThatAlreadyStartedAreMarkedByTheUpdate`; `qualifyingCorrectionsNeverQuietlyReseedTheFinal`
+rewritten. New UI tests: `commanderPodResultsAreEnteredOnTheCards`,
+`finalEditorRefusesContradictoryEndings`, `wheelOverClosedFieldsScrollsThePageInstead` (fails
+with the guard switched off), `suggestedRoundsAreShownAndOnlyUsedOnRequest`. Existing UI tests
+were moved to the new controls; none was removed.
+
+Full run through `run_tests.bat` with `BUILD_DIR=build-qt6113` and `TCG_DATA_DIR` on a scratch
+folder, build `8add5e67-modified-20261023-1855`:
+
+| Program | SHA-256 | Result |
+|---|---|---|
+| `test_core.exe` | `8c60bf7e21dcc47c4193059bce0434e16c811c78dd6ce507c67ac08a3f586420` | 138 passed, 0 failed |
+| `test_rules.exe` | `6412bdb3d9180e15c11fdeb76ef353b0dfb995b4f74003831b83db90400abfa9` | 31 passed, 0 failed |
+| `test_ui.exe` | `03402ad787cd4ac135728dfd46efb2968b78460fbffcf7d7bef24310cb1d3643` | 49 passed, 0 failed |
+
+The run before it (build `…-1846`) had one UI failure: `ordinaryActionsLeaveThePageWhereItIs`
+still looked for the old "Wins" label. The test was updated to "Winner" and the whole run
+repeated; the table is that repeat.
+
+### Not done
+
+- The app was not run by hand and no UI Automation smoke test was made on this build. The
+  Commander rows of DEMO_CHECKLIST.md were rewritten for the new controls and are all Not Run.
+- No package was made. The 0.2.4 package being tested (worktree
+  `C:\Users\chimp\tcg-0.2.4-release-build`) was not touched.
+- A second place added later in an event with the earlier rules (`commander-rules-3`,
+  recognition only) counts as a correction and needs a reason; it was left that way.
+
+## Addendum 10, 2026-10-23: the final's knockout controls (not a release)
+
+The owner's manual test of the usability build (Addendum 9) found two problems with the
+top-four final, fixed on `release/0.2.4` and tested in the working tree before they were
+committed. The version stays 0.2.4. BUG_LOG.md: BUG-017 and BUG-018, and one more row in the
+usability changes.
+
+- BUG-017, the page jumped down after a knockout. Reproduced first with a UI test in a real,
+  active window: on the old code the page moved 290 to 390 px at every window and text size,
+  keyboard focus ended on How placements work, and the window's position and size never
+  changed. The cause was focus: the pressed button disabled itself, Qt passed focus on, the
+  rebuilt rows hid that control, and the scroll area followed focus down the page. Fixed by
+  not disabling the pressed button (a flag stops a second save), holding focus on the editor
+  while its controls are rebuilt, and then giving it to the first sensible control on screen.
+- BUG-018, knocking out the last player did nothing visible. The last player's knockout is
+  now disabled with "One player remains. Confirm the winner to finish." beside it; selecting
+  everyone still in disables Confirm knockout with a note pointing to No winner / Draw; the
+  core's refusal says the same. Not reproduced by a test on the old code.
+- The final's controls are two sections, side by side or stacked in a narrow window: Record
+  knockout (pills, several at once, Confirm knockout) and Determine winner (pills, one only,
+  No winner / Draw, the places, Confirm final results). A database failure on the final's
+  actions is shown beside the control with a log reference instead of the general error
+  message, and the selection stays.
+
+Not changed: scoring, the places a final gives, elimination groups and seed tie-breaks, the
+play-started marker (update 9), the migrations, and the reason and audit rules.
+
+### Tests
+
+New core test `aKnockoutOfEveryPlayerStillInIsRefusedAndPointsToNoWinner` (refused as
+reporting, as a correction with a reason and as a confirmation; the saved event, the final,
+the audit and `play_started_at` unchanged, also read back after reopening the database). New
+UI tests `finalKnockoutsLeaveThePageAndTheWindowWhereTheyAre` (failed on the old code, see
+above), `finalControlsArePillsInTwoSections` (layout, keyboard order, multiple selection,
+one winner, a failed save, a double press, the last player, restart, both themes and text
+sizes at 1180, 760 and 360 px wide) and `finalWithNoWinnerPlacesThePlayersStillInBySeed`.
+`topFourFinalRunsThroughTheScreens` and `finalEditorRefusesContradictoryEndings` were moved
+to the new controls.
+
+Full run through `run_tests.bat` with `BUILD_DIR=build-qt6113` and `TCG_DATA_DIR` on a scratch
+folder, 22:51 to 22:58, exit code 0, build `8add5e67-modified-20261023-2251`
+(`TcgTournamentManager.exe` SHA-256 `10933D58BD28C2AC35EA0FEE1B06159391C96B53CC9928AD3BD8668E406B85B4`):
+
+| Program | SHA-256 | Result |
+|---|---|---|
+| `test_core.exe` | `ffd5f86f252d000e0554dab8c8492e230845e56fa6f08af03fd82c69b3e170c2` | 139 passed, 0 failed |
+| `test_rules.exe` | `a8cf803bb2be2ef598046b3f1231cc6c3dd3a56090c7fad15faf87116f613dda` | 31 passed, 0 failed |
+| `test_ui.exe` | `fb610af4e3db8c49f75061e3644810b00e25d1f24be48635db1ca49fb37c04a5` | 52 passed, 0 failed |
+
+A run on the build before it (`...-2240`) gave the same totals; only comments changed between
+the two.
+
+### Looked at, and not done
+
+- Screenshots of the live final taken from the test build (not kept): both themes, standard
+  and large text, 1180 and 380 px wide, and the one-player-left state. They showed the
+  sections side by side and stacked as intended. They also showed the first version of How
+  placements work wrapping and cut off; it was changed back to a plain button and checked
+  again. While making the controls, the narrow large-text sweep found the page 23 px too wide
+  (Confirm final results inside the section); fixed before the run above.
+- The packaged app was not run by hand, and the trackpad, keyboard-only use and the steadiness
+  of the page in the owner's own window were not checked by a person. DEMO_CHECKLIST C-09 to
+  C-13, C-16, C-18, C-19, C-22 to C-24 and C-45 were rewritten or added and are Not Run.

@@ -79,6 +79,8 @@ void inform(QWidget *parent, const QString &title, const QString &text);
 void warn(QWidget *parent, const QString &title, const QString &text);
 // One-line text prompt with Cancel / OK; returns false when cancelled.
 bool askText(QWidget *parent, const QString &title, const QString &label, const QString &okText, QString *value);
+// asks for a nonblank correction reason; false when cancelled, a fixed reason under setAutoConfirm
+bool askReason(QWidget *parent, const QString &title, const QString &text, const QString &okText, QString *reason);
 
 // Ending a tournament early (any format).
 //

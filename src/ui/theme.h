@@ -100,6 +100,8 @@ QPushButton *choicePill(const QString &text);
 QString pillQss(bool selected, int height);     // shared by tabs and choice pills
 // A dropdown whose opened list is opaque and themed (see comboStyle).
 QComboBox *combo();
+// wheel over a closed combo or spin box scrolls the page instead of changing the value
+void installWheelGuard();
 QString buttonQss(const QString &kind = "secondary", int height = MIN_HIT);
 QFrame *panel(const QString &name = "pn", const QString &outline = {}, int width = 1, int radius = 16,
               const QString &bg = {});
@@ -116,6 +118,8 @@ class WrapButton : public QPushButton {
     Q_OBJECT
 public:
     explicit WrapButton(const QString &text, const QString &kind = "ghost");
+    // makes it a checkable choice pill: when checked, a 3px purple outline, a tint, bold text and a tick
+    void makeChoice();
     bool hasHeightForWidth() const override { return true; }
     int heightForWidth(int w) const override;
     QSize sizeHint() const override;
@@ -127,6 +131,7 @@ protected:
 private:
     void paintLabel();
     QLabel *label_ = nullptr;
+    QString kind_;
 };
 
 // A clickable, keyboard-reachable panel.

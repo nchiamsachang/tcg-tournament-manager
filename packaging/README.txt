@@ -59,19 +59,21 @@ Commander:
    players should play one final pod after them (for example "2 qualifying rounds +
    1 final"). This cannot be changed once the tournament starts.
 4. Choose Start tournament. Round 1 shows the pods and seats.
-5. Report each pod: "Wins" beside the winner, or "Draw..." and then tick anyone who
-   was already eliminated when the game was drawn. Change and Clear fix a result.
-6. Second place: after "Wins", the pod says "2nd place not recorded yet" and the
-   points are provisional. Choose "Record 2nd place..." and pick the player who was
-   eliminated last, or "No clear second" when the last players were eliminated at the
-   same moment. A round cannot be finalized until every won pod has this decision.
+5. Report each pod on its card: "Winner +5" beside the winner, or "Draw..." and then
+   tick anyone already knocked out when the game was drawn, and "Save draw".
+   "Correct..." and "Clear..." change a saved result; they ask for a reason.
+6. Second place: after "Winner", the pod says "2nd place still to choose" and the
+   points are provisional. Choose "2nd +2.5" beside the player who was knocked out
+   last, or "No clear second" when the last players went out at the same moment. A
+   round cannot be finalized until every won pod has this decision.
 7. Choose Finalize Round, then Start Round for the next one. Players & drops lets
    someone drop between rounds.
 8. Without a final: after the last round choose Finish tournament.
    With a final: finalize the last round, check the four players and their seeds, and
-   choose Create final. Record each elimination as it happens ("Record elimination...",
-   ticking everyone eliminated at the same moment), then "Record result..." to set the
-   winner, or no winner, and confirm the places.
+   choose Create final. Record each knockout as it happens: under "Record knockout"
+   select everyone knocked out at the same moment and choose "Confirm knockout". When
+   the game ends, choose who won under "Determine winner", or "No winner / Draw",
+   check the places shown and choose "Confirm final results".
 
 Commander scoring (this club's rules for new tournaments):
 - Win 5 points, clear second place 2.5, other losses 0, draw 1, bye 5.

@@ -135,6 +135,10 @@ static Timer change(Kind kind, qint64 roundId, Change what)
     db::exec(QStringLiteral("UPDATE %1 SET timer_state = ?, timer_elapsed_secs = ?, timer_started_at = ? "
                             "WHERE %2 = ?").arg(tableFor(kind), keyFor(kind)),
              {stateText(t.state), t.elapsed, t.hasStart ? QVariant(t.startedAt) : QVariant(), roundId});
+    // starting a final's clock starts its play, which a later reset does not undo
+    if (kind == Kind::CommanderFinal && what == Change::Start)
+        db::exec("UPDATE commander_finals SET play_started_at = COALESCE(play_started_at, DATETIME('now')) WHERE final_id = ?",
+                 {roundId});
     tx.commit();
     return t;
 }

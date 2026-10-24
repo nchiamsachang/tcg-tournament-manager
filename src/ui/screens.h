@@ -14,8 +14,12 @@
 #include <QDialog>
 #include <QGridLayout>
 #include <QLineEdit>
+#include <QButtonGroup>
+#include <QRadioButton>
 #include <QSet>
 #include <QSpinBox>
+
+#include <functional>
 
 // Home: pick a game.
 class HomeScreen : public T::Screen {
@@ -81,6 +85,7 @@ private:
     bool isCommander() const;
     QString game() const;
     void updateSuggestedRounds(int players);
+    bool roundsEdited_ = false;             // a rounds value typed by the organizer is never replaced by a suggestion
     MainWindow *mw_;
 };
 
@@ -124,10 +129,10 @@ public:
     QSpinBox *roundsSpin = nullptr;
     QComboBox *drawCombo = nullptr, *shortCombo = nullptr;
     QCheckBox *finalCheck = nullptr;        // "Add a top-four final"; hidden for events with earlier rules
-    QLabel *recLabel = nullptr, *warnLabel = nullptr;
+    QLabel *recLabel = nullptr;
     QLabel *roundsHint = nullptr, *drawHint = nullptr, *shortHint = nullptr;    // a few words on each setting
     QLabel *finalHint = nullptr, *scoringLabel = nullptr;
-    QPushButton *resetBtn = nullptr;
+    QPushButton *resetBtn = nullptr;        // use suggested rounds
 
 protected:
     void buildUi() override;
@@ -135,7 +140,7 @@ protected:
 
 private:
     void syncConfig(int checkedIn);
-    void configChanged();
+    void configChanged(bool rounds);        // rounds: the rounds field itself was changed
     void updateCounts();
     void updateHints();
     bool loading_ = false;
@@ -271,6 +276,9 @@ public:
     cdb::SecondPlace secondPlace() const;     // never recorded for a draw
     QComboBox *outcomeCombo = nullptr;
     QComboBox *secondCombo = nullptr;
+    QPushButton *saveBtn = nullptr;         // only enabled with a reason, when one is asked for
+    QLabel *error = nullptr;                // why the last save was refused; the choices are kept
+    void showError(const QString &text);
     // combo data for the two decisions that are not a player
     static constexpr qint64 NOT_RECORDED = 0, NO_CLEAR_SECOND = -1;
 
@@ -279,6 +287,71 @@ private:
     QWidget *secondBox_ = nullptr;
     QHash<qint64, QCheckBox *> checks_;
     QLineEdit *reason_ = nullptr;
+};
+
+// top-four final entry, knockouts left and winner right (stacked when narrow); live saves each
+// knockout through the screen, draft saves nothing until confirmed
+class FinalEditor : public QWidget {
+    Q_OBJECT
+public:
+    enum Mode { Live, Draft };
+    FinalEditor(qint64 tournamentId, const QVariantMap &final, Mode mode, QWidget *parent = nullptr);
+    void setFinal(const QVariantMap &final);    // the saved knockouts; a chosen ending is kept while it still fits
+    QList<QList<qint64>> knockouts() const { return groups_; }
+    QList<QList<qint64>> groups() const;    // with a winner, the players still in lost together, last
+    QString outcome() const;                // WIN, NO_WINNER, or empty while no ending is chosen
+    qint64 winner() const;
+    bool ready() const;                     // an ending is chosen and the places can be worked out
+    bool stacked() const;                   // the two sections one above the other
+    // a refused save: shown beside the knockout or the ending, and the selection stays
+    void setError(const QString &text, bool knockout = false);
+    QHash<qint64, QPushButton *> picks;     // players still in, to knock out, several at once
+    QHash<qint64, QPushButton *> winners;   // players still in, one of whom won
+    QPushButton *noWinner = nullptr;        // nobody won: a draw, or everyone still in out at once
+    QPushButton *knockoutBtn = nullptr, *undoBtn = nullptr, *howBtn = nullptr;
+    QPushButton *confirmBtn = nullptr;      // live only
+    QLabel *history = nullptr, *preview = nullptr, *problem = nullptr, *howText = nullptr;
+    QLabel *knockoutNote = nullptr, *knockoutError = nullptr;
+
+signals:
+    void knockoutRequested(const QList<QList<qint64>> &groups);     // live: save these knockouts
+    void undoRequested();                                           // live: take the last one back
+    void confirmRequested();                                        // live: save the ending
+    void changed();
+
+protected:
+    void resizeEvent(QResizeEvent *e) override;
+
+private:
+    void rebuild(int change = 0);
+    void updatePreview();
+    void focusFirstShown(const QList<QPointer<QWidget>> &candidates);
+    qint64 tournamentId_;
+    Mode mode_;
+    QList<qint64> seeds_;
+    QHash<qint64, QString> names_;
+    QHash<qint64, int> seats_;
+    QList<QList<qint64>> groups_;
+    qint64 chosenWinner_ = 0;
+    bool chosenNoWinner_ = false;
+    bool previewOk_ = false;
+    bool saving_ = false;
+    QBoxLayout *sections_ = nullptr;
+    QVBoxLayout *pickRows_ = nullptr, *winnerRows_ = nullptr;
+    QButtonGroup *endingGroup_ = nullptr;
+};
+
+// correcting a confirmed final: the editor in draft mode, places before and after, and a reason
+class FinalCorrectionDialog : public QDialog {
+    Q_OBJECT
+public:
+    FinalCorrectionDialog(QWidget *parent, qint64 tournamentId, const QVariantMap &final);
+    QString reason() const;
+    void showError(const QString &text);
+    FinalEditor *editor = nullptr;
+    QLabel *before = nullptr, *error = nullptr;
+    QLineEdit *reasonEdit = nullptr;
+    QPushButton *saveBtn = nullptr;
 };
 
 // Rounds, pods and results for one Commander event.
@@ -290,9 +363,6 @@ public:
     void report(const QVariantMap &pod, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminated,
                 const cdb::SecondPlace &second = {});
     void createFinal();
-    void recordElimination();
-    void undoElimination();
-    void recordFinal(bool correction);
     void finalizeRound(const QVariantMap &round);
     void finish(const QVariantMap &round);
     void publish(int expectedRound);
@@ -313,16 +383,26 @@ private:
     bool showingFinal() const;
     void buildFinalCreate();
     void buildFinal();
+    void knockout(const QList<QList<qint64>> &groups);
+    void undoKnockout();
+    void confirmFinalFrom(FinalEditor *editor);
+    void correctFinal();
     void buildStrip();
     QPushButton *chipButton(const QString &text, bool selected, const QString &color, bool enabled);
     QWidget *banner(const QString &text, const QString &color, const QString &icon = {});
     void buildLegacyNotice();
     void buildRound(const QVariantMap &round);
+    void fillRoundStatus(const QVariantMap &round);       // progress, notes and footer actions
+    QHash<qint64, double> points() const;
     QWidget *podCard(const QVariantMap &pod, const QVariantMap &round, const QHash<qint64, double> &points);
+    // saves one pod's change and redraws only that pod, keeping the page where it is
+    void saveFromCard(qint64 podId, const std::function<void()> &save, const QString &focusName);
+    void updatePod(qint64 podId, const QString &focusName = {});
+    void correctLive(const QVariantMap &pod);
+    void clearPod(const QVariantMap &pod);
     void fillGrid(QGridLayout *grid, const QList<QWidget *> &cards);
     template <typename F> void guard(F fn, const QString &title);
     template <typename F> void completeWith(F fn);
-    void dialogReport(const QVariantMap &pod, bool startAsDraw);
     void correct(const QVariantMap &pod);
     void openDrops();
     void openHistory();
@@ -335,28 +415,12 @@ private:
     T::FlowLayout *strip_ = nullptr, *footer_ = nullptr;
     QWidget *footerHolder_ = nullptr;
     QList<QPair<QPointer<QGridLayout>, QList<QWidget *>>> grids_;
-};
-
-// the places and result of a top-four final, one choice per finalist: won, out in the first,
-// second or third group, or still in at the end.  it shows the four places the choice gives
-// before anything is saved.
-class FinalResultDialog : public QDialog {
-    Q_OBJECT
-public:
-    FinalResultDialog(QWidget *parent, qint64 tournamentId, const QVariantMap &final, bool correction);
-    QList<QList<qint64>> groups() const;
-    QString outcome() const;                // WIN or NO_WINNER
-    qint64 winner() const;
-    QString reason() const;
-    QHash<qint64, QComboBox *> choices;     // by player id: WIN, OUT1, OUT2, OUT3 or IN
-    QLabel *preview = nullptr, *problem = nullptr;
-    QPushButton *confirmBtn = nullptr;
-
-private:
-    void update();
-    qint64 tournamentId_;
-    QList<qint64> seeds_;
-    QLineEdit *reason_ = nullptr;
+    QHash<qint64, QPointer<QWidget>> podCards_;     // the shown round's pods, by pod id
+    QHash<qint64, QString> podErrors_;              // a pod's last refused save, shown on its card
+    bool cardsTiny_ = false;                        // the width class the pod cards were built for
+    QPointer<QWidget> roundBar_, roundNotes_;
+    QList<QPointer<QWidget>> roundFooter_;          // the round's own actions in the footer
+    QPointer<FinalEditor> finalEditor_;
 };
 
 class CommanderStandingsScreen : public T::Screen {

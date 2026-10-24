@@ -86,8 +86,15 @@ db::Rows getRegistrations(qint64 tournamentId);
 QVariantMap recommendation(int playerCount);
 void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn);
 // organizer overrides, only before the event starts.  pass 0 / empty / -1 to leave a value alone.
+// rounds given here are the organizer's choice: later check-ins never change them.
 void updateEventConfig(qint64 tournamentId, int swissRounds = 0, const QString &drawPolicy = {},
                        const QString &threePodPlacement = {}, int topFourFinal = -1);
+// sets the rounds to the number suggested for the players checked in now, and lets them
+// follow the suggestion again as check-ins change.  needs at least three checked in.
+// changes nothing else.  returns the number of rounds.
+int useSuggestedRounds(qint64 tournamentId);
+// before the start: rounds the organizer has not chosen follow the suggestion for the
+// checked-in count (once at least three are checked in).  returns the event.
 QVariantMap syncRecommendation(qint64 tournamentId);
 qint64 startEvent(qint64 tournamentId);                 // closes registration, publishes round 1
 
@@ -101,9 +108,12 @@ qint64 publishNextRound(qint64 tournamentId, int expectedRoundNumber = NONE);
 // none.  it earns second_place_points in events that score it (still a loss) and is
 // recognition only in earlier events.  a draw has none.  while it is not recorded the round
 // cannot be finalized.
+// changing a saved result is a correction and needs a reason; recording a second place that
+// was still to decide is ordinary reporting and needs none.
 int reportPodResult(qint64 podId, const QString &outcome, qint64 winnerId = 0, const QList<qint64> &eliminatedIds = {},
-                    int expectedVersion = NONE, const SecondPlace &second = {});
-int clearPodResult(qint64 podId, int expectedVersion = NONE);
+                    int expectedVersion = NONE, const SecondPlace &second = {}, const QString &reason = {});
+// takes a saved result away again; that changes a saved result, so it needs a reason
+int clearPodResult(qint64 podId, int expectedVersion = NONE, const QString &reason = {});
 bool finalizeRound(qint64 roundId);                     // false if it was already final
 // The organizer's "Finish tournament": finalizes the last configured round and
 // saves the completed status and final standings.  false if already finished.  an event
@@ -112,7 +122,8 @@ bool finishTournament(qint64 tournamentId);
 // resolution: "" | "KEEP" | "REBUILD" | "REBUILD_FINAL".  returns true if anything changed.
 // in a finalized round of an event that scores second place, a won pod's second place
 // must be decided (a player, or no clear second).  REBUILD_FINAL keeps later qualifying
-// rounds as published and discards a final that has not begun (see FinalAffected).
+// rounds as published and discards a final that has not begun (see FinalAffected).  a
+// correction that changes anything needs a reason.
 bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId = 0, const QList<qint64> &eliminatedIds = {},
                    const QString &resolution = {}, const QString &reason = {}, const SecondPlace &second = {});
 
@@ -127,16 +138,19 @@ QVariantMap finalCandidates(qint64 tournamentId);
 // if the qualifiers are different now nothing is created (ConflictError).  seats follow
 // the seeds, seed 1 taking the first turn.  A repeated request returns the same final.
 qint64 createFinal(qint64 tournamentId, const QList<qint64> &expectedSeeds);
-// saves the eliminations recorded so far, while the final is being played.  returns the
-// final's new result_version.
-int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &groups, int expectedVersion = NONE);
+// saves the eliminations recorded so far, while the final is being played.  adding knockouts
+// after the saved ones is ordinary reporting; taking any back or changing them needs a reason.
+// returns the final's new result_version.
+int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &groups, int expectedVersion = NONE,
+                          const QString &reason = {});
 // the places a result would give, without saving anything: [{player_id, display_name,
 // seed, place, basis}].  throws CommanderError for a result that cannot be confirmed.
 QVariantList previewFinal(qint64 tournamentId, const QList<QList<qint64>> &groups, const QString &outcome,
                           qint64 winnerId = 0);
 // saves the eliminations and the ending (outcome "WIN" with winnerId, or "NO_WINNER" for a
 // drawn final or one ended without a winner), places the four finalists and completes the
-// tournament.  on a confirmed final this is a correction.  returns the new result_version.
+// tournament.  on a confirmed final this is a correction and needs a reason.  returns the new
+// result_version.
 int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &groups, const QString &outcome, qint64 winnerId = 0,
                  int expectedVersion = NONE, const QString &reason = {});
 // the final as saved, or an empty map: final_id, status (PLAYING | CONFIRMED), outcome,

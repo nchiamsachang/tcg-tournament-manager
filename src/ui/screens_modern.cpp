@@ -287,9 +287,11 @@ void CommanderRegistrationScreen::buildUi()
     roundsSpin->setAccessibleName("Number of rounds");
     roundsSpin->setToolTip("The total number of rounds. The tournament ends after the last one.");
     drawCombo = T::combo();
-    drawCombo->addItem("Eliminated players lose", "ELIMINATED_LOSE");
+    drawCombo->addItem("Knocked-out players lose", "ELIMINATED_LOSE");
     drawCombo->addItem("Whole pod draws", "ALL_DRAW");
     drawCombo->setAccessibleName("Draws");
+    drawCombo->setToolTip("How a drawn pod is scored. Draw points are never split: each player who draws gets the full "
+                          "draw points.");
     shortCombo = T::combo();
     shortCombo->addItem("Lowest standings", "LOW");
     shortCombo->addItem("Highest standings", "HIGH");
@@ -324,15 +326,18 @@ void CommanderRegistrationScreen::buildUi()
     addSetting("3-player pods", shortCombo, &shortHint);
     scoringLabel = T::lbl("", T::MUTED, 12, 400, true);
     pv->addWidget(scoringLabel);
-    warnLabel = T::lbl("", T::AMBER, 12, 400, true);
-    pv->addWidget(warnLabel);
 
     auto *actions = new QWidget;
     auto *al = new T::FlowLayout(actions, 8);
-    resetBtn = T::button("Use recommended", "ghost");
+    resetBtn = T::button("Use suggested rounds", "ghost");
+    resetBtn->setToolTip("Sets the rounds to the suggestion for the players checked in now. They then follow check-ins "
+                         "until you change them.");
     connect(resetBtn, &QPushButton::clicked, this, [this] {
-        const int n = cdb::getEvent(tournamentId)["checked_in_count"].toInt();
-        cdb::updateEventConfig(tournamentId, cdb::recommendation(n)["rounds"].toInt());
+        try {
+            cdb::useSuggestedRounds(tournamentId);
+        } catch (const cdb::CommanderError &e) {
+            warn(this, "Setup", e.message);
+        }
         updateCounts();
     });
     al->addWidget(resetBtn);
@@ -344,13 +349,14 @@ void CommanderRegistrationScreen::buildUi()
     pv->addWidget(actions);
     extraSlot->addWidget(panel);
 
-    connect(roundsSpin, &QSpinBox::valueChanged, this, [this] { configChanged(); });
-    connect(drawCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(); });
-    connect(shortCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(); });
+    // only a change to the rounds field saves rounds, so other settings never turn a suggestion into a choice
+    connect(roundsSpin, &QSpinBox::valueChanged, this, [this] { configChanged(true); });
+    connect(drawCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(false); });
+    connect(shortCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(false); });
     connect(finalCheck, &QCheckBox::toggled, this, [this] {
         if (loading_)
             return;
-        configChanged();
+        configChanged(false);
         updateCounts();         // the summary above says whether a final follows
     });
 }
@@ -425,13 +431,11 @@ void CommanderRegistrationScreen::updateHints()
 {
     const int n = roundsSpin->value();
     const bool withFinal = finalCheck->isChecked();
-    roundsHint->setText(withFinal ? QStringLiteral("Qualifying rounds. The top-four final follows Round %1.").arg(n)
-                                  : QStringLiteral("Total rounds. The event ends after Round %1.").arg(n));
     finalHint->setText(withFinal ? QStringLiteral("%1 qualifying round%2 + 1 final").arg(n).arg(n == 1 ? "" : "s")
                                  : QStringLiteral("Off: places come from the standings after Round %1.").arg(n));
     drawHint->setText(drawCombo->currentData().toString() == "ELIMINATED_LOSE"
-                          ? "Knocked-out players take a loss; survivors share the draw."
-                          : "Everyone seated in the pod gets the draw point.");
+                          ? "Players still in draw; knocked-out players lose."
+                          : "Every seated player draws, even those knocked out.");
     const QString placement = shortCombo->currentData().toString();
     shortHint->setText(placement == "LOW" ? "Lowest-ranked players fill the three-player pods."
                        : placement == "HIGH" ? "Highest-ranked players fill the three-player pods."
@@ -476,26 +480,31 @@ void CommanderRegistrationScreen::syncConfig(int checked)
             ? QStringLiteral("This tournament will be %1 qualifying round%2, then the top-four final.").arg(n).arg(n == 1 ? "" : "s")
             : QStringLiteral("This tournament will be %1 round%2 in total and ends after Round %1.").arg(n).arg(n == 1 ? "" : "s");
         recLabel->setText(
-            QStringLiteral("%1 checked in  →  pods of %2%3.   Recommended: %4 rounds.   ")
+            QStringLiteral("%1 checked in  →  pods of %2%3.   ")
                 .arg(checked).arg(pods.join(" + "), rec["byes"].toInt() ? QStringLiteral(" and %1 bye").arg(rec["byes"].toInt()) : QString())
-                .arg(rec["rounds"].toInt()) + length);
+            + length);
         recLabel->setStyleSheet("color:" + T::TEXT + ";background:transparent;border:none;");
     }
-    const bool overridden = n != rec["rounds"].toInt();
-    warnLabel->setText(overridden ? QStringLiteral("Organizer override: %1 rounds (recommended %2).").arg(n).arg(rec["rounds"].toInt())
-                                  : QString());
-    warnLabel->setVisible(overridden);
-    resetBtn->setEnabled(overridden);
+    // the suggestion beside the rounds, with the player count it is for; none below three players
+    const bool chosen = ev["rounds_chosen"].toBool();
+    const int suggested = rec["rounds"].toInt();
+    if (checked < 3)
+        roundsHint->setText(QStringLiteral("A suggestion appears once three players check in."));
+    else
+        roundsHint->setText(QStringLiteral("Suggested for %1 checked in: %2 rounds.").arg(checked).arg(suggested) + '\n'
+                            + (chosen ? QStringLiteral("Set by you: check-ins leave it alone.")
+                                      : QStringLiteral("Follows check-ins until you change it.")));
+    resetBtn->setEnabled(checked >= 3 && (chosen || n != suggested));
     startBtn->setEnabled(error.isEmpty());
     startBtn->setToolTip(error);
 }
 
-void CommanderRegistrationScreen::configChanged()
+void CommanderRegistrationScreen::configChanged(bool rounds)
 {
     if (loading_)
         return;
     try {
-        cdb::updateEventConfig(tournamentId, roundsSpin->value(), drawCombo->currentData().toString(),
+        cdb::updateEventConfig(tournamentId, rounds ? roundsSpin->value() : 0, drawCombo->currentData().toString(),
                                shortCombo->currentData().toString(), finalCheck->isVisible() ? int(finalCheck->isChecked()) : -1);
     } catch (const cdb::CommanderError &e) {
         warn(this, "Setup", e.message);
@@ -511,13 +520,15 @@ void CommanderRegistrationScreen::confirmStart()
     for (const QVariant &p : rec["pods"].toList())
         pods << p.toString();
     const int n = ev["swiss_rounds"].toInt();
+    const QString rounds = ev["final_enabled"].toBool()
+        ? QStringLiteral("Rounds: %1 qualifying round%2, then the top-four final").arg(n).arg(n == 1 ? "" : "s")
+        : QStringLiteral("Rounds: %1 in total, the tournament ends after Round %1").arg(n);
     if (!confirm(this, "Start Commander event",
-                 QStringLiteral("Start %1 with %2 checked-in players?\n\nRound 1 pods: %3%4\nRounds: %5 in total — the "
-                                "tournament ends after Round %5\n\nThe number of rounds, scoring and tiebreakers are "
-                                "frozen once the event starts.")
+                 QStringLiteral("Start %1 with %2 checked-in players?\n\nRound 1 pods: %3%4\n%5\n\nThe number of rounds, "
+                                "scoring and tiebreakers are frozen once the event starts.")
                      .arg(tName).arg(ev["checked_in_count"].toInt())
                      .arg(pods.join(" + "), rec["byes"].toInt() ? QStringLiteral(" and %1 bye").arg(rec["byes"].toInt()) : QString())
-                     .arg(n)))
+                     .arg(rounds)))
         return;
     try {
         cdb::startEvent(tournamentId);

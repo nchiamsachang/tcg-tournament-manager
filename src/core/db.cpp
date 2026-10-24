@@ -705,6 +705,18 @@ static void migration008CommanderScoredSecondAndFinal()
     )sql");
 }
 
+// a final keeps the moment its play started, so resetting its clock or taking an elimination
+// back never makes it count as not begun; finals that already show play get the mark now
+static void migration009CommanderFinalPlayStarted()
+{
+    if (!columns("commander_finals").contains("play_started_at"))
+        exec("ALTER TABLE commander_finals ADD COLUMN play_started_at TEXT");
+    exec("UPDATE commander_finals SET play_started_at = COALESCE(confirmed_at, created_at) "
+         "WHERE play_started_at IS NULL AND (status = 'CONFIRMED' OR timer_state <> 'STOPPED' OR timer_elapsed_secs > 0 "
+         "OR EXISTS (SELECT 1 FROM commander_final_players f WHERE f.final_id = commander_finals.final_id "
+         "AND f.elimination_group IS NOT NULL))");
+}
+
 const QList<Migration> &migrations()
 {
     static const QList<Migration> list = {
@@ -716,6 +728,7 @@ const QList<Migration> &migrations()
         {6, "matches_round_index", migration006MatchesRoundIndex},
         {7, "commander_second_place", migration007CommanderSecondPlace},
         {8, "commander_scored_second_and_final", migration008CommanderScoredSecondAndFinal},
+        {9, "commander_final_play_started", migration009CommanderFinalPlayStarted},
     };
     return list;
 }

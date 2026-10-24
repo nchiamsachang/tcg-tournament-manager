@@ -44,9 +44,15 @@ finalized, and the standings after that round are the final placings. With the
 optional top-four final (see below) exactly one final pod follows; nothing else can
 be created after the last round, and there is no semifinal or other playoff.
 
-The number is recommended from the checked-in count when registration closes;
-the organizer can override it before starting. It freezes when the event
-starts. Drops change later pods, never the number of rounds.
+A suggested number is shown beside the rounds with the checked-in count it is for
+(none below three players). Until the organizer sets the rounds, they follow the
+suggestion as players check in. Once the organizer changes the rounds field, even to
+the suggested number, check-ins leave them alone (`rounds_chosen` in the event
+settings; older events count rounds that differ from the last suggestion as chosen).
+Changing another setting never sets the rounds. **Use suggested rounds** sets the
+suggestion for the players checked in now and lets the rounds follow again. The
+number freezes when the event starts. Drops change later pods, never the number of
+rounds.
 
 | Players | Rounds |
 |---|---:|
@@ -112,8 +118,11 @@ One game per pod. A pod is *pending* until reported, then either:
 
 - **Win** — one winner (5); everyone else loses (0).
 - **Draw** — players still in the game each get 1. Players already eliminated
-  when the game was drawn take a loss (policy `ELIMINATED_LOSE`, the default).
-  Policy `ALL_DRAW` gives the whole pod the draw instead.
+  when the game was drawn take a loss (policy `ELIMINATED_LOSE`, shown as
+  "Knocked-out players lose", the default for new events). Policy `ALL_DRAW`
+  ("Whole pod draws") gives the whole pod the draw instead. Draw points are never
+  split: "sharing" the draw means each drawing player gets the full 1, not a part of
+  it. An event keeps the policy it was saved with.
 
 Each player's own result is stored, so standings never infer anything from the
 pod-level outcome. A bye is worth 5.
@@ -123,7 +132,7 @@ A won pod has a second-place decision, saved in `commander_pods.second_place_sta
 
 | State | Meaning | Points |
 |---|---|---|
-| `PENDING` | not recorded yet (what the quick **Wins** button leaves) | none yet; the pod and the round say the points are provisional |
+| `PENDING` | not recorded yet (what the **Winner** button on the pod card leaves) | none yet; the pod and the round say the points are provisional |
 | `PLAYER` | `second_place_player_id` names another player of the pod | 2.5, and the result is still a loss |
 | `NONE` | confirmed: no clear second (the last players went out at the same moment) | none |
 
@@ -137,6 +146,16 @@ counts in match points and therefore in MW% and OMW% (both are points ÷ 5 per r
 but there is no second-place-count tiebreaker. Changing a second place is a score
 change like any other: in a finalized round with later rounds it asks Keep or
 Rebuild, and a finished event's placings follow it.
+
+**Entering results.** Results are entered on the pod cards: **Winner +5** beside each
+player, then **2nd +2.5** beside the others and **No clear second**; a draw is entered
+on the card with the players already knocked out ticked. Each press saves at once
+through the core and redraws only that pod. Finishing a pending second place is
+reporting (`SECOND_PLACE_RECORDED`) and needs no reason. Anything else that changes a
+saved pod result (another winner, another or a cleared second place, a draw instead
+of a win, clearing the result) is a correction: the core refuses it without a
+non-blank reason, and the audit entry keeps the reason with the values before and
+after, written in the same transaction.
 
 **Events created by an earlier version** (`commander-rules-3`) keep their rules: a
 second place there is recognition only (no points), "no clear second" is not a
@@ -172,10 +191,23 @@ Starting needs at least four checked-in players.
    seats in `commander_final_players`; seats follow the seeds, seed 1 first. One
    final per event (unique per tournament, and the trigger `commander_final_allowed`);
    a repeated request returns the same final.
-3. Eliminations are recorded as they happen, each group being the players
-   eliminated at the same moment. They are saved as they are recorded.
-4. **Record result** sets the ending, a winner or no winner, shows the four places
-   and confirms them. Confirming completes the event.
+3. Knockouts are recorded on the final's page as they happen, under **Record
+   knockout**: select every player knocked out at the same moment (a pill each) and
+   press **Confirm knockout**. Each is saved as it is confirmed, and the selection is
+   cleared only then. A player who is out is no longer offered, to knock out or as
+   the winner. A knockout always leaves at least one player in: the core refuses one
+   that would remove everyone still in, and its message says to choose the winner
+   (one player left) or **No winner / Draw** (the last players went out together).
+   With one player left their knockout is disabled and the page says "One player
+   remains. Confirm the winner to finish."; nothing is chosen or saved for the
+   organizer. Taking the last knockout back is a correction and needs a reason
+   (`FINAL_ELIMINATIONS_CORRECTED`).
+4. The ending is chosen beside it, under **Determine winner**: one player won, or
+   **No winner / Draw** (the game was drawn, or everyone still in went out at the
+   same moment; they are placed by seed). The two sections sit side by side, or one
+   above the other in a narrow window. The four places are shown before anything is
+   saved, and **Confirm final results** asks once more, saves them and completes the
+   event. The clock never decides the result.
 
 Places: the first group out takes the lowest places, the next group the places above,
 and so on; the winner is 1st. Inside a group the better qualifying seed takes the better
@@ -194,11 +226,13 @@ names a champion by itself.
 
 **Corrections around the final.** Its seeds are fixed. A qualifying correction that
 leaves the four finalists and their seeds as they were is saved, and the final stays.
-One that would change them is refused unless the final has not begun (no elimination
-or result saved, clock never started) and the organizer chooses to discard it
-(`REBUILD_FINAL`, audited as `FINAL_DISCARDED`); the final is then created again.
-Once the final has begun, such a correction is refused. A confirmed final can be
-corrected (`FINAL_CORRECTED`, with the earlier places).
+One that would change them is refused unless the final has not begun and the
+organizer chooses to discard it (`REBUILD_FINAL`, audited as `FINAL_DISCARDED`); the
+final is then created again. Once the final has begun, such a correction is refused.
+A final has begun from the first start of its clock, its first knockout or its
+confirmation (`commander_finals.play_started_at`, update 9), and stays begun when the
+knockout is taken back or the clock is reset. A confirmed final can be corrected with a
+reason (`FINAL_CORRECTED`, with the earlier places).
 
 **Drops during the final.** A finalist cannot be dropped while the final is being
 played, because the club's rules do not say how a finalist who leaves is placed; the
@@ -251,8 +285,10 @@ If drops leave fewer than three active players between rounds, no pod can be
 formed; the organizer can finish the event early on the current standings. That
 ends it with fewer rounds than configured and never adds one.
 
-**Corrections.** In a live round, changing a saved result needs the version the
-screen last loaded, so two windows cannot silently overwrite each other. In a
+**Corrections.** Every change to a saved result, in a live round, a finalized round
+or the final, needs a non-blank reason; the core checks it and the audit entry keeps
+it. In a live round, changing a saved result also needs the version the screen last
+loaded, so two windows cannot silently overwrite each other. In a
 finalized round that later rounds were already published from, the organizer
 must choose:
 
