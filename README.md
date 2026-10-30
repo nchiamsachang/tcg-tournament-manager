@@ -5,7 +5,7 @@ One Piece, Pokémon and Magic: The Gathering (Modern and Commander). It is writt
 C++17 with Qt 6 Widgets and keeps everything in a local SQLite database, so it works
 without an internet connection or a server.
 
-Current version: **0.2.4** (being prepared; the latest published release is 0.2.3). See
+Current version: **0.3.0** (in development; the latest published release is 0.2.4). See
 [Project status](#project-status) for what has and has not been verified.
 
 ## Features
@@ -188,12 +188,19 @@ separately, as the Git commit in Settings and in diagnostic reports.
 
 ## Project status
 
-Version 0.2.4 adds the club's Commander scoring (a clear second place earns 2.5 points)
-and the optional top-four final. Its automated suites passed on a development build of
-the same code before the version number was changed (core 133, rules 31, UI 45 passed;
-see TEST_REPORT.md Addendum 7). It has not been packaged or release-checked yet.
+Version 0.3.0 is in development. It ranks Commander finals by total points (qualifying
+plus final points) by default, keeps knockout order as a choice, and names what a
+qualifying correction changes before it discards a final. It has not been packaged or
+release-checked, and its manual checks in the demo checklist have not been run.
 
-Version 0.2.3, the published release, is packaged from committed source and its release
+Version 0.2.4, the published release, adds the club's Commander scoring (a clear second
+place earns 2.5 points) and the optional top-four final. Its automated suites passed on
+a development build of the same program source (core 139, rules 31, UI 52); the package
+was built from commit `169d29d` and has not been retested, and the manual checks of the
+new Commander screens had not been run when its release notes were written. See
+[docs/releases/v0.2.4.md](docs/releases/v0.2.4.md).
+
+Version 0.2.3, the previous release, is packaged from committed source and its release
 checks are done. On the packaged build's own binaries the core suite (101 passed), rules
 suite (18 passed) and UI suite (42 passed) are clean, with nothing failed or skipped. The
 packaged app also passed a manual run of a one-on-one and a Commander event. Two
