@@ -146,7 +146,21 @@ from scratch, so one build never mixes two kits.
 ### Tests
 
 `run_tests.bat` prints the totals and writes `core_results.txt`, `rules_results.txt` and
-`ui_results.txt` in the build folder. The UI tests open real windows and dialogs that
+`ui_results.txt` in the build folder. With no arguments it builds everything and runs all
+three suites. To run one suite, or some of its test functions, name them; only that
+suite's program is built, and the script says which suites were not run:
+
+```
+run_tests.bat core
+run_tests.bat rules aPointsTieIsBrokenByOpponentsMatchWinPercentage
+run_tests.bat help
+```
+
+After changing `run_tests.bat` itself, run `tests\runner\run_runner_tests.bat`. It checks
+the script against stub build scripts and a fake test program (it needs Python 3) and
+builds nothing else.
+
+The UI tests open real windows and dialogs that
 take keyboard focus, so leave the PC alone while they run (about five minutes): typing
 or clicking elsewhere can make focus-dependent tests fail.
 
