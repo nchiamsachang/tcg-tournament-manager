@@ -18,7 +18,8 @@ Current version: **0.2.4** (being prepared; the latest published release is 0.2.
 - **Commander pods:** pods of three or four, check-in before the start, drops and
   reinstatements between rounds, byes, result corrections and an audit history.
   The club's scoring awards a clear second place 2.5 points (still a loss), and an
-  optional top-four final pod can follow the qualifying rounds.
+  optional top-four final pod can follow the qualifying rounds, ranked by total points
+  (qualifying plus final points, the default) or by knockout order.
   Pairings are reproducible from a saved seed.
 - **Fixed length:** the configured number of rounds is the whole tournament (a
   Commander event may add its one top-four final). A

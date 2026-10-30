@@ -25,6 +25,7 @@ extern const char *const LEGACY_THREE_POD_PLACEMENT;   // events started before 
 QVariantMap defaultSettings();
 bool isDrawPolicy(const QString &s);                   // ELIMINATED_LOSE | ALL_DRAW
 bool isThreePodPlacement(const QString &s);            // LOW | HIGH | BEST_MATCH
+bool isFinalRanking(const QString &s);                 // TOTAL_POINTS | KNOCKOUT
 // whether an event's settings award points for a clear second place (club rules from
 // commander-rules-4).  events created before that keep second place as recognition only.
 bool scoresSecondPlace(const QVariantMap &settings);
@@ -86,6 +87,24 @@ QVariantList computeStandings(const QList<qint64> &playerIds, const QVariantList
 // throws std::invalid_argument for a result that is incomplete or contradicts itself.
 QVariantList placeFinal(const QList<qint64> &seeds, const QList<QList<qint64>> &groups, const QString &outcome,
                         qint64 winnerId);
+// the places of a top-four final that is ranked by total points (qualifying points plus the
+// points the final itself awards).
+//   seeds: the four finalists, best qualifying seed first; qualifyingPoints: theirs, same order.
+//   outcome "WIN" with winnerId, or "DRAW" with winnerId 0.  the final awards what a pod
+//   awards: win_points to the winner, second_place_points to a clear second (secondId; the
+//   result stays a loss), loss_points to the rest.  noClearSecond is the confirmed decision
+//   that nobody was a clear second.  a draw gives every player the draw award under ALL_DRAW;
+//   under ELIMINATED_LOSE the players in outAtDraw were already out and take the loss award.
+//   a draw has no second place.
+// order: total points, then the better qualifying seed.  basis TOTAL_POINTS, or
+// TOTAL_POINTS_SEED when another finalist has the same total.
+// each row: {player_id, place 1-4, basis, result WIN | SECOND | LOSS | DRAW, qualifying_points,
+// final_points, total_points, out_at_draw, provisional}.  a win whose second place is still
+// undecided is provisional: the second-place award is not counted yet.
+// throws std::invalid_argument for a result that cannot be placed.
+QVariantList placeFinalByTotal(const QList<qint64> &seeds, const QList<double> &qualifyingPoints, const QString &outcome,
+                               qint64 winnerId, qint64 secondId, bool noClearSecond, const QList<qint64> &outAtDraw,
+                               const QVariantMap &settings);
 // checks elimination groups recorded while the final is still being played: the same
 // rules as placeFinal, without needing an ending.  throws std::invalid_argument.
 void checkFinalProgress(const QList<qint64> &seeds, const QList<QList<qint64>> &groups);

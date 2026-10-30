@@ -2,7 +2,7 @@
 
 A short manual run of the packaged app before a demo: one four-player, two-round
 one-on-one tournament from creation to final standings (about ten minutes), then the
-Commander checks for 0.2.4: second place, the top-four final and the usability pass
+Commander checks for 0.3.0: second place, the top-four final and the usability pass
 (about fifty minutes).
 The fuller plan is [TEST_PLAN.md](TEST_PLAN.md) and the detailed cases are in
 [REGRESSION_CASES.md](REGRESSION_CASES.md).
@@ -26,12 +26,12 @@ The app keeps its data in `%LOCALAPPDATA%\TcgTournamentManager` unless the
 `TCG_DATA_DIR` environment variable names another folder. Run this checklist on a
 throwaway folder so your own players and tournaments are never opened.
 
-1. Extract the whole ZIP, for example to `C:\Temp\TcgTournamentManager-0.2.4`.
+1. Extract the whole ZIP, for example to `C:\Temp\TcgTournamentManager-0.3.0`.
 2. Open a Command Prompt and run these three lines:
 
    ```
    set TCG_DATA_DIR=%TEMP%\tcg-demo-check
-   cd /d C:\Temp\TcgTournamentManager-0.2.4
+   cd /d C:\Temp\TcgTournamentManager-0.3.0
    start "" TcgTournamentManager.exe
    ```
 
@@ -57,7 +57,7 @@ throwaway folder so your own players and tournaments are never opened.
 | ID | Step | Expected result | Actual | Status |
 |---|---|---|---|---|
 | D-01 | Open Settings (gear, top right) and read the DATA path and the bottom line. | The path ends in `tcg-demo-check\tcg_tournament.db`, not `AppData\Local\TcgTournamentManager`. The bottom line shows the version and a build ID. Write both into Run details. If the path is wrong, stop: close the app and redo "Before you start". | | Not Run |
-| D-02 | Go to Home. | The badge above the title shows the version only (`v0.2.4`), with no build ID beside it. | | Not Run |
+| D-02 | Go to Home. | The badge above the title shows the version only (`v0.3.0`), with no build ID beside it. | | Not Run |
 | D-03 | Open the Pokemon hub, choose New Tournament. Name it `Demo Cup`, set Rounds to 2 and Round length to 1, then Create & register players. | The registration page opens, titled with `Demo Cup`, showing 0 players enrolled. Start tournament is disabled. | | Not Run |
 | D-04 | Add four players with New player name and Add & enroll: `Ada`, `Ben`, `Cal`, `Dee`. | The count reads 4 players enrolled and all four names are listed. Start tournament is enabled. | | Not Run |
 | D-05 | Choose Start tournament and answer Yes. | The question names the tournament and says 4 players. Round 1 of 2 opens with 2 tables, 2 pending. Each of the four players appears exactly once and nobody has a bye. | | Not Run |
@@ -74,7 +74,7 @@ throwaway folder so your own players and tournaments are never opened.
 | D-16 | Click the sun or moon button in the top bar, look at the same three pages, then click it again. | The whole app switches between dark and light, text stays readable in both, and every button icon (home, players, gear, back arrow, clock) is visible in both. | | Not Run |
 | D-17 | Close the app with the window's close button. | It closes at once with no error message. | | Not Run |
 
-## Commander (0.2.4): second place, the top-four final and the usability pass
+## Commander (0.3.0): second place, the top-four final and the usability pass
 
 Three separate Commander events, each from Magic's hub, New Tournament, Format Commander,
 Round length 50. Write the points down where a step says so; later steps compare with them.
@@ -93,7 +93,7 @@ or a draw. A window opens only for a correction, and every correction asks for a
 
 | ID | Step | Expected result | Actual | Status |
 |---|---|---|---|---|
-| C-01 | Create `Club Final` with Rounds 2. Add the eight players. In COMMANDER SETUP tick Add a top-four final; check Rounds still says 2. | The FINAL line reads "2 qualifying rounds + 1 final". The summary says "This tournament will be 2 qualifying rounds, then the top-four final." The scoring line reads "win 5, clear second place 2.5, other losses 0, draw 1, bye 5". DRAWS shows "Knocked-out players lose" with "Players still in draw; knocked-out players lose." | | Not Run |
+| C-01 | Create `Club Final` with Rounds 2. Add the eight players. In COMMANDER SETUP tick Add a top-four final; check Rounds still says 2. FINAL STANDINGS appears below it showing "Total points"; choose "Knockout order" for events A and B, which check the knockout final. | FINAL STANDINGS is not there until the final is ticked, then reads "Total points" with "Qualifying points plus final points determine places. Ties use qualifying seed.", and after the change "Knockout order" with "Final elimination order determines places. Simultaneous eliminations use qualifying seed.". The FINAL line reads "2 qualifying rounds + 1 final". The summary says "This tournament will be 2 qualifying rounds, then the top-four final." The scoring line reads "win 5, clear second place 2.5, other losses 0, draw 1, bye 5". DRAWS shows "Knocked-out players lose" with "Players still in draw; knocked-out players lose." | | Not Run |
 | C-02 | Choose Start tournament and read the question; answer it. | The question says "Rounds: 2 qualifying rounds, then the top-four final". Round 1 shows two pods of four, each saying "No result yet". The ROUNDS strip shows 1, a dashed 2 and a dashed Final. | | Not Run |
 | C-03 | Scroll the page a little so pod 1 is not at the very top. In pod 1 click Winner +5 beside the seat 1 player only. | No window opens and the page does not jump. Pod 1 says "… won · 2nd place still to choose, points provisional" and "2nd place not recorded yet. Choose 2nd above, or No clear second …". The other three players show 2nd +2.5 and the winner has none. The keyboard focus is on the first 2nd +2.5 button. Under the pods: "Points are provisional. Second place is not recorded yet in pod 1." Finalize Round 1 is disabled; resting the pointer on it gives the same reason. The winner shows 5 pts, everyone else in the pod 0 pts. | | Not Run |
 | C-04 | In pod 1 click 2nd +2.5 beside the seat 2 player. Open History. | No window and no reason asked. That player shows "2nd +2.5" under the name and 2.5 pts, and still LOSS. Pod 1 says "saved, provisional until the round is finalized". History has SECOND_PLACE_RECORDED, without a reason. | | Not Run |
@@ -117,7 +117,7 @@ or a draw. A window opens only for a correction, and every correction asks for a
 
 | ID | Step | Expected result | Actual | Status |
 |---|---|---|---|---|
-| C-20 | Create `Draw Final` (Rounds 1, Add a top-four final ticked), add four players and start. Choose Draw… in the pod, tick three players as knocked out before the draw and choose Save draw. | The card says "Not saved: A draw needs at least two players still in the game …", the three ticks are still there, and the pod still says No result yet. | | Not Run |
+| C-20 | Create `Draw Final` (Rounds 1, Add a top-four final ticked, Final standings Knockout order), add four players and start. Choose Draw… in the pod, tick three players as knocked out before the draw and choose Save draw. | The card says "Not saved: A draw needs at least two players still in the game …", the three ticks are still there, and the pod still says No result yet. | | Not Run |
 | C-21 | Untick one player and choose Save draw. Then Correct…, make one player the winner with a clear second, give a reason and save. Finalize Round 1; Create final… and Yes. | The draw saves: two players DRAW +1, two OUT. The correction saves, and all four players are in the final, seeded by the round 1 standings. | | Not Run |
 | C-24 | Before C-22, on the live final page: Settings, Text size Large; the sun/moon button; drag the window as narrow as it goes and back to normal. Then, with the keyboard only, Tab to a knockout pill and press Space, Tab to a winner pill and press Space. | In a normal window the two sections sit side by side; in a narrow one they are stacked, RECORD KNOCKOUT first. Nothing is cut off or overlapping in either theme or text size: pills, names, Confirm knockout, Confirm final results. Tab goes through the knockout pills, Confirm knockout and Undo, then the winner pills, No winner / Draw and Confirm final results; the focused control has a visible outline and a selected pill shows a tick. Deselect both, and set text size back to Standard. | | Not Run |
 | C-22 | On the final page choose No winner / Draw without recording any knockout; read PLACES; Confirm final results and answer Yes. | Places 1-4 follow the seeds, each "still in at the end, placed by seed n". The final page says no winner, placed by seed. Standings show "Final: 1st, by seed" and so on; nobody gained a win or points. | | Not Run |
@@ -129,6 +129,23 @@ or a draw. A window opens only for a correction, and every correction asks for a
 |---|---|---|---|---|
 | C-30 | Create `No Final` (Rounds 1, Add a top-four final not ticked), add four players and start. | The FINAL line reads "Off: places come from the standings after Round 1"; the ROUNDS strip has no Final chip. | | Not Run |
 | C-31 | Report the pod with Winner +5 and 2nd +2.5, then Clear… on the pod: the window asks for a reason. Give one. Report it again and choose Finish tournament and Yes. | Clearing needs a reason and History has RESULT_CLEARED with it. Final standings follow points (winner 5, second 2.5, the others 0); no final is offered at any point. | | Not Run |
+
+### Event D: `Total Final`, 8 players, 1 qualifying round, final on, Final standings Total points
+
+Eight new names. Round 1: in each pod choose Winner +5 for the seat 1 player and 2nd +2.5 for
+the seat 2 player, then Finalize Round 1 and Create final… (the four finalists carry 5, 5,
+2.5 and 2.5 points).
+
+| ID | Step | Expected result | Actual | Status |
+|---|---|---|---|---|
+| C-50 | On the final page read the finalists. Choose Winner +5 for seed 4 and nothing else. Press Confirm final results. | Each finalist shows the seed and qualifying points. The places read "Provisional: choose second place or No clear second"; Confirm final results is disabled and nothing was saved (reload the page to check). The 2nd +2.5 pill of seed 4 is disabled. | | Not Run |
+| C-51 | Choose 2nd +2.5 for seed 1. Read PLACES. Then choose No clear second instead. | With 2nd for seed 1: seed 1 "qual 5 + final 2.5 = 7.5" and seed 4 "qual 2.5 + final 5 = 7.5" are level, so seed 1 is 1st and seed 4 2nd, both marked "by seed"; seed 2 is 3rd (5) and seed 3 4th (2.5). With No clear second: seed 1 and seed 2 have 5, seed 4 has 7.5 and is 1st. Nothing is saved while choosing. | | Not Run |
+| C-52 | Choose Draw. Tick seed 4 "Already out". Read PLACES; then choose Winner +5 for seed 1 again. | The 2nd, No clear second and winner choices clear. Draw gives seed 1 and 2 six (5 + 1), seed 3 3.5 and seed 4 2.5 (0 for the final); the Already out ticks go away when a winner is chosen. | | Not Run |
+| C-53 | Choose Winner +5 for seed 4, 2nd +2.5 for seed 1, move the window to a narrow width and back, then Confirm final results and answer Yes. | The choice stays while the window changes. The standings open: seed 1 is 1st, seed 4 2nd, and the page says "1st place: … (most total points)". Columns Qual pts, Final and Total are filled for places 1-4 and blank below; Qual pts are the qualifying points and do not include the final. | | Not Run |
+| C-54 | Export CSV and Save PDF; open the player profile of seed 1. | Both files list the same places and the qualifying, final and total points (CSV: Qualifying points, Final points, Total points). The profile says "2nd in final, +2.5, total 7.5, placed 1st". | | Not Run |
+| C-55 | Correct final…: Save correction is disabled until a reason is typed. Swap winner and second, give a reason, save. Open History. | The window shows the saved places and, below, the choice starting from what was saved. Awards are replaced (seed 1 +5, seed 4 +2.5), never added to the earlier ones. History has FINAL_CORRECTED with the earlier winner, second place, awards and reason. | | Not Run |
+| C-56 | Close and start the program again; open `Total Final`. | The same places, points and History as before. | | Not Run |
+| C-57 | In the same event type nothing further; instead, on a copy of an older database (made with 0.2.x), open the app and look at an event created then. | The app made a backup first; the old events read "Knockout order" and show their finals as before. | | Not Run |
 
 ### Setup and scrolling
 

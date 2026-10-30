@@ -129,9 +129,10 @@ public:
     QSpinBox *roundsSpin = nullptr;
     QComboBox *drawCombo = nullptr, *shortCombo = nullptr;
     QCheckBox *finalCheck = nullptr;        // "Add a top-four final"; hidden for events with earlier rules
+    QComboBox *rankingCombo = nullptr;      // "Final standings"; shown only while the final is checked
     QLabel *recLabel = nullptr;
     QLabel *roundsHint = nullptr, *drawHint = nullptr, *shortHint = nullptr;    // a few words on each setting
-    QLabel *finalHint = nullptr, *scoringLabel = nullptr;
+    QLabel *finalHint = nullptr, *rankingHint = nullptr, *scoringLabel = nullptr;
     QPushButton *resetBtn = nullptr;        // use suggested rounds
 
 protected:
@@ -144,6 +145,7 @@ private:
     void updateCounts();
     void updateHints();
     bool loading_ = false;
+    QWidget *rankingRow_ = nullptr;
 };
 
 // A one-on-one round.
@@ -341,6 +343,49 @@ private:
     QButtonGroup *endingGroup_ = nullptr;
 };
 
+// result entry for a final ranked by total points: the winner, the second place (or no clear
+// second) or a draw, chosen inline.  nothing is saved by choosing; live asks the screen to save
+// when confirmed, draft (a correction) leaves saving to the dialog around it.
+class TotalFinalEditor : public QWidget {
+    Q_OBJECT
+public:
+    enum Mode { Live, Draft };
+    TotalFinalEditor(qint64 tournamentId, const QVariantMap &final, Mode mode, QWidget *parent = nullptr);
+    void setFinal(const QVariantMap &final);    // refreshes the names and points shown; the choice is kept
+    QString outcome() const;                    // WIN, DRAW, or empty while nothing is chosen
+    qint64 winner() const { return winner_; }
+    cdb::SecondPlace second() const { return second_; }
+    QList<qint64> outAtDraw() const;
+    bool ready() const;                         // a result is chosen, its second place decided, and it can be placed
+    bool stacked() const;
+    void setError(const QString &text);         // a refused save: shown beside the places, the choice stays
+    QHash<qint64, QPushButton *> winners, seconds;      // one pill each per finalist
+    QHash<qint64, QCheckBox *> outChecks;               // "Already out", only while a draw is chosen
+    QPushButton *noSecond = nullptr, *drawBtn = nullptr, *confirmBtn = nullptr, *howBtn = nullptr;
+    QLabel *preview = nullptr, *problem = nullptr, *howText = nullptr, *drawNote = nullptr;
+
+signals:
+    void confirmRequested();                    // live: save the result
+    void changed();
+
+protected:
+    void resizeEvent(QResizeEvent *e) override;
+
+private:
+    void sync();                                // pills, enabled states and places from the choice
+    qint64 tournamentId_;
+    Mode mode_;
+    QList<qint64> seeds_;
+    QHash<qint64, QLabel *> nameLabels_, metaLabels_;
+    qint64 winner_ = 0;
+    cdb::SecondPlace second_;
+    bool draw_ = false;
+    bool eliminatedLose_ = true;
+    bool previewOk_ = false, provisional_ = false, saving_ = false, syncing_ = false;
+    QSet<qint64> out_;
+    QBoxLayout *sections_ = nullptr;
+};
+
 // correcting a confirmed final: the editor in draft mode, places before and after, and a reason
 class FinalCorrectionDialog : public QDialog {
     Q_OBJECT
@@ -348,7 +393,8 @@ public:
     FinalCorrectionDialog(QWidget *parent, qint64 tournamentId, const QVariantMap &final);
     QString reason() const;
     void showError(const QString &text);
-    FinalEditor *editor = nullptr;
+    FinalEditor *editor = nullptr;                  // knockout events
+    TotalFinalEditor *totalEditor = nullptr;        // total-points events
     QLabel *before = nullptr, *error = nullptr;
     QLineEdit *reasonEdit = nullptr;
     QPushButton *saveBtn = nullptr;
@@ -386,6 +432,7 @@ private:
     void knockout(const QList<QList<qint64>> &groups);
     void undoKnockout();
     void confirmFinalFrom(FinalEditor *editor);
+    void confirmTotalFinalFrom(TotalFinalEditor *editor);
     void correctFinal();
     void buildStrip();
     QPushButton *chipButton(const QString &text, bool selected, const QString &color, bool enabled);
@@ -421,6 +468,7 @@ private:
     QPointer<QWidget> roundBar_, roundNotes_;
     QList<QPointer<QWidget>> roundFooter_;          // the round's own actions in the footer
     QPointer<FinalEditor> finalEditor_;
+    QPointer<TotalFinalEditor> totalEditor_;
 };
 
 class CommanderStandingsScreen : public T::Screen {
@@ -430,9 +478,11 @@ public:
     QVariantMap state;
     QVariantList rows;                      // each row gains "place" and "note"
     printing::Doc pdfDoc() const;           // what Save PDF writes
+    QString csvText() const;                // what Export CSV writes
 
 private:
     QWidget *standingRow(const QVariantMap &r, bool last);
+    bool byTotal_ = false;                  // the final adds to qualifying points: Qual pts, Final and Total columns
     void exportCsv();
     void savePdf();
     QList<QPair<QString, int>> cols_;      // heading and width; 0 is the stretching player column

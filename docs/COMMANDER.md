@@ -17,6 +17,7 @@ References: [TopDeck multiplayer addendum](https://topdeck.gg/mtr-ipg-addendum),
 | Win 5, loss 0, draw 1; a bye counts as a win | TopDeck addendum |
 | Clear second place 2.5 (still a loss), with "no clear second" when the last players went out together | **Custom** club policy (rules `commander-rules-4`) |
 | Optional top-four final pod; its placing order and the drawn-final fallback | **Custom** club policy; TopDeck seats a top cut in seed order, which the final follows |
+| Final standings by total points: the final awards win 5, clear second 2.5, other losses 0, draw 1 on top of qualifying points (new events' default), or by knockout order (`final_ranking`) | **Custom** club policy (release 0.3.0, rules stay `commander-rules-4`) |
 | Tiebreak floor of 20%; a bye adds 3 opponents at 20% | TopDeck addendum |
 | Recommended number of rounds by player count | TopDeck addendum |
 | The configured rounds are the whole event, plus one top-four final only when the organizer chose it before the start | **Custom** (TopDeck events normally cut to a playoff) |
@@ -182,6 +183,75 @@ Chosen with **Add a top-four final** before the start (`commander_events.final_e
 fixed once the event starts, also by the trigger `commander_final_enabled_frozen`).
 Starting needs at least four checked-in players.
 
+**Final standings** (`commander_events.final_ranking`) decides how the final's places
+are worked out. It is chosen on the setup page, under the final, and only shown while
+the final is checked:
+
+- **Total points** (the default for new events): each finalist's total is their
+  qualifying points plus the points the final awards. The most total points is 1st, so
+  the winner of the final can place below a finalist with more combined points. Equal
+  totals go to the better qualifying seed.
+- **Knockout order**: the final's elimination order decides the places, as described
+  below. The final adds no points. Every event created before release 0.3.0 is
+  tagged this way, also one still in registration; the organizer can switch it before
+  the start.
+
+The choice is fixed once the event starts (the core refuses it, and so does the trigger
+`commander_final_ranking_frozen`). Events from before second place scored points
+(`commander-rules-3`) keep Knockout order. The two policies have their own calls in the
+core and each refuses the other's events.
+
+### Final standings by total points
+
+The finalists are created as for a knockout final, and each one's qualifying points
+are saved with the final (`commander_final_players.qualifying_points`, copied from
+the standings the seeds came from; finals made before update 10 read them from
+`qualifying_json`). Nothing about the final is recorded until it is over. On the final's
+page, per finalist, the organizer chooses:
+
+- **Winner +5**: one player. The 2nd pills are then available.
+- **2nd +2.5**: the clear second place (a loss that earns the second-place points), or
+  **No clear second** when the last opponents lost at the same moment.
+- **Draw**: nobody won, and nobody is second. Where eliminated players take a loss in a
+  drawn game, an **Already out** tick per finalist marks those who were out when it
+  was drawn: they earn 0 and the others 1. Where the whole pod draws, all four earn 1.
+
+Awards come from the same rules as a pod (`seatResults`), as whole and half points:
+winner 5, clear second 2.5, other players 0, draw 1. The places are shown as you
+choose ("qual 5 + final 2.5 = 7.5", "by seed" for equal totals), and nothing is
+saved until **Confirm final results**. A win whose second place is still undecided is
+shown as provisional ("Provisional: choose second place or No clear second") and the
+core refuses to confirm it, so a half-decided result is never stored.
+
+Saved on confirmation, in one transaction with the audit entry (`FINAL_CONFIRMED`) and
+the completion of the event: each finalist's `final_result` (WIN, SECOND, LOSS, DRAW),
+`final_points`, `out_at_draw`, place and basis (`TOTAL_POINTS`, or `TOTAL_POINTS_SEED`
+when another finalist has the same total), and the final's second place
+(`commander_finals.second_place_player_id`, `second_place_status` PLAYER or NONE). A
+draw is stored as outcome `NO_WINNER`. The final's points are never added to the
+qualifying points, `enrollments.match_points`, the percentages or the saved
+qualifying standings; a total is always the saved qualifying points plus the stored
+award. Places 1 to 4 are the finalists in total-points order and everyone else follows
+in qualifying order; the champion is 1st, who need not be the winner of the final.
+Final points are not a game win or loss in the club statistics, in either policy.
+
+**Correcting the final.** A confirmed result is changed with **Correct final**, with a
+required reason and the version it was opened with (a different version is a conflict,
+as for pods). The new result replaces the awards, never adds to them (`FINAL_CORRECTED`,
+with the earlier winner, second place, awards and places). Repeating the saved result
+changes nothing and writes no audit entry.
+
+**Qualifying corrections.** A correction in a qualifying pod that changes any
+finalist's qualifying points is treated like one that changes the seeds: it asks to
+discard the final (`REBUILD_FINAL`) while the final has not begun, and is refused once
+it has. The question names what changes: finalists, seeds and qualifying points. The
+saved qualifying points are never overwritten.
+
+Ending the tournament early during a total-points final places nobody and names no
+champion, as for a knockout final.
+
+### Final standings by knockout order
+
 1. The qualifying rounds are played and finalized as usual. Finalizing the last one
    does not complete the event.
 2. **Create final** shows the four best players in the qualifying standings who are
@@ -340,6 +410,17 @@ Migrations are numbered, additive and recorded in `schema_migrations`.
   the one final of an event that chose it, fix its players and seeds, and refuse a
   confirmed final without four places. Existing rows get no second-place state and
   no final. Like every update it runs after a backup of the database.
+- `10 commander_final_ranking` adds `commander_events.final_ranking` (KNOCKOUT or
+  TOTAL_POINTS; every existing event is tagged KNOCKOUT, also one still in
+  registration), `commander_finals.second_place_player_id` and `second_place_status`,
+  and rebuilds `commander_final_players` the way update 4 rebuilds tournaments (rows
+  copied and counted, index and triggers put back) to allow the placement bases
+  `TOTAL_POINTS` and `TOTAL_POINTS_SEED` and to add `qualifying_points`,
+  `final_result`, `final_points` and `out_at_draw`. Existing finals, including
+  unfinished ones, keep every value they had; the trigger
+  `commander_final_players_fixed` now also fixes `qualifying_points`, and
+  `commander_final_ranking_frozen` stops the choice changing after the start. It runs
+  after a backup of the database.
 
 The columns `playoff_cut`, `recommended_cut`, `playoff_seeds_json` and the
 table `commander_advancements` remain only to hold what earlier events saved.
@@ -357,6 +438,12 @@ tests in `tests/test_core.cpp` and `tests/test_ui.cpp`.
   round's Print menu, also for the final pod.
 - Pairing uses local search, so for large fields it finds a good pairing, not a
   provably optimal one.
+- A total-points final records only its result: the order players were knocked out is not
+  asked for or saved. Its awards are the club's fixed values (5, 2.5, 0, 1); they cannot
+  be changed per event, and the final's points are not part of the club statistics.
+- Switching Final standings is only possible before the event starts; an event cannot
+  change policy afterwards, and a finalist's qualifying points are fixed when the final
+  is created.
 - The only cut is the optional top-four final. Larger cuts (Top 10, Top 16) are not
   offered.
 - The final uses the tournament's round length for its clock. TopDeck's addendum

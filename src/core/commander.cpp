@@ -55,6 +55,11 @@ bool isThreePodPlacement(const QString &s)
     return s == "LOW" || s == "HIGH" || s == "BEST_MATCH";
 }
 
+bool isFinalRanking(const QString &s)
+{
+    return s == "TOTAL_POINTS" || s == "KNOCKOUT";
+}
+
 bool scoresSecondPlace(const QVariantMap &settings)
 {
     return settings.value("second_place_points").toDouble() > 0;
@@ -333,6 +338,84 @@ QVariantList placeFinal(const QList<qint64> &seeds, const QList<QList<qint64>> &
     std::sort(placed.begin(), placed.end(), [](const QVariant &a, const QVariant &b) {
         return a.toMap().value("place").toInt() < b.toMap().value("place").toInt();
     });
+    return placed;
+}
+
+QVariantList placeFinalByTotal(const QList<qint64> &seeds, const QList<double> &qualifyingPoints, const QString &outcome,
+                               qint64 winnerId, qint64 secondId, bool noClearSecond, const QList<qint64> &outAtDraw,
+                               const QVariantMap &settings)
+{
+    if (seeds.size() != 4 || QSet<qint64>(seeds.begin(), seeds.end()).size() != 4 || qualifyingPoints.size() != 4)
+        throw std::invalid_argument("A final has exactly four different players.");
+    if (secondId && noClearSecond)
+        throw std::invalid_argument("A second place and no clear second cannot both be chosen.");
+    if (secondId && !seeds.contains(secondId))
+        throw std::invalid_argument("The second place must be one of the four finalists.");
+    for (qint64 p : outAtDraw)
+        if (!seeds.contains(p))
+            throw std::invalid_argument("Only the four finalists can be marked as already out.");
+    const bool win = outcome == "WIN";
+    if (!win && outcome != "DRAW")
+        throw std::invalid_argument(QStringLiteral("Unknown final outcome: '%1'").arg(outcome).toStdString());
+
+    QMap<qint64, SeatResult> seat;
+    if (win) {
+        if (!winnerId || !seeds.contains(winnerId))
+            throw std::invalid_argument("The winner must be one of the four finalists.");
+        if (secondId == winnerId)
+            throw std::invalid_argument("The winner cannot also be the second place.");
+        if (!outAtDraw.isEmpty())
+            throw std::invalid_argument("Players are only marked as already out when the final is drawn.");
+        seat = seatResults(seeds, "WIN", winnerId, {}, settings);
+    } else {
+        if (winnerId)
+            throw std::invalid_argument("A drawn final cannot also have a winner.");
+        if (secondId || noClearSecond)
+            throw std::invalid_argument("A drawn final has no second place.");
+        if (!outAtDraw.isEmpty() && settings.value("draw_policy").toString() != "ELIMINATED_LOSE")
+            throw std::invalid_argument("Players are only marked as already out when eliminated players take a loss.");
+        seat = seatResults(seeds, "DRAW", 0, outAtDraw, settings);
+    }
+
+    const int winPts = halves(settings.value("win_points"));
+    const int lossPts = halves(settings.value("loss_points"));
+    const int drawPts = halves(settings.value("draw_points"));
+    const int secondPts = halves(settings.value("second_place_points"));
+    struct Entry {
+        qint64 id;
+        int seed, qualifying, award, total;
+        QString result;
+        bool out;
+    };
+    QList<Entry> entries;
+    for (int i = 0; i < seeds.size(); ++i) {
+        const qint64 id = seeds[i];
+        Entry e{id, i + 1, int(std::lround(qualifyingPoints[i] * 2)), 0, 0, seat.value(id).result, false};
+        if (win) {
+            if (id == winnerId) e.award = winPts;
+            else if (id == secondId) { e.award = lossPts + secondPts; e.result = "SECOND"; }
+            else e.award = lossPts;
+        } else {
+            e.award = e.result == "DRAW" ? drawPts : lossPts;
+            e.out = outAtDraw.contains(id);
+        }
+        e.total = e.qualifying + e.award;
+        entries << e;
+    }
+    std::stable_sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {
+        return a.total != b.total ? a.total > b.total : a.seed < b.seed;
+    });
+    const bool provisional = win && !secondId && !noClearSecond;
+    QVariantList placed;
+    for (int i = 0; i < entries.size(); ++i) {
+        const Entry &e = entries[i];
+        bool tied = false;
+        for (const Entry &o : entries)
+            tied = tied || (o.id != e.id && o.total == e.total);
+        placed << QVariantMap{{"player_id", e.id}, {"place", i + 1}, {"basis", tied ? "TOTAL_POINTS_SEED" : "TOTAL_POINTS"},
+                              {"result", e.result}, {"qualifying_points", e.qualifying / 2.0}, {"final_points", e.award / 2.0},
+                              {"total_points", e.total / 2.0}, {"out_at_draw", e.out}, {"provisional", provisional}};
+    }
     return placed;
 }
 

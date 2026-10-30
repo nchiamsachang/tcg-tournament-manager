@@ -352,7 +352,9 @@ void CommanderEventScreen::refresh()
     if (stage == "COMPLETE") {
         const QString first = ev["champion_name"].toString();
         QString how;
-        if (fin["status"].toString() == "CONFIRMED")
+        if (fin["status"].toString() == "CONFIRMED" && fin["final_ranking"].toString() == "TOTAL_POINTS")
+            how = QStringLiteral(" (most total points)");
+        else if (fin["status"].toString() == "CONFIRMED")
             how = fin["outcome"].toString() == "WIN" ? QStringLiteral(" (won the final)")
                                                     : QStringLiteral(" (no winner in the final: placed by qualifying seed)");
         body_->addWidget(banner("Tournament complete." + (first.isEmpty() ? QString() : "  1st place: " + first + how),
@@ -1101,12 +1103,6 @@ void CommanderEventScreen::correct(const QVariantMap &pod)
     QHash<qint64, QString> names;
     for (const QVariant &p : state["players"].toList())
         names.insert(p.toMap()["player_id"].toLongLong(), p.toMap()["display_name"].toString());
-    const auto namesOf = [&names](const QVariantList &ids) {
-        QStringList out;
-        for (const QVariant &id : ids)
-            out << names.value(id.toLongLong(), "?");
-        return out.join(", ");
-    };
     // each answer the organizer gives is added and the correction tried again; nothing is saved before
     bool done = false;
     while (!done && d.exec() == QDialog::Accepted) {
@@ -1135,8 +1131,7 @@ void CommanderEventScreen::correct(const QVariantMap &pod)
                     view_ = 0;
             } catch (const cdb::FinalAffected &e) {
                 if (!confirm(this, "The final would change",
-                             e.message + "\n\nFinalists now: " + namesOf(e.seedsBefore) + "\nAfter the correction: "
-                                 + namesOf(e.seedsAfter)
+                             e.message + "\n\n" + cdb::finalChangeLines(e, names).join("\n")
                                  + "\n\nDiscard the final and save the correction? Later qualifying rounds stay as published, "
                                    "and the final is then created again from the corrected standings."))
                     break;
@@ -1164,9 +1159,13 @@ void CommanderEventScreen::buildFinalCreate()
     v->setContentsMargins(18, 14, 18, 14);
     v->setSpacing(6);
     v->addWidget(T::lbl("TOP-FOUR FINAL", T::PURPLE_LT, 12, 700, false, false, 1.0));
+    const bool byTotal = state["final_ranking"].toString() == "TOTAL_POINTS";
     v->addWidget(T::lbl(QStringLiteral("All %1 qualifying rounds are final. The four best players in the standings who are "
                                        "checked in and have not dropped play one final pod, seated in seed order: seed 1 "
-                                       "takes the first turn. The final adds no points.").arg(state["total_rounds"].toInt()),
+                                       "takes the first turn. %2").arg(state["total_rounds"].toInt())
+                            .arg(byTotal ? QStringLiteral("The final adds points to their qualifying points, and the most "
+                                                          "total points places first.")
+                                         : QStringLiteral("The final adds no points.")),
                         T::TEXT, 13, 400, true));
     for (const QVariant &pv : candidates["players"].toList()) {
         const QVariantMap p = pv.toMap();
@@ -1214,8 +1213,14 @@ void CommanderEventScreen::createFinal()
     guard([&] { cdb::createFinal(tournamentId_, seeds); }, "Top-four final");
 }
 
-static QString placementRules()
+static QString placementRules(bool byTotal = false)
 {
+    if (byTotal)
+        return QStringLiteral("Each finalist's total is their qualifying points plus the final points: the winner earns 5, a "
+                              "clear second place 2.5 and the others 0. In a draw every player still in earns 1 (players "
+                              "already out earn 0 where eliminated players lose). The most total points places first, so "
+                              "the winner can place lower. Equal totals go to the better qualifying seed. The clock never "
+                              "decides the result.");
     return QStringLiteral("The first players knocked out place 4th, the next 3rd, and so on; the winner is 1st. Players "
                           "knocked out together are placed by qualifying seed among themselves. With a winner, the "
                           "players still in when the game ended lost together and follow the winner. With no winner, the "
@@ -1241,6 +1246,17 @@ void CommanderEventScreen::buildFinal()
     head->addStretch();
     v->addLayout(head);
 
+    const bool byTotal = fin["final_ranking"].toString() == "TOTAL_POINTS";
+    if (live && byTotal) {
+        v->addWidget(T::lbl("When the game ends, choose the winner and the second place, or Draw. The places show below. "
+                            "Nothing is saved until you confirm the final results.", T::TEXT, 13, 400, true));
+        auto *editor = new TotalFinalEditor(tournamentId_, fin, TotalFinalEditor::Live);
+        totalEditor_ = editor;
+        v->addWidget(editor);
+        body_->addWidget(card);
+        connect(editor, &TotalFinalEditor::confirmRequested, this, [this, editor] { confirmTotalFinalFrom(editor); });
+        return;
+    }
     if (live) {
         v->addWidget(T::lbl("Record each knockout as it happens. When the game ends, choose the winner, check the places "
                             "and confirm.", T::TEXT, 13, 400, true));
@@ -1262,9 +1278,11 @@ void CommanderEventScreen::buildFinal()
     for (const QVariant &p : players)
         if (p.toMap()["player_id"].toLongLong() == fin["winner_player_id"].toLongLong())
             winnerName = p.toMap()["display_name"].toString();
+    const QString drawn = byTotal ? QStringLiteral("Final confirmed: drawn, every player still in earned the draw points")
+                                  : QStringLiteral("Final confirmed: no winner, so the players still in are placed by seed");
     const QString status = confirmed ? (fin["outcome"].toString() == "WIN"
                                             ? QStringLiteral("✓  Final confirmed: ") + winnerName + " won"
-                                            : QStringLiteral("Final confirmed: no winner, so the players still in are placed by seed"))
+                                            : drawn)
                                      : QStringLiteral("Ended early: the final was not finished and nobody was placed");
     v->addWidget(T::lbl(status, confirmed ? T::GREEN : T::GREY, 12, 700, true));
     v->addWidget(T::hline());
@@ -1283,17 +1301,30 @@ void CommanderEventScreen::buildFinal()
         names->addWidget(T::lbl(QStringLiteral("Seed %1  ·  #%2 after qualifying  ·  %3 pts").arg(p["seed"].toInt())
                                     .arg(p["standing"].toInt()).arg(cmdr::pointsText(p["points"].toDouble())),
                                 T::MUTED, 11, 400, true, true));
+        if (byTotal && confirmed && !p["final_points"].isNull())
+            names->addWidget(T::lbl(QStringLiteral("Qualifying %1 + final %2 = total %3")
+                                        .arg(cmdr::pointsText(p["qualifying_points"].toDouble()),
+                                             cmdr::pointsText(p["final_points"].toDouble()),
+                                             cmdr::pointsText(p["total_points"].toDouble())),
+                                    T::TEXT, 12, 600, true, true));
         row->addLayout(names, 1);
         QString shown;
         if (confirmed) {
             const QString basis = p["placement_basis"].toString();
-            shown = placeText(p["placement"].toInt()) + (basis == "WINNER" ? QStringLiteral("  ·  won")
-                                                         : basis == "QUALIFYING_RANK" ? QStringLiteral("  ·  by seed")
-                                                                                      : QString());
+            const QString result = p["final_result"].toString();
+            shown = placeText(p["placement"].toInt())
+                    + (byTotal ? (result == "WIN" ? QStringLiteral("  ·  won the final")
+                                  : result == "SECOND" ? QStringLiteral("  ·  second in the final")
+                                  : result == "DRAW" ? QStringLiteral("  ·  drew the final") : QString())
+                                     + (basis == "TOTAL_POINTS_SEED" ? QStringLiteral("  ·  by seed") : QString())
+                       : basis == "WINNER" ? QStringLiteral("  ·  won")
+                       : basis == "QUALIFYING_RANK" ? QStringLiteral("  ·  by seed")
+                                                    : QString());
         } else {
-            shown = group ? QStringLiteral("Out in knockout %1").arg(group) : QStringLiteral("Still in");
+            shown = byTotal ? QStringLiteral("Not placed")
+                    : group ? QStringLiteral("Out in knockout %1").arg(group) : QStringLiteral("Still in");
         }
-        QLabel *stateLabel = T::lbl(shown, confirmed && p["placement"].toInt() == 1 ? T::GOLD : T::MUTED, 11, 700);
+        QLabel *stateLabel = T::lbl(shown, confirmed && p["placement"].toInt() == 1 ? T::GOLD : T::MUTED, 11, 700, byTotal);
         stateLabel->setAccessibleName(p["display_name"].toString() + ": " + shown);
         row->addWidget(stateLabel);
         v->addLayout(row);
@@ -1422,14 +1453,43 @@ void CommanderEventScreen::confirmFinalFrom(FinalEditor *editor)
     completeWith([] {});
 }
 
+void CommanderEventScreen::confirmTotalFinalFrom(TotalFinalEditor *editor)
+{
+    if (!editor->ready())
+        return;
+    if (!confirm(this, "Confirm final results",
+                 "Confirm these places and finish the tournament?\n\n" + editor->preview->text().remove(QChar(0x200B))))
+        return;
+    T::ScrollKeeper keep(this);
+    try {
+        cdb::confirmTotalFinal(tournamentId_, editor->outcome(), editor->winner(), editor->second(), editor->outAtDraw(),
+                               state["final"].toMap()["result_version"].toInt());
+    } catch (const cdb::ConflictError &e) {
+        warn(this, "Changed elsewhere", e.message);
+        refresh();
+        return;
+    } catch (const cdb::CommanderError &e) {
+        editor->setError(e.message);        // nothing saved; the choice stays as entered
+        return;
+    } catch (const std::exception &e) {
+        editor->setError(failureText(e));
+        return;
+    }
+    completeWith([] {});
+}
+
 void CommanderEventScreen::correctFinal()
 {
     const QVariantMap fin = state["final"].toMap();
     FinalCorrectionDialog d(this, tournamentId_, fin);
     while (d.exec() == QDialog::Accepted) {
         try {
-            cdb::confirmFinal(tournamentId_, d.editor->groups(), d.editor->outcome(), d.editor->winner(),
-                              fin["result_version"].toInt(), d.reason());
+            if (d.totalEditor)
+                cdb::confirmTotalFinal(tournamentId_, d.totalEditor->outcome(), d.totalEditor->winner(), d.totalEditor->second(),
+                                       d.totalEditor->outAtDraw(), fin["result_version"].toInt(), d.reason());
+            else
+                cdb::confirmFinal(tournamentId_, d.editor->groups(), d.editor->outcome(), d.editor->winner(),
+                                  fin["result_version"].toInt(), d.reason());
         } catch (const cdb::ConflictError &e) {
             warn(this, "Changed elsewhere", e.message);
             break;
@@ -1854,6 +1914,333 @@ void FinalEditor::updatePreview()
         confirmBtn->setEnabled(ready());
 }
 
+TotalFinalEditor::TotalFinalEditor(qint64 tournamentId, const QVariantMap &final, Mode mode, QWidget *parent)
+    : QWidget(parent), tournamentId_(tournamentId), mode_(mode)
+{
+    const QVariantMap settings = cdb::getEvent(tournamentId)["settings"].toMap();
+    eliminatedLose_ = settings["draw_policy"].toString() == "ELIMINATED_LOSE";
+    auto *v = new QVBoxLayout(this);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(10);
+    sections_ = new QBoxLayout(QBoxLayout::LeftToRight);
+    sections_->setSpacing(12);
+    v->addLayout(sections_);
+
+    QVariantList players = final["players"].toList();
+    std::sort(players.begin(), players.end(), [](const QVariant &a, const QVariant &b) {
+        return a.toMap()["seed"].toInt() < b.toMap()["seed"].toInt();
+    });
+
+    QVBoxLayout *left = nullptr;
+    QFrame *resultBox = finalSection("Final result", "Choose the winner and who finished second, or Draw.", &left);
+    const QString winText = cmdr::pointsText(settings["win_points"].toDouble());
+    const QString secondText = cmdr::pointsText(settings["second_place_points"].toDouble());
+    // a ticked pill is wider (tick and bold text), and these sit in a line that wraps by their width
+    const auto roomFor = [](T::WrapButton *pill, const QString &text) {
+        pill->setMinimumWidth(QFontMetrics(T::font(14, 700)).horizontalAdvance(QStringLiteral("✓  ") + text) + T::px(48));
+    };
+    for (const QVariant &pv : players) {
+        const QVariantMap p = pv.toMap();
+        const qint64 id = p["player_id"].toLongLong();
+        seeds_ << id;
+        auto *block = new QVBoxLayout;
+        block->setSpacing(2);
+        nameLabels_.insert(id, T::lbl("", T::TEXT, 14, 600, true));
+        metaLabels_.insert(id, T::lbl("", T::MUTED, 11, 400, true, true));
+        block->addWidget(nameLabels_.value(id));
+        block->addWidget(metaLabels_.value(id));
+        left->addLayout(block);
+
+        auto *pills = new QWidget;
+        auto *pl = new T::FlowLayout(pills, 8);
+        auto *win = new T::WrapButton(QStringLiteral("Winner +%1").arg(winText));
+        win->makeChoice();
+        roomFor(win, QStringLiteral("Winner +%1").arg(winText));
+        auto *sec = new T::WrapButton(QStringLiteral("2nd +%1").arg(secondText));
+        sec->makeChoice();
+        roomFor(sec, QStringLiteral("2nd +%1").arg(secondText));
+        auto *out = new QCheckBox("Already out");
+        out->hide();
+        winners.insert(id, win);
+        seconds.insert(id, sec);
+        outChecks.insert(id, out);
+        pl->addWidget(win);
+        pl->addWidget(sec);
+        pl->addWidget(out);
+        left->addWidget(pills);
+        left->addSpacing(4);
+
+        connect(win, &QPushButton::toggled, this, [this, id](bool on) {
+            if (syncing_)
+                return;
+            if (on) {
+                winner_ = id;
+                draw_ = false;
+                out_.clear();
+                if (second_.kind == cdb::SecondPlace::Player && second_.playerId == id)
+                    second_ = cdb::SecondPlace();
+            } else if (winner_ == id) {
+                winner_ = 0;
+                second_ = cdb::SecondPlace();
+            }
+            sync();
+            emit changed();
+        });
+        connect(sec, &QPushButton::toggled, this, [this, id](bool on) {
+            if (syncing_)
+                return;
+            if (on)
+                second_ = cdb::SecondPlace(id);
+            else if (second_.kind == cdb::SecondPlace::Player && second_.playerId == id)
+                second_ = cdb::SecondPlace();
+            sync();
+            emit changed();
+        });
+        connect(out, &QCheckBox::toggled, this, [this, id](bool on) {
+            if (syncing_)
+                return;
+            if (on)
+                out_.insert(id);
+            else
+                out_.remove(id);
+            sync();
+            emit changed();
+        });
+    }
+    auto *endings = new QWidget;
+    auto *el = new T::FlowLayout(endings, 8);
+    auto *noSecondPill = new T::WrapButton("No clear second");
+    noSecondPill->makeChoice();
+    roomFor(noSecondPill, "No clear second");
+    noSecond = noSecondPill;
+    noSecond->setAccessibleName("No clear second place");
+    auto *drawPill = new T::WrapButton("Draw");
+    drawPill->makeChoice();
+    roomFor(drawPill, "Draw");
+    drawBtn = drawPill;
+    drawBtn->setAccessibleName("The final was drawn");
+    el->addWidget(noSecond);
+    el->addWidget(drawBtn);
+    left->addWidget(endings);
+    left->addWidget(T::lbl("No clear second: the last players lost at the same moment, so nobody earns the second-place "
+                           "points.", T::MUTED, 11, 400, true));
+    drawNote = T::lbl("", T::MUTED, 11, 400, true);
+    drawNote->hide();
+    left->addWidget(drawNote);
+    left->addStretch();
+    sections_->addWidget(resultBox, 1);
+
+    QVBoxLayout *right = nullptr;
+    QFrame *placesBox = finalSection("Places", "The most total points places first.", &right);
+    preview = T::lbl("", T::TEXT, 13, 400, true);
+    preview->setAccessibleName("Places");
+    right->addWidget(preview);
+    problem = T::lbl("", T::RED, 12, 700, true);
+    problem->hide();
+    right->addWidget(problem);
+    if (mode == Live) {
+        right->addWidget(T::lbl("Nothing about the result is saved until you confirm the final results.", T::MUTED, 11, 400, true));
+        confirmBtn = new T::WrapButton("Confirm final results", "primary");
+        confirmBtn->setAccessibleName("Confirm the final results");
+        right->addWidget(confirmBtn, 0, Qt::AlignLeft);
+    }
+    right->addStretch();
+    sections_->addWidget(placesBox, 1);
+
+    howBtn = smallButton("How placements work");
+    howBtn->setCheckable(true);
+    howBtn->setAccessibleName("How placements work");
+    howBtn->setAccessibleDescription("collapsed");
+    howText = T::lbl(placementRules(true), T::MUTED, 12, 400, true);
+    howText->hide();
+    connect(howBtn, &QPushButton::toggled, this, [this](bool open) {
+        howText->setVisible(open);
+        howBtn->setAccessibleDescription(open ? "expanded" : "collapsed");
+    });
+    v->addWidget(howBtn, 0, Qt::AlignLeft);
+    v->addWidget(howText);
+
+    connect(noSecond, &QPushButton::toggled, this, [this](bool on) {
+        if (syncing_)
+            return;
+        if (on)
+            second_ = cdb::SecondPlace::noClearSecond();
+        else if (second_.kind == cdb::SecondPlace::NoClearSecond)
+            second_ = cdb::SecondPlace();
+        sync();
+        emit changed();
+    });
+    connect(drawBtn, &QPushButton::toggled, this, [this](bool on) {
+        if (syncing_)
+            return;
+        draw_ = on;
+        if (on) {
+            winner_ = 0;
+            second_ = cdb::SecondPlace();
+        } else {
+            out_.clear();
+        }
+        sync();
+        emit changed();
+    });
+    if (confirmBtn) {
+        connect(confirmBtn, &QPushButton::clicked, this, [this] {
+            if (saving_ || !ready())
+                return;
+            const QPointer<TotalFinalEditor> self(this);
+            saving_ = true;
+            emit confirmRequested();
+            if (self)
+                saving_ = false;
+        });
+    }
+
+    // a correction starts from the saved result
+    if (mode == Draft && final["status"].toString() == "CONFIRMED") {
+        if (final["outcome"].toString() == "WIN") {
+            winner_ = final["winner_player_id"].toLongLong();
+            second_ = final["second_place_status"].toString() == "NONE"
+                          ? cdb::SecondPlace::noClearSecond() : cdb::SecondPlace(final["second_place_player_id"].toLongLong());
+        } else {
+            draw_ = true;
+            for (const QVariant &pv : players)
+                if (pv.toMap()["out_at_draw"].toBool())
+                    out_.insert(pv.toMap()["player_id"].toLongLong());
+        }
+    }
+
+    // tab order follows the page: each finalist's choices, then the endings
+    QList<QWidget *> order;
+    for (qint64 id : seeds_)
+        order << winners.value(id) << seconds.value(id) << outChecks.value(id);
+    order << noSecond << drawBtn;
+    if (confirmBtn)
+        order << confirmBtn;
+    order << howBtn;
+    for (int i = 1; i < order.size(); ++i)
+        setTabOrder(order[i - 1], order[i]);
+    setFinal(final);
+}
+
+void TotalFinalEditor::setFinal(const QVariantMap &final)
+{
+    for (const QVariant &pv : final["players"].toList()) {
+        const QVariantMap p = pv.toMap();
+        const qint64 id = p["player_id"].toLongLong();
+        if (!nameLabels_.contains(id))
+            continue;
+        const QString name = p["display_name"].toString();
+        nameLabels_.value(id)->setText(T::breakable(name));
+        metaLabels_.value(id)->setText(T::breakable(QStringLiteral("Seed %1  ·  %2 qualifying points")
+                                                        .arg(p["seed"].toInt()).arg(cmdr::pointsText(p["qualifying_points"].toDouble()))));
+        winners.value(id)->setAccessibleName(name + " won the final");
+        seconds.value(id)->setAccessibleName(name + " finished second");
+        outChecks.value(id)->setAccessibleName(name + " was already out");
+    }
+    sync();
+    emit changed();
+}
+
+QString TotalFinalEditor::outcome() const
+{
+    return winner_ ? QStringLiteral("WIN") : draw_ ? QStringLiteral("DRAW") : QString();
+}
+
+QList<qint64> TotalFinalEditor::outAtDraw() const
+{
+    QList<qint64> out;
+    if (draw_ && eliminatedLose_)
+        for (qint64 id : seeds_)
+            if (out_.contains(id))
+                out << id;
+    return out;
+}
+
+bool TotalFinalEditor::ready() const { return !outcome().isEmpty() && previewOk_ && !provisional_; }
+
+bool TotalFinalEditor::stacked() const { return sections_->direction() == QBoxLayout::TopToBottom; }
+
+void TotalFinalEditor::setError(const QString &text)
+{
+    problem->setText(T::breakable("Not saved: " + text));
+    problem->setVisible(!text.isEmpty());
+}
+
+void TotalFinalEditor::resizeEvent(QResizeEvent *e)
+{
+    QWidget::resizeEvent(e);
+    // the same switch points as the knockout editor, so a scroll bar cannot flip it back and forth
+    const int w = width();
+    if (!stacked() && w < T::px(540))
+        sections_->setDirection(QBoxLayout::TopToBottom);
+    else if (stacked() && w >= T::px(580))
+        sections_->setDirection(QBoxLayout::LeftToRight);
+}
+
+// shows the choice on the pills and the places it gives; no control is added or removed, so the
+// page and the focus stay where they are
+void TotalFinalEditor::sync()
+{
+    // a pill that is about to be disabled must not hold the focus: Qt would pass it down the page
+    QWidget *f = QApplication::focusWidget();
+    if (f && (f == this || isAncestorOf(f)) && f != this) {
+        for (qint64 id : seeds_)
+            if (f == seconds.value(id) && (!winner_ || winner_ == id))
+                setFocus(Qt::OtherFocusReason);
+        if (f == noSecond && !winner_)
+            setFocus(Qt::OtherFocusReason);
+    }
+    syncing_ = true;
+    for (qint64 id : seeds_) {
+        winners.value(id)->setChecked(winner_ == id);
+        QPushButton *s = seconds.value(id);
+        s->setChecked(second_.kind == cdb::SecondPlace::Player && second_.playerId == id);
+        s->setEnabled(winner_ != 0 && winner_ != id);
+        QCheckBox *o = outChecks.value(id);
+        o->setVisible(draw_ && eliminatedLose_);
+        o->setChecked(out_.contains(id));
+    }
+    noSecond->setChecked(second_.kind == cdb::SecondPlace::NoClearSecond);
+    noSecond->setEnabled(winner_ != 0);
+    drawBtn->setChecked(draw_);
+    syncing_ = false;
+    drawNote->setText(T::breakable(eliminatedLose_
+                                       ? QStringLiteral("Tick every player who was already out when the game was drawn: "
+                                                        "they earn 0, the others 1.")
+                                       : QStringLiteral("Every player earns the draw points, including any who were already out.")));
+    drawNote->setVisible(draw_);
+
+    QStringList lines;
+    QString hint;
+    previewOk_ = false;
+    provisional_ = false;
+    if (outcome().isEmpty()) {
+        lines << "Choose the winner, or Draw, to see the places.";
+    } else {
+        try {
+            for (const QVariant &pv : cdb::previewTotalFinal(tournamentId_, outcome(), winner_, second_, outAtDraw())) {
+                const QVariantMap p = pv.toMap();
+                provisional_ = p["provisional"].toBool();
+                lines << placeText(p["place"].toInt()) + "   " + p["display_name"].toString() + "   ·   "
+                             + QStringLiteral("qual %1 + final %2 = %3").arg(cmdr::pointsText(p["qualifying_points"].toDouble()),
+                                                                              cmdr::pointsText(p["final_points"].toDouble()),
+                                                                              cmdr::pointsText(p["total_points"].toDouble()))
+                             + (p["basis"].toString() == "TOTAL_POINTS_SEED" ? QStringLiteral("   ·   by seed") : QString());
+            }
+            if (provisional_)
+                lines << "Provisional: choose second place or No clear second";
+            previewOk_ = true;
+        } catch (const cdb::CommanderError &e) {
+            hint = e.message;
+        }
+    }
+    preview->setText(T::breakable(lines.join('\n')));
+    problem->setText(T::breakable(hint));
+    problem->setVisible(!hint.isEmpty());
+    if (confirmBtn)
+        confirmBtn->setEnabled(ready());
+}
+
 FinalCorrectionDialog::FinalCorrectionDialog(QWidget *parent, qint64 tournamentId, const QVariantMap &final)
     : QDialog(parent)
 {
@@ -1871,10 +2258,19 @@ FinalCorrectionDialog::FinalCorrectionDialog(QWidget *parent, qint64 tournamentI
     std::sort(players.begin(), players.end(), [](const QVariant &a, const QVariant &b) {
         return a.toMap()["placement"].toInt() < b.toMap()["placement"].toInt();
     });
+    const bool byTotal = final["final_ranking"].toString() == "TOTAL_POINTS";
     QStringList saved;
     for (const QVariant &pv : players) {
         const QVariantMap p = pv.toMap();
         const QString basis = p["placement_basis"].toString();
+        if (byTotal) {
+            saved << placeText(p["placement"].toInt()) + "   " + p["display_name"].toString()
+                         + QStringLiteral("   ·   qual %1 + final %2 = %3").arg(cmdr::pointsText(p["qualifying_points"].toDouble()),
+                                                                                cmdr::pointsText(p["final_points"].toDouble()),
+                                                                                cmdr::pointsText(p["total_points"].toDouble()))
+                         + (basis == "TOTAL_POINTS_SEED" ? QStringLiteral("   ·   by seed") : QString());
+            continue;
+        }
         saved << placeText(p["placement"].toInt()) + "   " + p["display_name"].toString()
                      + (basis == "WINNER" ? QStringLiteral("   ·   won the final")
                         : basis == "QUALIFYING_RANK" ? QStringLiteral("   ·   placed by seed %1").arg(p["seed"].toInt())
@@ -1885,8 +2281,13 @@ FinalCorrectionDialog::FinalCorrectionDialog(QWidget *parent, qint64 tournamentI
     before->setAccessibleName("Saved places");
     v->addWidget(before);
     v->addWidget(T::hline());
-    editor = new FinalEditor(tournamentId, final, FinalEditor::Draft);
-    v->addWidget(editor);
+    if (byTotal) {
+        totalEditor = new TotalFinalEditor(tournamentId, final, TotalFinalEditor::Draft);
+        v->addWidget(totalEditor);
+    } else {
+        editor = new FinalEditor(tournamentId, final, FinalEditor::Draft);
+        v->addWidget(editor);
+    }
     v->addStretch();
 
     error = T::lbl("", T::RED, 12, 700, true);
@@ -1906,8 +2307,13 @@ FinalCorrectionDialog::FinalCorrectionDialog(QWidget *parent, qint64 tournamentI
     buttons->addWidget(cancel);
     buttons->addWidget(saveBtn);
     outer->addLayout(buttons);
-    const auto sync = [this] { saveBtn->setEnabled(editor->ready() && !reason().isEmpty()); };
-    connect(editor, &FinalEditor::changed, this, sync);
+    const auto sync = [this] {
+        saveBtn->setEnabled((totalEditor ? totalEditor->ready() : editor->ready()) && !reason().isEmpty());
+    };
+    if (totalEditor)
+        connect(totalEditor, &TotalFinalEditor::changed, this, sync);
+    else
+        connect(editor, &FinalEditor::changed, this, sync);
     connect(reasonEdit, &QLineEdit::textChanged, this, sync);
     sync();
 }
@@ -2047,7 +2453,12 @@ CommanderStandingsScreen::CommanderStandingsScreen(MainWindow *mw, qint64 tourna
     const bool scoring = state["scores_second"].toBool();
     const QVariantMap fin = state["final"].toMap();
     const bool finalDone = fin["status"].toString() == "CONFIRMED";
-    cols_ = {{"#", 46}, {"Player", 0}, {"Pts", 52}, {"W", 40}, {"L", 40}, {"D", 40}, {"Byes", 54}};
+    byTotal_ = state["final_enabled"].toBool() && ev["final_ranking"].toString() == "TOTAL_POINTS";
+    cols_ = {{"#", 46}, {"Player", 0}, {byTotal_ ? "Qual pts" : "Pts", byTotal_ ? 74 : 52}};
+    if (byTotal_)
+        cols_ << qMakePair(QString("Final"), 54) << qMakePair(QString("Total"), 58);
+    cols_ << qMakePair(QString("W"), 40) << qMakePair(QString("L"), 40) << qMakePair(QString("D"), 40)
+          << qMakePair(QString("Byes"), 54);
     if (scoring)
         cols_ << qMakePair(QString("2nd"), 48);
     cols_ << qMakePair(QString("OMW%"), 76) << qMakePair(QString("MW%"), 70) << qMakePair(QString("Status"), 196);
@@ -2103,7 +2514,13 @@ CommanderStandingsScreen::CommanderStandingsScreen(MainWindow *mw, qint64 tourna
               .arg(qRound(s["tiebreak_floor"].toDouble() * 100))
         : QStringLiteral("Order: points, opponents' match-win % (OMW), own match-win % (MW). %1% floor; a bye "
                          "counts as a win.").arg(qRound(s["tiebreak_floor"].toDouble() * 100));
-    if (state["final_enabled"].toBool())
+    if (byTotal_)
+        order += finalDone ? " Places 1 to 4 are from the top-four final: total points are the qualifying points plus the "
+                             "final points, with equal totals ordered by qualifying seed. Everyone else follows in "
+                             "qualifying order. Qual pts never include the final's points."
+                           : " The top-four final decides places 1 to 4 by qualifying points plus final points; until it "
+                             "is confirmed these are the qualifying standings.";
+    else if (state["final_enabled"].toBool())
         order += finalDone ? " Places 1 to 4 are from the top-four final; everyone else follows in qualifying order. The "
                              "final adds no points."
                            : " The top-four final decides places 1 to 4; until it is confirmed these are the qualifying "
@@ -2161,10 +2578,14 @@ CommanderStandingsScreen::CommanderStandingsScreen(MainWindow *mw, qint64 tourna
             const QVariantMap f = finalists.value(pid);
             const QString basis = f["placement_basis"].toString();
             note = finalDone ? QStringLiteral("Final: %1").arg(placeText(f["placement"].toInt()))
-                                   + (basis == "WINNER" ? QStringLiteral(", won") : basis == "QUALIFYING_RANK"
-                                                                                        ? QStringLiteral(", by seed")
-                                                                                        : QString())
+                                   + (basis == "WINNER" ? QStringLiteral(", won")
+                                      : (basis == "QUALIFYING_RANK" || basis == "TOTAL_POINTS_SEED") ? QStringLiteral(", by seed")
+                                                                                                      : QString())
                              : QStringLiteral("Finalist, seed %1").arg(f["seed"].toInt());
+            if (byTotal_ && finalDone && !f["final_points"].isNull()) {
+                r["final_pts"] = f["final_points"];
+                r["total_pts"] = f["total_points"];
+            }
         } else if (seeds.contains(pid)) {
             note = QStringLiteral("Playoff seed %1").arg(seeds.value(pid));
         }
@@ -2196,12 +2617,16 @@ QWidget *CommanderStandingsScreen::standingRow(const QVariantMap &r, bool last)
     QList<QLabel *> cells{
         T::lbl(QString::number(place), pc.isEmpty() ? T::MUTED : pc, 13, 700, false, true),
         T::lbl(r["display_name"].toString(), dropped ? T::MUTED : T::TEXT, 14, 600, true),
-        T::lbl(cmdr::pointsText(r["points"].toDouble()), T::TEXT, 15, 700),
-        T::lbl(r["wins"].toString(), T::GREEN, 13, 600),
-        T::lbl(r["losses"].toString(), T::RED, 13),
-        T::lbl(r["draws"].toString(), T::AMBER, 13),
-        T::lbl(r["byes"].toString(), T::GREY, 13),
+        T::lbl(cmdr::pointsText(r["points"].toDouble()), T::TEXT, byTotal_ ? 13 : 15, byTotal_ ? 600 : 700),
     };
+    if (byTotal_) {
+        cells << T::lbl(r["final_pts"].isNull() ? QString() : cmdr::pointsText(r["final_pts"].toDouble()), T::TEXT, 13, 600)
+              << T::lbl(r["total_pts"].isNull() ? QString() : cmdr::pointsText(r["total_pts"].toDouble()), T::GOLD, 15, 700);
+    }
+    cells << T::lbl(r["wins"].toString(), T::GREEN, 13, 600)
+          << T::lbl(r["losses"].toString(), T::RED, 13)
+          << T::lbl(r["draws"].toString(), T::AMBER, 13)
+          << T::lbl(r["byes"].toString(), T::GREY, 13);
     if (state["scores_second"].toBool())
         cells << T::lbl(QString::number(r["seconds"].toInt()), T::PURPLE_LT, 13);
     cells << T::lbl(QString::number(r["omw_pct"].toDouble(), 'f', 3), T::MUTED, 12, 400, false, true)
@@ -2231,17 +2656,25 @@ printing::Doc CommanderStandingsScreen::pdfDoc() const
     d.title = ev["name"].toString();
     d.sub = (ev["stage"].toString() == "COMPLETE" ? QStringLiteral("Final standings") : QStringLiteral("Standings"))
             + QStringLiteral("  ·  MTG Commander  ·  ") + ev["tournament_date"].toString().left(10);
-    d.columns = {{"#", 0.07}, {"Player", scoring ? 0.25 : 0.29}, {"Pts", 0.08}, {"W", 0.06}, {"L", 0.06}, {"D", 0.06}};
-    if (scoring)
-        d.columns << qMakePair(QString("2nd"), 0.06);
-    d.columns << qMakePair(QString("OMW%"), 0.09) << qMakePair(QString("MW%"), 0.09)
-              << qMakePair(QString("Notes"), scoring ? 0.18 : 0.20);
-    d.bold = {0, 1, 2};
+    if (byTotal_) {
+        d.columns = {{"#", 0.06}, {"Player", 0.19}, {"Qual pts", 0.09}, {"Final", 0.07}, {"Total", 0.07}, {"W", 0.05},
+                     {"L", 0.05}, {"D", 0.05}, {"2nd", 0.05}, {"OMW%", 0.08}, {"MW%", 0.08}, {"Notes", 0.16}};
+    } else {
+        d.columns = {{"#", 0.07}, {"Player", scoring ? 0.25 : 0.29}, {"Pts", 0.08}, {"W", 0.06}, {"L", 0.06}, {"D", 0.06}};
+        if (scoring)
+            d.columns << qMakePair(QString("2nd"), 0.06);
+        d.columns << qMakePair(QString("OMW%"), 0.09) << qMakePair(QString("MW%"), 0.09)
+                  << qMakePair(QString("Notes"), scoring ? 0.18 : 0.20);
+    }
+    d.bold = byTotal_ ? QList<int>{0, 1, 2, 4} : QList<int>{0, 1, 2};
     d.empty = "No standings yet.";
     for (const QVariant &rv : rows) {
         const QVariantMap r = rv.toMap();
-        QStringList row{r["place"].toString(), r["display_name"].toString(), cmdr::pointsText(r["points"].toDouble()),
-                        r["wins"].toString(), r["losses"].toString(), r["draws"].toString()};
+        QStringList row{r["place"].toString(), r["display_name"].toString(), cmdr::pointsText(r["points"].toDouble())};
+        if (byTotal_)
+            row << (r["final_pts"].isNull() ? QString() : cmdr::pointsText(r["final_pts"].toDouble()))
+                << (r["total_pts"].isNull() ? QString() : cmdr::pointsText(r["total_pts"].toDouble()));
+        row << r["wins"].toString() << r["losses"].toString() << r["draws"].toString();
         if (scoring)
             row << QString::number(r["seconds"].toInt());
         row << QString::number(r["omw_pct"].toDouble(), 'f', 3) << QString::number(r["mw_pct"].toDouble(), 'f', 3)
@@ -2277,11 +2710,21 @@ void CommanderStandingsScreen::exportCsv()
         warn(this, "Failed", f.errorString());
         return;
     }
+    QTextStream out(&f);
+    out << csvText();
+    out.flush();
+    f.close();
+    inform(this, "Exported", "Saved to:\n" + path);
+}
+
+QString CommanderStandingsScreen::csvText() const
+{
     const bool scoring = state["scores_second"].toBool();
     const bool withFinal = state["final_enabled"].toBool();
-    QTextStream out(&f);
+    QString text;
+    QTextStream out(&text);
     out << "Place,Player,Points,Wins,Losses,Draws,Byes," << (scoring ? "Seconds," : "") << "OMW%,MW%,Dropped"
-        << (withFinal ? ",Final" : "") << '\n';
+        << (withFinal ? ",Final" : "") << (byTotal_ ? ",Qualifying points,Final points,Total points" : "") << '\n';
     for (const QVariant &rv : rows) {
         const QVariantMap r = rv.toMap();
         const QString player = printing::csvCell(r["display_name"].toString());
@@ -2296,8 +2739,12 @@ void CommanderStandingsScreen::exportCsv()
             const QString note = r["note"].toString();
             out << ',' << printing::csvCell(note.startsWith("Final") || note.startsWith("Finalist") ? note.section(';', 0, 0) : QString());
         }
+        if (byTotal_)
+            out << ',' << cmdr::pointsText(r["points"].toDouble()) << ','
+                << (r["final_pts"].isNull() ? QString() : cmdr::pointsText(r["final_pts"].toDouble())) << ','
+                << (r["total_pts"].isNull() ? QString() : cmdr::pointsText(r["total_pts"].toDouble()));
         out << '\n';
     }
-    f.close();
-    inform(this, "Exported", "Saved to:\n" + path);
+    out.flush();
+    return text;
 }

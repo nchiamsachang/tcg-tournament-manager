@@ -40,7 +40,10 @@ standings kept with the registrations and, on the last round, the placings and
 completed status. The top-four final follows the same rule: `cdb::createFinal`
 (the final, its players and seeds, the audit entry), `saveFinalEliminations` (the
 groups and the audit entry) and `confirmFinal` (the places, the outcome, the audit
-entry, the placings and the completed status) each own one transaction. A correction
+entry, the placings and the completed status) each own one transaction. An event whose
+final is ranked by total points uses `confirmTotalFinal` instead (the awards, the
+places, the audit entry, the placings and the completed status in one transaction);
+each policy's calls refuse the other's events. A correction
 that discards a final that has not begun does so inside `correctResult`'s
 transaction. Screens ask their questions before calling these, never while a change
 is open.

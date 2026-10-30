@@ -60,6 +60,8 @@ Run on the build you will use at the event. Record the version shown on the home
 | A-11 | Narrow window, large text, themes | Any round screen | Shrink the window to its minimum; switch Text size to Large; switch Light/Dark. | Nothing cut off or overlapping; all buttons reachable; both themes readable. | | Not Run | |
 | A-12 | Check-in does not jump | Commander registration, 11 players, window short enough to scroll | Scroll to the bottom; toggle "Checked in" on the last few players. | The list stays where it was after each click. | | Not Run | |
 | A-13 | End early keeps history | Any running test tournament | "End tournament early" and confirm. | It moves to History marked Terminated; rounds and reported results are still shown, read-only. | | Not Run | |
+| A-14 | Final standings by total points | Commander test event, 8 players, 1 round, "Add a top-four final" ticked (Final standings: Total points) | Play the round (winner and 2nd in each pod), create the final, choose winner, 2nd or No clear second or Draw, read the places, Confirm. Open the standings. | The places show "qual + final = total" and "by seed" for equal totals; nothing is saved until Confirm; the standings, CSV and PDF show Qual pts, Final and Total and agree. Qualifying points are unchanged by the final. See REGRESSION_CASES.md section 16 (RG-1609 to RG-1625). | | Not Run | |
+| A-15 | Final standings policy is chosen before the start | Same setup page | Switch Final standings to Knockout order and back; start the event; look for the option. | The choice is saved, named in the start question, and cannot be changed once started. | | Not Run | |
 
 Stop and fix (or use the previous build) if A-04 to A-08 fail: those are the event itself.
 

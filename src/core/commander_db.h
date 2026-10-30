@@ -19,6 +19,7 @@
 
 #include "db.h"
 
+#include <QHash>
 #include <QStringList>
 #include <stdexcept>
 
@@ -41,14 +42,20 @@ struct ResolutionRequired : CommanderError {
     ResolutionRequired(const QString &m, const QVariantList &later) : CommanderError(m), laterRounds(later) {}
     QVariantList laterRounds;
 };
-// a correction would change who plays the final, or their seeds.  the final has not begun,
-// so the correction can still be saved with the resolution "REBUILD_FINAL", which discards
-// the final (it is then created again from the corrected standings).
+// a correction would change who plays the final, their seeds, or (total-points finals) a
+// finalist's qualifying points.  the final has not begun, so the correction can still be
+// saved with the resolution "REBUILD_FINAL", which discards the final (it is then created
+// again from the corrected standings).
 struct FinalAffected : CommanderError {
-    FinalAffected(const QString &m, const QVariantList &before, const QVariantList &after)
-        : CommanderError(m), seedsBefore(before), seedsAfter(after) {}
+    FinalAffected(const QString &m, const QVariantList &before, const QVariantList &after,
+                  const QVariantList &points = {})
+        : CommanderError(m), seedsBefore(before), seedsAfter(after), pointsChanged(points) {}
+    bool seedsChanged() const { return seedsBefore != seedsAfter; }
     QVariantList seedsBefore, seedsAfter;       // player ids, best seed first
+    QVariantList pointsChanged;                 // {player_id, points_before, points_after} by seed; empty for knockout
 };
+// one plain line per change in e, naming players from names ("?" when unknown); for the confirm text
+QStringList finalChangeLines(const FinalAffected &e, const QHash<qint64, QString> &names);
 
 const int NONE = -1;                    // "not given" for expected versions and round numbers
 
@@ -79,7 +86,8 @@ bool isCommander(qint64 tournamentId);
 // random seed.  returns tournament_id.
 qint64 createCommanderTournament(const QString &name, int expectedPlayers = 8, int swissRounds = 0,
                                  const QVariantMap &settings = {}, qint64 baseSeed = -1,
-                                 const QString &tournamentDate = {}, int roundTimeMins = 50, bool topFourFinal = false);
+                                 const QString &tournamentDate = {}, int roundTimeMins = 50, bool topFourFinal = false,
+                                 const QString &finalRanking = "TOTAL_POINTS");
 QVariantMap getEvent(qint64 tournamentId);
 db::Rows getRegistrations(qint64 tournamentId);
 // Setup advice for a checked-in player count: {players, rounds, pods, byes, error}.
@@ -87,8 +95,10 @@ QVariantMap recommendation(int playerCount);
 void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn);
 // organizer overrides, only before the event starts.  pass 0 / empty / -1 to leave a value alone.
 // rounds given here are the organizer's choice: later check-ins never change them.
+// finalRanking (TOTAL_POINTS | KNOCKOUT) is how the final's places are decided; events created
+// under commander-rules-3 keep KNOCKOUT.
 void updateEventConfig(qint64 tournamentId, int swissRounds = 0, const QString &drawPolicy = {},
-                       const QString &threePodPlacement = {}, int topFourFinal = -1);
+                       const QString &threePodPlacement = {}, int topFourFinal = -1, const QString &finalRanking = {});
 // sets the rounds to the number suggested for the players checked in now, and lets them
 // follow the suggestion again as check-ins change.  needs at least three checked in.
 // changes nothing else.  returns the number of rounds.
@@ -153,10 +163,30 @@ QVariantList previewFinal(qint64 tournamentId, const QList<QList<qint64>> &group
 // result_version.
 int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &groups, const QString &outcome, qint64 winnerId = 0,
                  int expectedVersion = NONE, const QString &reason = {});
-// the final as saved, or an empty map: final_id, status (PLAYING | CONFIRMED), outcome,
-// winner_player_id, result_version, begun, groups, qualifying (the standings it was seeded
-// from), players: [{player_id, display_name, seed, seat, standing, points,
-// elimination_group, placement, placement_basis}] by seed.
+// the total-points final (events whose final_ranking is TOTAL_POINTS; the knockout calls above
+// refuse them, and these refuse knockout events).  the final adds points to each finalist's
+// saved qualifying points: win 5, clear second 2.5, other losses 0, draw 1 (see
+// cmdr::placeFinalByTotal).  outcome "WIN" with winnerId and a decision on second place, or
+// "DRAW" with the players who were already out (only where eliminated players take a loss).
+//
+// the places a result would give, without saving anything: [{player_id, display_name, seed,
+// place, basis, result, qualifying_points, final_points, total_points, out_at_draw,
+// provisional}].  a win whose second place is NotRecorded is provisional: it previews but
+// cannot be confirmed.  throws CommanderError for a result that cannot be placed.
+QVariantList previewTotalFinal(qint64 tournamentId, const QString &outcome, qint64 winnerId = 0,
+                               const SecondPlace &second = {}, const QList<qint64> &outAtDraw = {});
+// saves the result, awards the final points, places the four finalists and completes the
+// tournament.  nothing is saved for a win whose second place is undecided.  repeating the saved
+// result changes nothing.  changing it is a correction: it needs a reason and the result_version
+// the correction was opened with.  returns the new result_version.
+int confirmTotalFinal(qint64 tournamentId, const QString &outcome, qint64 winnerId = 0, const SecondPlace &second = {},
+                      const QList<qint64> &outAtDraw = {}, int expectedVersion = NONE, const QString &reason = {});
+// the final as saved, or an empty map: final_id, final_ranking, status (PLAYING | CONFIRMED),
+// outcome, winner_player_id, second_place_player_id, second_place_status (PLAYER | NONE | empty),
+// result_version, begun, groups, qualifying (the standings it was seeded from), players:
+// [{player_id, display_name, seed, seat, standing, points, qualifying_points, elimination_group,
+// placement, placement_basis, final_result, final_points, total_points, out_at_draw}] by seed.
+// the last four are set by a confirmed total-points final.
 QVariantMap getFinal(qint64 tournamentId);
 
 void dropPlayer(qint64 tournamentId, qint64 playerId);

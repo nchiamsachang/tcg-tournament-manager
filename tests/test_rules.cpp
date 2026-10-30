@@ -943,6 +943,186 @@ private slots:
         cmdr::checkFinalProgress(seeds, {{14}, {12, 13}});
         QVERIFY_THROWS_EXCEPTION(std::invalid_argument, cmdr::checkFinalProgress(seeds, {{11, 12, 13, 14}}));
     }
+
+    // a final ranked by total points: qualifying points plus the final's award (win 5, clear second 2.5, other
+    // losses 0, draw 1).  seeds are the player ids 1 to 4.
+
+    // Alex (seed 1) has 10 and is second: 10 + 2.5 = 12.5.  Sam (seed 2) has 5 and wins: 5 + 5 = 10.
+    // seeds 3 and 4 have 4 and 2.5 and lose: 4 and 2.5.  the winner of the final places second.
+    void totalPointsWinnerCanPlaceBelowMoreCombinedPoints()
+    {
+        const QVariantList placed = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 5, 4, 2.5}, "WIN", 2, 1, false, {}, cmdr::defaultSettings());
+        QCOMPARE(placed.size(), 4);
+        const auto row = [&](int i) { return placed[i].toMap(); };
+        QCOMPARE(row(0)["player_id"].toLongLong(), qint64(1));
+        QCOMPARE(row(0)["total_points"].toDouble(), 12.5);
+        QCOMPARE(row(0)["final_points"].toDouble(), 2.5);
+        QCOMPARE(row(0)["result"].toString(), QString("SECOND"));
+        QCOMPARE(row(1)["player_id"].toLongLong(), qint64(2));
+        QCOMPARE(row(1)["total_points"].toDouble(), 10.0);
+        QCOMPARE(row(1)["result"].toString(), QString("WIN"));
+        QCOMPARE(row(2)["total_points"].toDouble(), 4.0);
+        QCOMPARE(row(3)["total_points"].toDouble(), 2.5);
+        for (int i = 0; i < 4; ++i) {
+            QCOMPARE(row(i)["place"].toInt(), i + 1);
+            QCOMPARE(row(i)["basis"].toString(), QString("TOTAL_POINTS"));
+            QVERIFY(!row(i)["provisional"].toBool());
+        }
+        QCOMPARE(row(0)["qualifying_points"].toDouble(), 10.0);       // the qualifying points are reported as they were
+    }
+
+    // qualifying points 12.5, 11, 10 and 9; seed 4 wins (+5 = 14).
+    //   seed 1 second: 12.5 + 2.5 = 15, above seed 4's 14, then seed 2 on 11 and seed 3 on 10
+    //   seed 2 second: 11 + 2.5 = 13.5, below seed 4's 14 but above seed 1's 12.5, then seed 3 on 10
+    //   no clear second: 14, 12.5, 11, 10
+    void totalPointsSecondPlaceChangesPlacement_data()
+    {
+        QTest::addColumn<qint64>("second");
+        QTest::addColumn<bool>("noClearSecond");
+        QTest::addColumn<QList<qint64>>("order");
+        QTest::addColumn<QList<double>>("totals");
+        QTest::newRow("seed 1 second") << qint64(1) << false << QList<qint64>{1, 4, 2, 3} << QList<double>{15, 14, 11, 10};
+        QTest::newRow("seed 2 second") << qint64(2) << false << QList<qint64>{4, 2, 1, 3} << QList<double>{14, 13.5, 12.5, 10};
+        QTest::newRow("no clear second") << qint64(0) << true << QList<qint64>{4, 1, 2, 3} << QList<double>{14, 12.5, 11, 10};
+    }
+
+    void totalPointsSecondPlaceChangesPlacement()
+    {
+        QFETCH(qint64, second);
+        QFETCH(bool, noClearSecond);
+        QFETCH(QList<qint64>, order);
+        QFETCH(QList<double>, totals);
+        const QVariantList placed = cmdr::placeFinalByTotal({1, 2, 3, 4}, {12.5, 11, 10, 9}, "WIN", 4, second, noClearSecond, {},
+                                                            cmdr::defaultSettings());
+        QList<qint64> gotOrder;
+        QList<double> gotTotals;
+        for (const QVariant &p : placed) {
+            gotOrder << p.toMap()["player_id"].toLongLong();
+            gotTotals << p.toMap()["total_points"].toDouble();
+        }
+        QCOMPARE(gotOrder, order);
+        QCOMPARE(gotTotals, totals);
+    }
+
+    // seed 1 has 10 and is second: 12.5.  seed 2 has 7.5 and wins: 12.5.  the totals are equal, so the better
+    // seed is first; that holds whichever way the final went, and both rows say they were decided by seed.
+    void totalPointsTiesGoToTheBetterSeed()
+    {
+        const QVariantList placed = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 7.5, 5, 2.5}, "WIN", 2, 1, false, {}, cmdr::defaultSettings());
+        QCOMPARE(placed[0].toMap()["player_id"].toLongLong(), qint64(1));
+        QCOMPARE(placed[1].toMap()["player_id"].toLongLong(), qint64(2));
+        QCOMPARE(placed[0].toMap()["total_points"].toDouble(), 12.5);
+        QCOMPARE(placed[1].toMap()["total_points"].toDouble(), 12.5);
+        QCOMPARE(placed[0].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        QCOMPARE(placed[1].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        QCOMPARE(placed[2].toMap()["basis"].toString(), QString("TOTAL_POINTS"));
+        // three equal totals: seeds 1, 2 and 3 on 10 each after the final, in seed order
+        const QVariantList three = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 10, 5, 0}, "WIN", 3, 0, true, {}, cmdr::defaultSettings());
+        QCOMPARE(three[0].toMap()["player_id"].toLongLong(), qint64(1));
+        QCOMPARE(three[1].toMap()["player_id"].toLongLong(), qint64(2));
+        QCOMPARE(three[2].toMap()["player_id"].toLongLong(), qint64(3));
+        QCOMPARE(three[3].toMap()["player_id"].toLongLong(), qint64(4));
+        QCOMPARE(three[0].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        QCOMPARE(three[2].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        QCOMPARE(three[3].toMap()["basis"].toString(), QString("TOTAL_POINTS"));
+        // the same players level on 10 after a final that reversed who won: the order is still by seed
+        const QVariantList reversed = cmdr::placeFinalByTotal({1, 2, 3, 4}, {5, 7.5, 5, 2.5}, "WIN", 1, 2, false, {}, cmdr::defaultSettings());
+        QCOMPARE(reversed[0].toMap()["player_id"].toLongLong(), qint64(1));
+        QCOMPARE(reversed[1].toMap()["player_id"].toLongLong(), qint64(2));
+        QCOMPARE(reversed[0].toMap()["total_points"].toDouble(), 10.0);
+        QCOMPARE(reversed[1].toMap()["total_points"].toDouble(), 10.0);
+    }
+
+    // qualifying points 10, 10, 7.5 and 5; the final is drawn and seed 4 was already out.
+    //   players already out lose: 10 + 1, 10 + 1, 7.5 + 1 and 5 + 0 = 11, 11, 8.5, 5
+    //   everyone draws: 11, 11, 8.5 and 5 + 1 = 6
+    // no draw gives anyone second-place points, and the two on 11 are ordered by seed
+    void totalPointsDrawFollowsTheDrawPolicy()
+    {
+        const auto totals = [](const QVariantList &placed) {
+            QList<double> out;
+            for (const QVariant &p : placed)
+                out << p.toMap()["total_points"].toDouble();
+            return out;
+        };
+        QVariantMap lose = cmdr::defaultSettings();
+        lose["draw_policy"] = "ELIMINATED_LOSE";
+        const QVariantList a = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 10, 7.5, 5}, "DRAW", 0, 0, false, {4}, lose);
+        QCOMPARE(totals(a), (QList<double>{11, 11, 8.5, 5}));
+        QCOMPARE(a[3].toMap()["result"].toString(), QString("LOSS"));
+        QCOMPARE(a[3].toMap()["final_points"].toDouble(), 0.0);
+        QVERIFY(a[3].toMap()["out_at_draw"].toBool());
+        QCOMPARE(a[0].toMap()["result"].toString(), QString("DRAW"));
+        QCOMPARE(a[0].toMap()["player_id"].toLongLong(), qint64(1));
+        QCOMPARE(a[1].toMap()["player_id"].toLongLong(), qint64(2));
+        QCOMPARE(a[0].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        QVERIFY(!a[0].toMap()["provisional"].toBool());
+        // nobody marked out: all four take the draw
+        const QVariantList none = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 10, 7.5, 5}, "DRAW", 0, 0, false, {}, lose);
+        QCOMPARE(totals(none), (QList<double>{11, 11, 8.5, 6}));
+        QVariantMap all = cmdr::defaultSettings();
+        all["draw_policy"] = "ALL_DRAW";
+        const QVariantList b = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 10, 7.5, 5}, "DRAW", 0, 0, false, {}, all);
+        QCOMPARE(totals(b), (QList<double>{11, 11, 8.5, 6}));
+        QCOMPARE(b[3].toMap()["result"].toString(), QString("DRAW"));
+    }
+
+    // a win whose second place is not decided yet counts only the winner's 5 and is flagged provisional
+    void totalPointsPendingSecondIsProvisional()
+    {
+        const QVariantList placed = cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 5, 4, 2.5}, "WIN", 2, 0, false, {}, cmdr::defaultSettings());
+        for (const QVariant &p : placed)
+            QVERIFY(p.toMap()["provisional"].toBool());
+        QCOMPARE(placed[0].toMap()["player_id"].toLongLong(), qint64(1));       // 10 against the winner's 5 + 5
+        QCOMPARE(placed[0].toMap()["total_points"].toDouble(), 10.0);
+        QCOMPARE(placed[1].toMap()["player_id"].toLongLong(), qint64(2));
+        QCOMPARE(placed[1].toMap()["total_points"].toDouble(), 10.0);
+        // choosing either way settles it
+        QVERIFY(!cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 5, 4, 2.5}, "WIN", 2, 0, true, {}, cmdr::defaultSettings())[0].toMap()["provisional"].toBool());
+        QVERIFY(!cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 5, 4, 2.5}, "WIN", 2, 3, false, {}, cmdr::defaultSettings())[0].toMap()["provisional"].toBool());
+        // a draw has no second place to wait for
+        QVERIFY(!cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 5, 4, 2.5}, "DRAW", 0, 0, false, {}, cmdr::defaultSettings())[0].toMap()["provisional"].toBool());
+    }
+
+    void totalPointsResultsThatCannotBePlacedAreRefused()
+    {
+        const QVariantMap eliminatedLose = cmdr::defaultSettings();
+        QVariantMap allDraw = cmdr::defaultSettings();
+        allDraw["draw_policy"] = "ALL_DRAW";
+        const QList<double> q{10, 5, 4, 2.5};
+        const auto refused = [&](const QString &outcome, qint64 winner, qint64 second, bool none, const QList<qint64> &out,
+                                 const QVariantMap &settings = cmdr::defaultSettings()) {
+            try {
+                cmdr::placeFinalByTotal({1, 2, 3, 4}, q, outcome, winner, second, none, out, settings);
+            } catch (const std::invalid_argument &) {
+                return true;
+            }
+            return false;
+        };
+        QVERIFY(!refused("WIN", 2, 1, false, {}));                // the baseline fits
+        QVERIFY(refused("WIN", 9, 1, false, {}));                 // the winner is not a finalist
+        QVERIFY(refused("WIN", 0, 1, false, {}));                 // a win with no winner
+        QVERIFY(refused("WIN", 2, 9, false, {}));                 // the second place is not a finalist
+        QVERIFY(refused("WIN", 2, 2, false, {}));                 // second is the winner
+        QVERIFY(refused("WIN", 2, 1, true, {}));                  // a second place and no clear second
+        QVERIFY(refused("WIN", 2, 1, false, {3}));                // already-out marks belong to a draw
+        QVERIFY(refused("DRAW", 2, 0, false, {}));                // a draw has no winner
+        QVERIFY(refused("DRAW", 0, 1, false, {}));                // nor a second place
+        QVERIFY(refused("DRAW", 0, 0, true, {}));
+        QVERIFY(refused("DRAW", 0, 0, false, {9}));               // marked out but not a finalist
+        QVERIFY(refused("DRAW", 0, 0, false, {2, 3, 4}));         // one player left is not a draw
+        QVERIFY(refused("DRAW", 0, 0, false, {1, 2, 3, 4}));
+        QVERIFY(!refused("DRAW", 0, 0, false, {3, 4}));           // two still in
+        QVERIFY(refused("DRAW", 0, 0, false, {4}, allDraw));      // nobody is out when the whole pod draws
+        QVERIFY(refused("TIE", 0, 0, false, {}));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, cmdr::placeFinalByTotal({1, 2, 3}, {10, 5, 4}, "WIN", 2, 1, false, {},
+                                                                                cmdr::defaultSettings()));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, cmdr::placeFinalByTotal({1, 2, 3, 3}, q, "WIN", 2, 1, false, {},
+                                                                                cmdr::defaultSettings()));
+        QVERIFY_THROWS_EXCEPTION(std::invalid_argument, cmdr::placeFinalByTotal({1, 2, 3, 4}, {10, 5}, "WIN", 2, 1, false, {},
+                                                                                cmdr::defaultSettings()));
+        Q_UNUSED(eliminatedLose);
+    }
 };
 
 QTEST_GUILESS_MAIN(RulesTests)

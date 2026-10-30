@@ -105,9 +105,10 @@ class CoreTests : public QObject {
     }
 
     QPair<qint64, QList<qint64>> makeEvent(int n, int rounds = 0, bool start = true, qint64 seed = 12345,
-                                           const QVariantMap &settings = {}, bool topFourFinal = false)
+                                           const QVariantMap &settings = {}, bool topFourFinal = false,
+                                           const QString &finalRanking = "KNOCKOUT")
     {
-        const qint64 tid = cdb::createCommanderTournament("Test Commander", n, rounds, settings, seed, {}, 50, topFourFinal);
+        const qint64 tid = cdb::createCommanderTournament("Test Commander", n, rounds, settings, seed, {}, 50, topFourFinal, finalRanking);
         const QList<qint64> pids = addPlayers(n);
         for (qint64 p : pids)
             tdb::enrollPlayer(tid, p);
@@ -1227,7 +1228,8 @@ private slots:
         db::exec("INSERT INTO enrollments (tournament_id, player_id, match_points) VALUES (1, 1, 9)");
         restart();
         const Rows versions = db::query("SELECT version, name FROM schema_migrations ORDER BY version");
-        QCOMPARE(versions.size(), 9);
+        QCOMPARE(versions.size(), 10);
+        QCOMPARE(versions[9]["name"].toString(), QString("commander_final_ranking"));
         QCOMPARE(versions[8]["name"].toString(), QString("commander_final_play_started"));
         QCOMPARE(versions[7]["name"].toString(), QString("commander_scored_second_and_final"));
         QCOMPARE(versions[6]["name"].toString(), QString("commander_second_place"));
@@ -3964,10 +3966,11 @@ private slots:
         db::exec("PRAGMA foreign_keys = OFF");
         // what update 8 added goes too: its triggers, final tables and final option
         for (const char *trigger : {"commander_round_finalized_complete", "commander_second_place_valid",
-                                    "commander_final_enabled_frozen"})
+                                    "commander_final_enabled_frozen", "commander_final_ranking_frozen"})
             db::exec(QStringLiteral("DROP TRIGGER %1").arg(trigger));
         db::exec("DROP TABLE commander_final_players");
         db::exec("DROP TABLE commander_finals");
+        db::exec("ALTER TABLE commander_events DROP COLUMN final_ranking");
         db::exec("ALTER TABLE commander_events DROP COLUMN final_enabled");
         db::exec(older);
         db::exec("INSERT INTO commander_pods_older SELECT " + kept + " FROM commander_pods");
@@ -3975,7 +3978,7 @@ private slots:
         db::exec("ALTER TABLE commander_pods_older RENAME TO commander_pods");
         db::exec("CREATE INDEX idx_cmd_pods_round ON commander_pods(round_id)");
         db::exec("PRAGMA foreign_keys = ON");
-        db::exec("DELETE FROM schema_migrations WHERE version IN (7, 8, 9)");
+        db::exec("DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10)");
         QCOMPARE(db::query("SELECT * FROM commander_pods ORDER BY pod_id"), podsBefore);
 
         restart();
@@ -4046,9 +4049,9 @@ private:
     }
 
     // an event with the top-four final whose qualifying rounds are all played and finalized
-    QPair<qint64, QList<qint64>> qualified(int n, int rounds, qint64 seed = 12345)
+    QPair<qint64, QList<qint64>> qualified(int n, int rounds, qint64 seed = 12345, const QString &finalRanking = "KNOCKOUT")
     {
-        const auto made = makeEvent(n, rounds, true, seed, {}, true);
+        const auto made = makeEvent(n, rounds, true, seed, {}, true, finalRanking);
         for (int r = 1; r <= rounds; ++r) {
             playWithSeconds(made.first);
             if (r < rounds)
@@ -4096,6 +4099,43 @@ private:
 
     int finalVersion(qint64 tid) { return cdb::getFinal(tid)["result_version"].toInt(); }
 
+    // an event whose final adds to qualifying points, with its one qualifying round played and the
+    // final created.  the finalists carry 5, 5, 2.5 and 2.5 qualifying points (two winners, two
+    // clear seconds), best seed first.
+    QPair<qint64, QList<qint64>> totalFinalReady(const QVariantMap &settings = {}, qint64 seed = 12345)
+    {
+        const auto made = makeEvent(8, 1, true, seed, settings, true, "TOTAL_POINTS");
+        playWithSeconds(made.first);
+        cdb::createFinal(made.first, candidateSeeds(made.first));
+        return made;
+    }
+
+    // the saved place, final result, award and total of each finalist, by place
+    struct Placed {
+        qint64 id;
+        QString basis, result;
+        double award, total;
+    };
+    QList<Placed> placedByPlace(qint64 tid)
+    {
+        QMap<int, Placed> byPlace;
+        for (const QVariant &v : cdb::getFinal(tid)["players"].toList()) {
+            const QVariantMap p = v.toMap();
+            byPlace.insert(p["placement"].toInt(), {p["player_id"].toLongLong(), p["placement_basis"].toString(),
+                                                     p["final_result"].toString(), p["final_points"].toDouble(),
+                                                     p["total_points"].toDouble()});
+        }
+        return byPlace.values();
+    }
+
+    QList<double> enrolledPoints(qint64 tid)
+    {
+        QList<double> out;
+        for (const Row &r : db::query("SELECT match_points FROM enrollments WHERE tournament_id = ? ORDER BY player_id", {tid}))
+            out << r["match_points"].toDouble();
+        return out;
+    }
+
     // everything a final or a result writes, for comparing before and after a refusal
     QList<Rows> savedEvent(qint64 tid)
     {
@@ -4120,10 +4160,11 @@ private:
     void rewindUpdate8()
     {
         for (const char *trigger : {"commander_round_finalized_complete", "commander_second_place_valid",
-                                    "commander_final_enabled_frozen"})
+                                    "commander_final_enabled_frozen", "commander_final_ranking_frozen"})
             db::exec(QStringLiteral("DROP TRIGGER %1").arg(trigger));
         db::exec("DROP TABLE commander_final_players");
         db::exec("DROP TABLE commander_finals");
+        db::exec("ALTER TABLE commander_events DROP COLUMN final_ranking");
         db::exec("ALTER TABLE commander_events DROP COLUMN final_enabled");
         const QString current = db::value("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'commander_pods'").toString();
         QString older = current;
@@ -4139,7 +4180,7 @@ private:
         db::exec("ALTER TABLE commander_pods_older RENAME TO commander_pods");
         db::exec("CREATE INDEX idx_cmd_pods_round ON commander_pods(round_id)");
         db::exec("PRAGMA foreign_keys = ON");
-        db::exec("DELETE FROM schema_migrations WHERE version IN (8, 9)");
+        db::exec("DELETE FROM schema_migrations WHERE version IN (8, 9, 10)");
     }
 
 private slots:
@@ -4817,6 +4858,10 @@ private slots:
         } catch (const cdb::FinalAffected &e) {
             QCOMPARE(e.seedsBefore, (QVariantList{seeds[0], seeds[1], seeds[2], seeds[3]}));
             QVERIFY(e.seedsAfter.contains(cs[0]));
+            QVERIFY(e.pointsChanged.isEmpty());
+            QHash<qint64, QString> labels;
+            labels.insert(cs[0], "Label C0");
+            QVERIFY(cdb::finalChangeLines(e, labels).join("\n").contains("Label C0 joins the final"));
         }
         QCOMPARE(pts(tid, cs[0]), before);
         QCOMPARE(finalSeedsOf(tid), seeds);
@@ -5032,7 +5077,7 @@ private slots:
     {
         applog::setDirectory(QString());
         applog::setDirectory(tmp_->filePath("logs"));
-        const qint64 tid = cdb::createCommanderTournament("Secret Final Cup", 4, 1, {}, 77, {}, 50, true);
+        const qint64 tid = cdb::createCommanderTournament("Secret Final Cup", 4, 1, {}, 77, {}, 50, true, "KNOCKOUT");
         for (qint64 p : addPlayers(4, "Zed Hidden"))
             tdb::enrollPlayer(tid, p);
         cdb::startEvent(tid);
@@ -5223,6 +5268,685 @@ private slots:
         QVERIFY(cdb::getFinal(played)["begun"].toBool());
         Q_UNUSED(a);
         Q_UNUSED(b);
+    }
+
+    // final standings by total points (release 0.3.0)
+
+    void finalRankingDefaultsSavesAndLocksAtStart()
+    {
+        const qint64 tid = cdb::createCommanderTournament("Ranked", 8, 1, {}, 5, {}, 50, true);
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+        QCOMPARE(db::value("SELECT final_ranking FROM commander_events WHERE tournament_id = ?", {tid}).toString(),
+                 QString("TOTAL_POINTS"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::createCommanderTournament("Odd", 8, 1, {}, 5, {}, 50, true, "BEST"));
+        cdb::updateEventConfig(tid, 0, {}, {}, -1, "KNOCKOUT");
+        restart();
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("KNOCKOUT"));
+        QCOMPARE(cdb::getAudit(tid)[0].toMap()["detail"].toMap()["final_ranking"].toString(), QString("KNOCKOUT"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::updateEventConfig(tid, 0, {}, {}, -1, "SOMETHING"));
+        cdb::updateEventConfig(tid, 0, {}, {}, -1, "TOTAL_POINTS");
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+        // other settings leave it alone
+        cdb::updateEventConfig(tid, 0, "ALL_DRAW");
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+
+        for (qint64 p : addPlayers(8))
+            tdb::enrollPlayer(tid, p);
+        cdb::startEvent(tid);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::updateEventConfig(tid, 0, {}, {}, -1, "KNOCKOUT"));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE commander_events SET final_ranking = 'KNOCKOUT' WHERE tournament_id = ?", {tid}));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE commander_events SET final_ranking = 'OTHER' WHERE tournament_id = ?", {tid}));
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+        // writing the same value is not a change
+        db::exec("UPDATE commander_events SET final_ranking = final_ranking WHERE tournament_id = ?", {tid});
+
+        // events with the earlier rules keep ranking by knockouts
+        const qint64 earlier = makeEarlierEvent(8, 1, false).first;
+        QCOMPARE(cdb::getEvent(earlier)["final_ranking"].toString(), QString("KNOCKOUT"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::updateEventConfig(earlier, 0, {}, {}, -1, "TOTAL_POINTS"));
+        cdb::updateEventConfig(earlier, 0, {}, {}, -1, "KNOCKOUT");
+    }
+
+    void migrationTagsEveryEarlierEventKnockoutAndKeepsUnfinishedFinals()
+    {
+        auto [open, a] = qualified(8, 1);           // a final with a knockout saved, not confirmed
+        const QList<qint64> os = candidateSeeds(open);
+        cdb::createFinal(open, os);
+        cdb::saveFinalEliminations(open, {{os[3]}}, finalVersion(open));
+        auto [done, b] = qualified(8, 1, 999);      // a confirmed final
+        const QList<qint64> ds = candidateSeeds(done);
+        cdb::createFinal(done, ds);
+        cdb::confirmFinal(done, {{ds[3]}, {ds[2]}, {ds[1]}}, "WIN", ds[0], finalVersion(done));
+        const qint64 plain = makeEvent(8, 1).first; // no final
+        playWithSeconds(plain);
+        const qint64 waiting = makeEvent(8, 1, false, 12345, {}, true, "TOTAL_POINTS").first;     // still in registration
+
+        const QString finalsSql = "SELECT final_id, tournament_id, status, outcome, winner_player_id, qualifying_json, "
+                                  "result_version, play_started_at FROM commander_finals ORDER BY final_id";
+        const QString playersSql = "SELECT final_id, tournament_id, player_id, seed, seat_number, qualifying_rank, "
+                                   "elimination_group, placement, placement_basis FROM commander_final_players "
+                                   "ORDER BY final_id, seed";
+        const QList<Rows> before{db::query(finalsSql), db::query(playersSql),
+                                 db::query("SELECT * FROM commander_audit ORDER BY audit_id"),
+                                 db::query("SELECT * FROM enrollments ORDER BY enrollment_id"),
+                                 db::query("SELECT * FROM commander_pods ORDER BY pod_id")};
+        const QList<QVariantList> standings{cdb::getStandings(open), cdb::getStandings(done), cdb::getStandings(plain)};
+        const QVariantMap openFinal = cdb::getFinal(open), doneFinal = cdb::getFinal(done);
+
+        // the database as update 9 left it: the older rule on placement_basis and no ranking
+        db::exec("PRAGMA foreign_keys = OFF");
+        for (const char *t : {"commander_final_ranking_frozen", "commander_final_player_valid", "commander_final_players_fixed",
+                              "commander_final_confirmed_complete"})
+            db::exec(QStringLiteral("DROP TRIGGER %1").arg(t));
+        db::exec("DROP TABLE commander_final_players");
+        db::exec(R"sql(
+            CREATE TABLE commander_final_players (
+                final_id          INTEGER NOT NULL REFERENCES commander_finals(final_id) ON DELETE CASCADE,
+                tournament_id     INTEGER NOT NULL REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+                player_id         INTEGER NOT NULL REFERENCES players(player_id),
+                seed              INTEGER NOT NULL CHECK (seed BETWEEN 1 AND 4),
+                seat_number       INTEGER NOT NULL CHECK (seat_number BETWEEN 1 AND 4),
+                qualifying_rank   INTEGER NOT NULL CHECK (qualifying_rank >= 1),
+                elimination_group INTEGER CHECK (elimination_group BETWEEN 1 AND 3),
+                placement         INTEGER CHECK (placement BETWEEN 1 AND 4),
+                placement_basis   TEXT    CHECK (placement_basis IN ('WINNER', 'ELIMINATION', 'QUALIFYING_RANK')),
+                PRIMARY KEY (final_id, player_id),
+                UNIQUE (final_id, seed),
+                UNIQUE (final_id, seat_number),
+                UNIQUE (final_id, placement),
+                CHECK ((placement IS NULL) = (placement_basis IS NULL))
+            )
+        )sql");
+        for (const Row &r : before[1])
+            db::exec("INSERT INTO commander_final_players (final_id, tournament_id, player_id, seed, seat_number, "
+                     "qualifying_rank, elimination_group, placement, placement_basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     {r["final_id"], r["tournament_id"], r["player_id"], r["seed"], r["seat_number"], r["qualifying_rank"],
+                      r["elimination_group"], r["placement"], r["placement_basis"]});
+        db::exec("CREATE INDEX idx_cmd_final_players_tournament ON commander_final_players(tournament_id)");
+        db::exec(R"sql(
+            CREATE TRIGGER commander_final_player_valid
+            BEFORE INSERT ON commander_final_players
+            WHEN NEW.tournament_id IS NOT (SELECT tournament_id FROM commander_finals WHERE final_id = NEW.final_id)
+              OR NOT EXISTS (SELECT 1 FROM enrollments WHERE tournament_id = NEW.tournament_id AND player_id = NEW.player_id
+                             AND checked_in = 1 AND dropped = 0)
+              OR (SELECT COUNT(*) FROM commander_final_players WHERE final_id = NEW.final_id) >= 4
+            BEGIN SELECT RAISE(ABORT, 'only four checked-in players who have not dropped can play the final'); END
+        )sql");
+        db::exec(R"sql(
+            CREATE TRIGGER commander_final_players_fixed
+            BEFORE UPDATE OF final_id, tournament_id, player_id, seed, seat_number, qualifying_rank ON commander_final_players
+            BEGIN SELECT RAISE(ABORT, 'the finalists and their seeds are fixed once the final is created'); END
+        )sql");
+        db::exec(R"sql(
+            CREATE TRIGGER commander_final_confirmed_complete
+            BEFORE UPDATE ON commander_finals
+            WHEN NEW.status = 'CONFIRMED'
+             AND (SELECT COUNT(*) FROM commander_final_players WHERE final_id = NEW.final_id AND placement IS NOT NULL) <> 4
+            BEGIN SELECT RAISE(ABORT, 'a confirmed final places all four players'); END
+        )sql");
+        db::exec("PRAGMA foreign_keys = ON");
+        db::exec("ALTER TABLE commander_events DROP COLUMN final_ranking");
+        db::exec("DELETE FROM schema_migrations WHERE version = 10");
+        QVERIFY(!db::value("SELECT sql FROM sqlite_master WHERE name = 'commander_final_players'").toString().contains("TOTAL_POINTS"));
+
+        const auto backups = [] { return QDir(db::dataDir() + "/backups").entryList({"*.db"}, QDir::Files).size(); };
+        const qsizetype backedUp = backups();
+        restart();
+
+        QCOMPARE(backups(), backedUp + 1);
+        QCOMPARE(db::value("SELECT name FROM schema_migrations WHERE version = 10").toString(), QString("commander_final_ranking"));
+        // every event that existed is knockout, also the one still in registration that had the new default
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_events WHERE final_ranking = 'KNOCKOUT'").toInt(), 4);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_events").toInt(), 4);
+        QCOMPARE(cdb::getEvent(waiting)["final_ranking"].toString(), QString("KNOCKOUT"));
+        // nothing changed row for row
+        QCOMPARE(db::query(finalsSql), before[0]);
+        QCOMPARE(db::query(playersSql), before[1]);
+        QCOMPARE(db::query("SELECT * FROM commander_audit ORDER BY audit_id"), before[2]);
+        QCOMPARE(db::query("SELECT * FROM enrollments ORDER BY enrollment_id"), before[3]);
+        QCOMPARE(db::query("SELECT * FROM commander_pods ORDER BY pod_id"), before[4]);
+        QCOMPARE((QList<QVariantList>{cdb::getStandings(open), cdb::getStandings(done), cdb::getStandings(plain)}), standings);
+        QVERIFY(db::query("PRAGMA foreign_key_check").isEmpty());
+        QVERIFY(db::value("SELECT sql FROM sqlite_master WHERE name = 'commander_final_players'").toString().contains("TOTAL_POINTS_SEED"));
+        for (const char *column : {"qualifying_points", "final_result", "final_points", "out_at_draw"})
+            QVERIFY2(db::value("SELECT COUNT(*) FROM pragma_table_info('commander_final_players') WHERE name = ?",
+                               {QString(column)}).toInt() == 1, column);
+        // the old finals read as they did, with the qualifying points taken from the saved standings
+        QCOMPARE(cdb::getFinal(open)["groups"], openFinal["groups"]);
+        QVERIFY(cdb::getFinal(open)["begun"].toBool());
+        QCOMPARE(finalOrder(done), (QList<qint64>{ds[0], ds[1], ds[2], ds[3]}));
+        for (const QVariant &p : cdb::getFinal(open)["players"].toList())
+            QCOMPARE(p.toMap()["qualifying_points"], p.toMap()["points"]);
+        QVERIFY(cdb::getFinal(done)["players"].toList()[0].toMap()["final_points"].isNull());
+
+        // the index and the triggers are back and still fire
+        QVERIFY(db::value("SELECT 1 FROM sqlite_master WHERE name = 'idx_cmd_final_players_tournament'").isValid());
+        QVERIFY(db::value("SELECT 1 FROM sqlite_master WHERE name = 'commander_final_ranking_frozen'").isValid());
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE commander_final_players SET seed = 4 WHERE final_id = ? AND seed = 1",
+                                                     {openFinal["final_id"]}));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE commander_final_players SET qualifying_points = 1 WHERE final_id = ?",
+                                                     {openFinal["final_id"]}));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("INSERT INTO commander_final_players (final_id, tournament_id, player_id, seed, "
+                                                     "seat_number, qualifying_rank) VALUES (?, ?, ?, 1, 1, 1)",
+                                                     {openFinal["final_id"], open, os[0]}));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE commander_finals SET status = 'CONFIRMED', outcome = 'NO_WINNER' "
+                                                     "WHERE final_id = ?", {openFinal["final_id"]}));
+        QVERIFY_THROWS_EXCEPTION(db::Error, db::exec("UPDATE commander_events SET final_ranking = 'TOTAL_POINTS' WHERE tournament_id = ?", {open}));
+
+        // the unfinished knockout final is played on to its end under the old rules
+        cdb::confirmFinal(open, {{os[3]}, {os[2]}, {os[1]}}, "WIN", os[0], finalVersion(open));
+        QCOMPARE(cdb::getEvent(open)["stage"].toString(), QString("COMPLETE"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(done, "DRAW", 0, {}, {}, finalVersion(done), "x"));
+
+        // the event still in registration may switch before it starts, and then plays a total-points final
+        cdb::updateEventConfig(waiting, 0, {}, {}, -1, "TOTAL_POINTS");
+        cdb::startEvent(waiting);
+        playWithSeconds(waiting);
+        cdb::createFinal(waiting, candidateSeeds(waiting));
+        const QList<qint64> ws = finalSeedsOf(waiting);
+        cdb::confirmTotalFinal(waiting, "WIN", ws[3], ws[0], {}, finalVersion(waiting));
+        QCOMPARE(finalOrder(waiting), (QList<qint64>{ws[0], ws[3], ws[1], ws[2]}));
+        QVERIFY(db::query("PRAGMA foreign_key_check").isEmpty());
+        Q_UNUSED(a);
+        Q_UNUSED(b);
+    }
+
+    // qualifying points 5, 5, 2.5, 2.5 for seeds 1 to 4.  seed 4 wins (2.5 + 5 = 7.5) and seed 1 is
+    // second (5 + 2.5 = 7.5): equal, so the better seed, seed 1, is first.  seed 2 keeps 5 and seed 3 keeps 2.5.
+    void totalPointsFinalPlacesFinalistsByCombinedPointsAboveTheRest()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        QCOMPARE(cdb::getFinal(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+        const QVariantList figures = cdb::getFinal(tid)["players"].toList();
+        QCOMPARE(figures[0].toMap()["qualifying_points"].toDouble(), 5.0);
+        QCOMPARE(figures[3].toMap()["qualifying_points"].toDouble(), 2.5);
+        const QList<double> enrolled = enrolledPoints(tid);
+        const QList<QVariantList> standings = qualifyingFigures(tid);
+        const QVariantList qualifying = cdb::getFinal(tid)["qualifying"].toList();
+
+        const QVariantList shown = cdb::previewTotalFinal(tid, "WIN", s[3], s[0]);
+        QCOMPARE(ids(shown), (QList<qint64>{s[0], s[3], s[1], s[2]}));
+        QCOMPARE(shown[0].toMap()["total_points"].toDouble(), 7.5);
+        QVERIFY(!shown[0].toMap()["provisional"].toBool());
+        QVERIFY(cdb::getFinal(tid)["status"].toString() == "PLAYING");      // previewing saves nothing
+
+        const int v = cdb::confirmTotalFinal(tid, "WIN", s[3], s[0], {}, finalVersion(tid));
+        QCOMPARE(v, 1);
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"));
+        QCOMPARE(finalOrder(tid), (QList<qint64>{s[0], s[3], s[1], s[2]}));
+        const QList<Placed> placed = placedByPlace(tid);
+        QCOMPARE(placed[0].award, 2.5);
+        QCOMPARE(placed[0].result, QString("SECOND"));
+        QCOMPARE(placed[1].award, 5.0);
+        QCOMPARE(placed[1].result, QString("WIN"));
+        QCOMPARE(placed[0].total, 7.5);
+        QCOMPARE(placed[1].total, 7.5);
+        QCOMPARE(placed[2].total, 5.0);
+        QCOMPARE(placed[3].total, 2.5);
+        QCOMPARE(placed[0].basis, QString("TOTAL_POINTS_SEED"));       // equal totals, decided by seed
+        QCOMPARE(placed[1].basis, QString("TOTAL_POINTS_SEED"));
+        QCOMPARE(placed[2].basis, QString("TOTAL_POINTS"));
+        QCOMPARE(placed[3].basis, QString("TOTAL_POINTS"));
+        // the champion holds the most points, which is not the player who won the final
+        QCOMPARE(cdb::getEvent(tid)["champion_player_id"].toLongLong(), s[0]);
+        QCOMPARE(cdb::getFinal(tid)["winner_player_id"].toLongLong(), s[3]);
+        // places 1 to 4 are the finalists, everyone else follows in qualifying order
+        const QList<qint64> order = finalStandingIds(tid);
+        QCOMPARE(order.mid(0, 4), (QList<qint64>{s[0], s[3], s[1], s[2]}));
+        QList<qint64> rest;
+        for (const QVariantList &r : standings)
+            if (!s.contains(r[0].toLongLong()))
+                rest << r[0].toLongLong();
+        QCOMPARE(order.mid(4), rest);
+        QCOMPARE(db::value("SELECT final_placement FROM enrollments WHERE tournament_id = ? AND player_id = ?", {tid, s[3]}).toInt(), 2);
+        // the final's points are never added to the qualifying points
+        QCOMPARE(enrolledPoints(tid), enrolled);
+        QCOMPARE(qualifyingFigures(tid), standings);
+        QCOMPARE(cdb::getFinal(tid)["qualifying"].toList(), qualifying);
+        const QVariantList snap = QJsonDocument::fromJson(
+            db::value("SELECT final_standings_json FROM commander_events WHERE tournament_id = ?", {tid}).toString().toUtf8())
+            .array().toVariantList();
+        QCOMPARE(snap[0].toMap()["total_points"].toDouble(), 7.5);
+        QCOMPARE(snap[0].toMap()["qualifying_points"].toDouble(), 5.0);
+        QCOMPARE(snap[0].toMap()["final_points"].toDouble(), 2.5);
+        QVERIFY(!snap[5].toMap().contains("total_points"));
+        QCOMPARE(auditActions(tid).count("FINAL_CONFIRMED"), 1);
+        Q_UNUSED(pids);
+    }
+
+    // seed 1 wins (5 + 5 = 10) and seed 2 is second (5 + 2.5 = 7.5), so the winner leads; with no clear
+    // second the others keep their qualifying points
+    void totalPointsPlacesFollowTheChosenSecond()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        QCOMPARE(ids(cdb::previewTotalFinal(tid, "WIN", s[0], s[1])), (QList<qint64>{s[0], s[1], s[2], s[3]}));
+        // seed 3 second: 2.5 + 2.5 = 5, level with seed 2 (5), which has the better seed
+        const QVariantList third = cdb::previewTotalFinal(tid, "WIN", s[0], s[2]);
+        QCOMPARE(ids(third), (QList<qint64>{s[0], s[1], s[2], s[3]}));
+        QCOMPARE(third[1].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        QCOMPARE(third[2].toMap()["basis"].toString(), QString("TOTAL_POINTS_SEED"));
+        const QVariantList none = cdb::previewTotalFinal(tid, "WIN", s[0], cdb::SecondPlace::noClearSecond());
+        QCOMPARE(none[0].toMap()["total_points"].toDouble(), 10.0);
+        QCOMPARE(none[1].toMap()["total_points"].toDouble(), 5.0);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::previewTotalFinal(tid, "WIN", s[0], s[0]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::previewTotalFinal(tid, "WIN", 999999, s[1]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::previewTotalFinal(tid, "DRAW", s[0], {}));
+        Q_UNUSED(pids);
+    }
+
+    void totalPointsFinalRefusesAnUndecidedSecond()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        const QVariantList shown = cdb::previewTotalFinal(tid, "WIN", s[1], {});
+        QVERIFY(shown[0].toMap()["provisional"].toBool());
+        QCOMPARE(shown[0].toMap()["final_points"].toDouble() + shown[1].toMap()["final_points"].toDouble()
+                     + shown[2].toMap()["final_points"].toDouble() + shown[3].toMap()["final_points"].toDouble(), 5.0);
+        const QList<Rows> before = savedEvent(tid);
+        const int v = finalVersion(tid);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "WIN", s[1], {}, {}, v));
+        QCOMPARE(savedEvent(tid), before);
+        QCOMPARE(cdb::getFinal(tid)["status"].toString(), QString("PLAYING"));
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("SWISS"));
+        QVERIFY(!auditActions(tid).contains("FINAL_CONFIRMED"));
+        // a win cannot be confirmed with a second that is also the winner, a stranger, or a draw's second
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "WIN", s[1], s[1], {}, v));
+        qint64 stranger = 0;
+        for (qint64 p : pids)
+            if (!s.contains(p))
+                stranger = p;
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "WIN", s[1], stranger, {}, v));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "DRAW", 0, s[0], {}, v));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "DRAW", 0, cdb::SecondPlace::noClearSecond(), {}, v));
+        QCOMPARE(savedEvent(tid), before);
+    }
+
+    void totalPointsDrawUnderBothPolicies()
+    {
+        // eliminated players lose: those marked out earn 0, everyone else 1, and nobody is second
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        const QVariantList marked = cdb::previewTotalFinal(tid, "DRAW", 0, {}, {s[3]});
+        QCOMPARE(ids(marked), (QList<qint64>{s[0], s[1], s[2], s[3]}));
+        QCOMPARE(marked[0].toMap()["total_points"].toDouble(), 6.0);
+        QCOMPARE(marked[2].toMap()["total_points"].toDouble(), 3.5);
+        QCOMPARE(marked[3].toMap()["total_points"].toDouble(), 2.5);
+        QCOMPARE(marked[3].toMap()["final_points"].toDouble(), 0.0);
+        QCOMPARE(marked[3].toMap()["result"].toString(), QString("LOSS"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "DRAW", 0, {}, {s[1], s[2], s[3]}, finalVersion(tid)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "DRAW", s[0], {}, {}, finalVersion(tid)));
+        cdb::confirmTotalFinal(tid, "DRAW", 0, {}, {s[3]}, finalVersion(tid));
+        QCOMPARE(cdb::getFinal(tid)["outcome"].toString(), QString("NO_WINNER"));
+        QVERIFY(cdb::getFinal(tid)["winner_player_id"].isNull());
+        QVERIFY(cdb::getFinal(tid)["second_place_status"].isNull());
+        const QList<Placed> placed = placedByPlace(tid);
+        QCOMPARE(placed[0].award, 1.0);
+        QCOMPARE(placed[1].award, 1.0);
+        QCOMPARE(placed[2].award, 1.0);
+        QCOMPARE(placed[3].award, 0.0);
+        QCOMPARE(placed[0].result, QString("DRAW"));
+        QCOMPARE(placed[3].result, QString("LOSS"));
+        QCOMPARE(placed[0].basis, QString("TOTAL_POINTS_SEED"));       // 6 and 6
+        QCOMPARE(placed[2].basis, QString("TOTAL_POINTS"));
+        QCOMPARE(cdb::getEvent(tid)["champion_player_id"].toLongLong(), s[0]);
+
+        // the whole pod draws: all four earn 1, and marking a player out is refused
+        auto [all, others] = totalFinalReady({{"draw_policy", "ALL_DRAW"}}, 777);
+        const QList<qint64> a = finalSeedsOf(all);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::previewTotalFinal(all, "DRAW", 0, {}, {a[3]}));
+        const QVariantList everyone = cdb::previewTotalFinal(all, "DRAW", 0, {}, {});
+        for (const QVariant &p : everyone)
+            QCOMPARE(p.toMap()["final_points"].toDouble(), 1.0);
+        QCOMPARE(everyone[0].toMap()["total_points"].toDouble(), 6.0);
+        QCOMPARE(everyone[3].toMap()["total_points"].toDouble(), 3.5);
+        cdb::confirmTotalFinal(all, "DRAW", 0, {}, {}, finalVersion(all));
+        QCOMPARE(placedByPlace(all)[3].award, 1.0);
+        Q_UNUSED(pids);
+        Q_UNUSED(others);
+    }
+
+    // seed 4 winning with seed 1 second gives 7.5 each (seed 1 first, then seed 4, seed 2 on 5, seed 3 on 2.5);
+    // correcting to seed 1 winning with seed 4 second gives 10, 5, 5 and 2.5 (seed 2 ahead of seed 4 by seed)
+    void totalPointsCorrectionsReplaceAwardsAndNeedAReasonAndVersion()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        const int v = cdb::confirmTotalFinal(tid, "WIN", s[3], s[0], {}, finalVersion(tid));
+        const QList<double> enrolled = enrolledPoints(tid);
+        const QVariantList qualifying = cdb::getFinal(tid)["qualifying"].toList();
+        const QString snapshot = db::value("SELECT qualifying_json FROM commander_finals WHERE tournament_id = ?", {tid}).toString();
+        const QList<Rows> before = savedEvent(tid);
+
+        // a reason and the version the correction was opened with are both required
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "WIN", s[0], s[3], {}, v, ""));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "WIN", s[0], s[3], {}, v, "   "));
+        QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::confirmTotalFinal(tid, "WIN", s[0], s[3], {}, cdb::NONE, "slip"));
+        QVERIFY_THROWS_EXCEPTION(cdb::ConflictError, cdb::confirmTotalFinal(tid, "WIN", s[0], s[3], {}, v - 1, "slip"));
+        QCOMPARE(savedEvent(tid), before);
+
+        QCOMPARE(cdb::confirmTotalFinal(tid, "WIN", s[0], s[3], {}, v, "winner was entered the wrong way round"), v + 1);
+        QCOMPARE(finalOrder(tid), (QList<qint64>{s[0], s[1], s[3], s[2]}));
+        const QList<Placed> placed = placedByPlace(tid);
+        QCOMPARE(placed[0].award, 5.0);
+        QCOMPARE(placed[0].total, 10.0);
+        QCOMPARE(placed[1].award, 0.0);         // the earlier second-place award is replaced, not added to
+        QCOMPARE(placed[1].total, 5.0);
+        QCOMPARE(placed[2].award, 2.5);
+        QCOMPARE(placed[2].total, 5.0);
+        QCOMPARE(placed[3].award, 0.0);
+        QCOMPARE(placed[3].total, 2.5);
+        QCOMPARE(cdb::getEvent(tid)["champion_player_id"].toLongLong(), s[0]);
+        QCOMPARE(enrolledPoints(tid), enrolled);
+        QCOMPARE(cdb::getFinal(tid)["qualifying"].toList(), qualifying);
+        QCOMPARE(db::value("SELECT qualifying_json FROM commander_finals WHERE tournament_id = ?", {tid}).toString(), snapshot);
+        QCOMPARE(cdb::getFinal(tid)["second_place_player_id"].toLongLong(), s[3]);
+        const QVariantMap audit = cdb::getAudit(tid)[1].toMap();
+        QCOMPARE(audit["action"].toString(), QString("FINAL_CORRECTED"));
+        QCOMPARE(audit["detail"].toMap()["reason"].toString(), QString("winner was entered the wrong way round"));
+        QCOMPARE(audit["detail"].toMap()["winner_before"].toLongLong(), s[3]);
+        QCOMPARE(audit["detail"].toMap()["second_place_player_before"].toLongLong(), s[0]);
+        QCOMPARE(audit["detail"].toMap()["places"].toList().size(), 4);
+        QCOMPARE(audit["detail"].toMap()["final_ranking"].toString(), QString("TOTAL_POINTS"));
+        QVERIFY(cdb::getAudit(tid)[0].toMap()["action"].toString() == "FINAL_STANDINGS_UPDATED");
+
+        // a draw replaces a win the same way, and no second place is left behind
+        cdb::confirmTotalFinal(tid, "DRAW", 0, {}, {s[2], s[3]}, v + 1, "it was a draw");
+        QVERIFY(cdb::getFinal(tid)["second_place_player_id"].isNull());
+        QVERIFY(cdb::getFinal(tid)["winner_player_id"].isNull());
+        QCOMPARE(placedByPlace(tid)[0].total, 6.0);
+        QCOMPARE(enrolledPoints(tid), enrolled);
+        Q_UNUSED(pids);
+    }
+
+    void totalPointsDuplicateConfirmChangesNothing()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        const int v = cdb::confirmTotalFinal(tid, "WIN", s[2], s[1], {}, finalVersion(tid));
+        const QList<Rows> before = savedEvent(tid);
+        QCOMPARE(cdb::confirmTotalFinal(tid, "WIN", s[2], s[1], {}, finalVersion(tid)), v);
+        QCOMPARE(cdb::confirmTotalFinal(tid, "WIN", s[2], s[1], {}, 0), v);        // the version it was opened with
+        QCOMPARE(cdb::confirmTotalFinal(tid, "WIN", s[2], s[1]), v);
+        QCOMPARE(savedEvent(tid), before);
+        QCOMPARE(auditActions(tid).count("FINAL_CONFIRMED"), 1);
+        QVERIFY(!auditActions(tid).contains("FINAL_CORRECTED"));
+        Q_UNUSED(pids);
+    }
+
+    void totalPointsFailedSaveLeavesNothingBehind()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        QList<Rows> before = savedEvent(tid);
+        const int v = finalVersion(tid);
+        breakAuditInserts(true);
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::confirmTotalFinal(tid, "WIN", s[3], s[0], {}, v));
+        breakAuditInserts(false);
+        QCOMPARE(savedEvent(tid), before);
+        // the standings cannot be saved: the final stays unconfirmed with no awards
+        db::exec("CREATE TRIGGER break_standings BEFORE UPDATE OF match_points ON enrollments "
+                 "BEGIN SELECT RAISE(ABORT, 'standings cannot be saved'); END");
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::confirmTotalFinal(tid, "WIN", s[3], s[0], {}, v));
+        db::exec("DROP TRIGGER break_standings");
+        QCOMPARE(savedEvent(tid), before);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_final_players WHERE final_points IS NOT NULL OR placement IS NOT NULL")
+                     .toInt(), 0);
+        cdb::confirmTotalFinal(tid, "WIN", s[3], s[0], {}, v);
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"));
+
+        // a failed correction leaves the confirmed result as it was
+        before = savedEvent(tid);
+        breakAuditInserts(true);
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::confirmTotalFinal(tid, "WIN", s[0], s[1], {}, v + 1, "slip"));
+        breakAuditInserts(false);
+        QCOMPARE(savedEvent(tid), before);
+        Q_UNUSED(pids);
+    }
+
+    void totalPointsFinalSurvivesARestart()
+    {
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        cdb::confirmTotalFinal(tid, "WIN", s[3], s[1], {}, finalVersion(tid));
+        cdb::confirmTotalFinal(tid, "DRAW", 0, {}, {s[2]}, finalVersion(tid), "drawn after all");
+        const QString state = stateJson(tid);
+        const QList<Rows> saved = savedEvent(tid);
+        restart();
+        QCOMPARE(stateJson(tid), state);
+        QCOMPARE(savedEvent(tid), saved);
+        QCOMPARE(cdb::getFinal(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"));
+        Q_UNUSED(pids);
+    }
+
+    void knockoutAndTotalPointsApisRefuseTheOtherPolicy()
+    {
+        auto [total, a] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(total);
+        const QList<Rows> before = savedEvent(total);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::saveFinalEliminations(total, {{s[3]}}, finalVersion(total)));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::previewFinal(total, {{s[3]}, {s[2]}, {s[1]}}, "WIN", s[0]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmFinal(total, {{s[3]}, {s[2]}, {s[1]}}, "WIN", s[0], finalVersion(total)));
+        QCOMPARE(savedEvent(total), before);
+
+        auto [knock, b] = qualified(8, 1);
+        const QList<qint64> k = candidateSeeds(knock);
+        cdb::createFinal(knock, k);
+        const QList<Rows> kBefore = savedEvent(knock);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::previewTotalFinal(knock, "WIN", k[0], k[1]));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(knock, "WIN", k[0], k[1], {}, finalVersion(knock)));
+        QCOMPARE(savedEvent(knock), kBefore);
+        Q_UNUSED(a);
+        Q_UNUSED(b);
+    }
+
+    void knockoutFinalAddsNoPointsUnderEitherDefault()
+    {
+        auto [tid, pids] = qualified(8, 1);
+        const QList<qint64> s = candidateSeeds(tid);
+        cdb::createFinal(tid, s);
+        const QList<double> enrolled = enrolledPoints(tid);
+        const QList<QVariantList> standings = qualifyingFigures(tid);
+        cdb::confirmFinal(tid, {{s[3]}, {s[2]}, {s[1]}}, "WIN", s[0], finalVersion(tid));
+        QCOMPARE(qualifyingFigures(tid), standings);
+        QCOMPARE(enrolledPoints(tid), enrolled);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_final_players WHERE final_points IS NOT NULL OR final_result IS NOT NULL "
+                           "OR out_at_draw <> 0").toInt(), 0);
+        for (const QVariant &p : cdb::getFinal(tid)["players"].toList())
+            QVERIFY(p.toMap()["total_points"].isNull());
+        // the same final in an event created with the new default adds points, and nothing else changes
+        auto [tot, other] = totalFinalReady();
+        const QList<qint64> t = finalSeedsOf(tot);
+        const QList<QVariantList> totalStandings = qualifyingFigures(tot);
+        cdb::confirmTotalFinal(tot, "WIN", t[0], t[1], {}, finalVersion(tot));
+        QCOMPARE(qualifyingFigures(tot), totalStandings);
+        QCOMPARE(cdb::getEvent(tot)["settings"].toMap(), cdb::getEvent(tid)["settings"].toMap());
+        Q_UNUSED(pids);
+        Q_UNUSED(other);
+    }
+
+    // the second place of a finalist's pod is corrected to no clear second, which moves that finalist's points;
+    // a total-points final treats that like a reseed
+    void qualifyingCorrectionThatChangesAFinalistsPointsIsTreatedAsReseed()
+    {
+        const auto made = makeEvent(8, 1, true, 12345, {}, true, "TOTAL_POINTS");
+        const qint64 tid = made.first;
+        playWithSeconds(tid);
+        const QList<qint64> s = candidateSeeds(tid);
+        cdb::createFinal(tid, s);
+        // the pod of the second finalist: its second place changes from one player to another
+        QVariantMap pod;
+        for (const QVariant &pv : currentRound(tid)["pods"].toList())
+            for (const QVariant &sv : pv.toMap()["seats"].toList())
+                if (sv.toMap()["player_id"].toLongLong() == s[2])
+                    pod = pv.toMap();
+        QVERIFY(!pod.isEmpty());
+        const qint64 winner = seatPlayer(pod, 0);
+        // seat 2 was the clear second (2.5); no clear second takes those points away
+        const QList<Rows> before = savedEvent(tid);
+        try {
+            cdb::correctResult(podId(pod), "WIN", winner, {}, {}, "second place was wrong", cdb::SecondPlace::noClearSecond());
+            QFAIL("the final would change");
+        } catch (const cdb::FinalAffected &e) {
+            // the seed-3 finalist leaves and its points move: both kinds of change are named
+            QVERIFY(e.seedsChanged());
+            QVERIFY(!e.pointsChanged.isEmpty());
+            QVERIFY2(e.message.contains("who qualifies") && e.message.contains("qualifying points"), qPrintable(e.message));
+        }
+        QCOMPARE(savedEvent(tid), before);
+        // before the final begins it can be discarded and made again from the corrected standings
+        QVERIFY(cdb::correctResult(podId(pod), "WIN", winner, {}, "REBUILD_FINAL", "second place was wrong",
+                                   cdb::SecondPlace::noClearSecond()));
+        QVERIFY(cdb::getFinal(tid).isEmpty());
+        QVERIFY(auditActions(tid).contains("FINAL_DISCARDED"));
+        cdb::createFinal(tid, candidateSeeds(tid));
+        const QList<qint64> now = finalSeedsOf(tid);
+        // once the final has begun the correction is refused and nothing moves
+        cdb::confirmTotalFinal(tid, "WIN", now[0], now[1], {}, finalVersion(tid));
+        QVariantMap other;
+        for (const QVariant &pv : currentRound(tid)["pods"].toList())
+            for (const QVariant &sv : pv.toMap()["seats"].toList())
+                if (sv.toMap()["player_id"].toLongLong() == now[0])
+                    other = pv.toMap();
+        const QList<Rows> done = savedEvent(tid);
+        const qint64 loser = seatPlayer(other, 2) == now[0] ? seatPlayer(other, 3) : seatPlayer(other, 2);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::correctResult(podId(other), "WIN", loser, {}, "REBUILD_FINAL", "wrong winner",
+                                                                         cdb::SecondPlace::noClearSecond()));
+        QCOMPARE(savedEvent(tid), done);
+    }
+
+    // the second place is added to a pod whose finalists keep their seeds: only the points move
+    void pointsOnlyQualifyingCorrectionNamesThePointsNotTheSeeds()
+    {
+        const auto made = makeEvent(4, 1, true, 12345, {}, true, "TOTAL_POINTS");
+        const qint64 tid = made.first;
+        const QVariantMap rnd = currentRound(tid);
+        const QVariantMap pod = podAt(rnd, 0);
+        cdb::reportPodResult(podId(pod), "WIN", seatPlayer(pod, 0), {}, cdb::NONE, cdb::SecondPlace::noClearSecond());
+        cdb::finalizeRound(rnd["round_id"].toLongLong());
+        const QList<qint64> s = candidateSeeds(tid);
+        QCOMPARE(s.size(), 4);
+        QCOMPARE(s[0], seatPlayer(pod, 0));
+        cdb::createFinal(tid, s);
+        QCOMPARE(candidateSeeds(tid), s);
+        const QList<Rows> before = savedEvent(tid);
+        try {
+            cdb::correctResult(podId(pod), "WIN", s[0], {}, {}, "second place was wrong", s[1]);
+            QFAIL("the finalist's points would change");
+        } catch (const cdb::FinalAffected &e) {
+            QVERIFY(!e.seedsChanged());
+            QCOMPARE(e.pointsChanged.size(), 1);
+            const QVariantMap m = e.pointsChanged[0].toMap();
+            QCOMPARE(m["player_id"].toLongLong(), s[1]);
+            QCOMPARE(m["points_before"].toDouble(), 0.0);
+            QCOMPARE(m["points_after"].toDouble(), 2.5);
+            QVERIFY2(!e.message.contains("who qualifies"), qPrintable(e.message));
+            QHash<qint64, QString> labels;
+            labels.insert(s[1], "Label S1");
+            const QStringList lines = cdb::finalChangeLines(e, labels);
+            QCOMPARE(lines.size(), 2);
+            QVERIFY(lines[0].startsWith("Label S1: qualifying points 0 to 2.5"));
+            QVERIFY(lines[1].contains("stay the same"));
+        }
+        QCOMPARE(savedEvent(tid), before);
+
+        // once the final is confirmed the same correction is refused, never offered
+        cdb::confirmTotalFinal(tid, "WIN", s[0], s[1], {}, finalVersion(tid));
+        const QList<Rows> done = savedEvent(tid);
+        try {
+            cdb::correctResult(podId(pod), "WIN", s[0], {}, "REBUILD_FINAL", "second place was wrong", s[1]);
+            QFAIL("the final has been played");
+        } catch (const cdb::FinalAffected &) {
+            QFAIL("a played final is never offered for discarding");
+        } catch (const cdb::CommanderError &e) {
+            QVERIFY2(e.message.contains("been played") && e.message.contains("qualifying points"), qPrintable(e.message));
+        }
+        QCOMPARE(savedEvent(tid), done);
+    }
+
+    void finalChangeLinesDescribeEachKindOfChange()
+    {
+        const auto id = [](qint64 v) { return QVariant(v); };
+        const QHash<qint64, QString> labels{{1, "A"}, {2, "B"}, {3, "C"}, {4, "D"}, {5, "E"}};
+        const cdb::FinalAffected e("m", {id(1), id(2), id(3), id(4)}, {id(2), id(1), id(3), id(5)},
+                                   {QVariantMap{{"player_id", 3}, {"points_before", 5.0}, {"points_after", 2.5}}});
+        const QStringList lines = cdb::finalChangeLines(e, labels);
+        QCOMPARE(lines, (QStringList{"D leaves the final (was seed 4).", "E joins the final as seed 4.",
+                                     "A moves from seed 1 to seed 2.", "B moves from seed 2 to seed 1.",
+                                     "C: qualifying points 5 to 2.5."}));
+        const cdb::FinalAffected same("m", {id(1)}, {id(1)});
+        QCOMPARE(cdb::finalChangeLines(same, {}), (QStringList{"The finalists and their seeds stay the same."}));
+        // an unknown id is shown as ?
+        const cdb::FinalAffected unknown("m", {id(9)}, {id(8)});
+        QVERIFY(cdb::finalChangeLines(unknown, labels).contains("? leaves the final (was seed 1)."));
+    }
+
+    void endingEarlyDuringATotalPointsFinalNamesNoChampion()
+    {
+        auto [tid, pids] = totalFinalReady();
+        QVERIFY(tdb::terminateTournament(tid));
+        const QVariantMap state = cdb::getState(tid);
+        QVERIFY(state["terminated"].toBool());
+        QVERIFY(cdb::getEvent(tid)["champion_player_id"].isNull());
+        QVERIFY(state["final_standings"].isNull() || state["final_standings"].toList().isEmpty());
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_final_players WHERE placement IS NOT NULL").toInt(), 0);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM enrollments WHERE tournament_id = ? AND final_placement IS NOT NULL", {tid}).toInt(), 0);
+        QCOMPARE(cdb::getFinal(tid)["status"].toString(), QString("PLAYING"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "DRAW", 0, {}, {}, finalVersion(tid)));
+        Q_UNUSED(pids);
+    }
+
+    void totalPointsFinalActionsAreLoggedByIdOnlyOnceSaved()
+    {
+        applog::setDirectory(QString());
+        applog::setDirectory(tmp_->filePath("logs"));
+        const qint64 tid = cdb::createCommanderTournament("Secret Total Cup", 4, 1, {}, 77, {}, 50, true, "TOTAL_POINTS");
+        for (qint64 p : addPlayers(4, "Zed Hidden"))
+            tdb::enrollPlayer(tid, p);
+        cdb::startEvent(tid);
+        playWithSeconds(tid);
+        const QList<qint64> s = candidateSeeds(tid);
+        cdb::createFinal(tid, s);
+        const int fv = finalVersion(tid);
+        breakAuditInserts(true);
+        QVERIFY_THROWS_EXCEPTION(db::Error, cdb::confirmTotalFinal(tid, "WIN", s[0], s[1], {}, fv));
+        breakAuditInserts(false);
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::confirmTotalFinal(tid, "WIN", s[0], {}, {}, fv));
+        cdb::confirmTotalFinal(tid, "WIN", s[0], s[1], {}, fv);
+
+        const QStringList confirms = logged(" final.confirm ");
+        QStringList statuses;
+        static const QRegularExpression status(" status=([a-z-]+)");
+        for (const QString &l : confirms)
+            statuses << status.match(l).captured(1);
+        QCOMPARE(statuses.join(","), QString("attempt,failed,attempt,failed,attempt,ok"));
+        for (const QString &l : confirms) {
+            QVERIFY2(l.contains("final_ranking=TOTAL_POINTS"), qPrintable(l));
+            QVERIFY2(l.contains(QStringLiteral("tournament=%1").arg(tid)), qPrintable(l));
+        }
+        QVERIFY(logged(" tournament.create ").last().contains("final_ranking=TOTAL_POINTS"));
+        const QString all = logLines().join('\n');
+        for (const char *name : {"Secret", "Total Cup", "Zed", "Hidden"})
+            QVERIFY2(!all.contains(name), name);
+        const QStringList actions = auditActions(tid);
+        QCOMPARE(actions.count("FINAL_CONFIRMED"), 1);
+        QCOMPARE(actions.count("FINAL_CREATED"), 1);
+    }
+
+    void totalPointsFinalIsSavedWhenTheLogFileCannotBeWritten()
+    {
+        QFile blocker(tmp_->filePath("not-a-folder"));
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.close();
+        applog::setDirectory(tmp_->filePath("not-a-folder/logs"));
+        auto [tid, pids] = totalFinalReady();
+        const QList<qint64> s = finalSeedsOf(tid);
+        cdb::confirmTotalFinal(tid, "WIN", s[0], s[1], {}, finalVersion(tid));
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"));
+        QVERIFY(!applog::status().available);
+        Q_UNUSED(pids);
     }
 };
 

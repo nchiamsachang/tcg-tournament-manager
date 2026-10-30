@@ -78,6 +78,14 @@ FinalEditor *shownEditor(QWidget *w)
     return nullptr;
 }
 
+TotalFinalEditor *shownTotalEditor(QWidget *w)
+{
+    for (TotalFinalEditor *e : w->findChildren<TotalFinalEditor *>())
+        if (e->isVisible())
+            return e;
+    return nullptr;
+}
+
 QString labelText(QWidget *w)
 {
     settle();
@@ -154,9 +162,10 @@ class UiTests : public QObject {
     }
 
     qint64 commander(const QStringList &names, int rounds = 1, bool start = true, int minutes = 80,
-                     const QString &name = "Friday Commander", bool topFourFinal = false)
+                     const QString &name = "Friday Commander", bool topFourFinal = false,
+                     const QString &finalRanking = "KNOCKOUT")
     {
-        const qint64 tid = cdb::createCommanderTournament(name, int(names.size()), rounds, {}, 5, {}, minutes, topFourFinal);
+        const qint64 tid = cdb::createCommanderTournament(name, int(names.size()), rounds, {}, 5, {}, minutes, topFourFinal, finalRanking);
         for (qint64 p : players(names))
             tdb::enrollPlayer(tid, p);
         if (start)
@@ -944,7 +953,7 @@ private slots:
             QVERIFY(qobject_cast<QListView *>(box->view()));
             QVERIFY(box->styleSheet().contains("QAbstractItemView::item"));
         }
-        QCOMPARE(reg->findChildren<QComboBox *>().size(), 2);
+        QCOMPARE(reg->findChildren<QComboBox *>().size(), 3);       // draws, three-player pods, final standings
         cdb::startEvent(tid);
         const QVariantMap pod = cdb::getState(tid)["rounds"].toList()[0].toMap()["pods"].toList()[0].toMap();
         ResultDialog dialog(w_.get(), pod, "Pod 1 result", "ELIMINATED_LOSE");
@@ -2029,7 +2038,7 @@ private slots:
     void topFourFinalRunsThroughTheScreens()
     {
         const QStringList names{"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus", LONG_NAME};
-        const qint64 tid = commander(names, 1, false, 80, "Final Night");
+        const qint64 tid = commander(names, 1, false, 80, "Final Night", false, "TOTAL_POINTS");   // as a new event is created
         auto *reg = go<CommanderRegistrationScreen>("registration", {{"tournament_id", tid}});
         QVERIFY(reg && reg->finalCheck && reg->finalCheck->isVisible());
         QVERIFY(!reg->finalCheck->isChecked());                      // off unless chosen
@@ -2040,6 +2049,12 @@ private slots:
         QVERIFY(cdb::getEvent(tid)["final_enabled"].toBool());
         QVERIFY(labelText(reg).contains("1 qualifying round + 1 final"));
         QVERIFY(labelText(reg).contains("This tournament will be 1 qualifying round, then the top-four final."));
+        // the new default is total points; this run plays the knockout final
+        QCOMPARE(reg->rankingCombo->currentData().toString(), QString("TOTAL_POINTS"));
+        QCOMPARE(reg->rankingCombo->currentText(), QString("Total points"));
+        reg->rankingCombo->setCurrentIndex(reg->rankingCombo->findData("KNOCKOUT"));
+        settle();
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("KNOCKOUT"));
         QVERIFY(layoutProblems().isEmpty());
         reg->confirmStart();
         settle();
@@ -4249,6 +4264,430 @@ private slots:
         const qint64 typed = db::value("SELECT tournament_id FROM tournaments WHERE name = 'Typed Rounds'").toLongLong();
         QCOMPARE(cdb::getEvent(typed)["swiss_rounds"].toInt(), 2);
         QVERIFY(cdb::getEvent(typed)["rounds_chosen"].toBool());
+    }
+
+    // final standings by total points (release 0.3.0)
+
+    // a total-points event whose qualifying round is played (seat 1 wins each pod, no clear second, so the
+    // finalists carry 5, 5, 0 and 0 qualifying points) and whose final is created; returns the seeds
+private:
+    QList<qint64> totalFinalEvent(qint64 *tid, const QStringList &names, const QString &name = "Total Night",
+                                  const QVariantMap &settings = {})
+    {
+        *tid = cdb::createCommanderTournament(name, int(names.size()), 1, settings, 5, {}, 80, true, "TOTAL_POINTS");
+        for (qint64 p : players(names))
+            tdb::enrollPlayer(*tid, p);
+        cdb::startEvent(*tid);
+        return playToFinal(*tid);
+    }
+
+    static QStringList eight() { return {"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus", "Hal"}; }
+
+    static QStringList auditActions(qint64 tid)
+    {
+        QStringList out;
+        for (const QVariant &a : cdb::getAudit(tid))
+            out << a.toMap()["action"].toString();
+        return out;
+    }
+
+private slots:
+    void finalStandingsChoiceShowsOnlyWithAFinalAndSaves()
+    {
+        const qint64 tid = commander(eight(), 1, false, 80, "Choice Night", false, "TOTAL_POINTS");
+        auto *reg = go<CommanderRegistrationScreen>("registration", {{"tournament_id", tid}});
+        QVERIFY(reg && reg->rankingCombo && reg->rankingHint);
+        QVERIFY(!reg->finalCheck->isChecked());
+        QVERIFY(!reg->rankingCombo->isVisibleTo(reg) && !reg->rankingHint->isVisibleTo(reg));       // no final, no choice
+        reg->finalCheck->setChecked(true);
+        settle();
+        QVERIFY(reg->rankingCombo->isVisibleTo(reg) && reg->rankingHint->isVisibleTo(reg));
+        QCOMPARE(reg->rankingCombo->accessibleName(), QString("Final standings"));
+        QCOMPARE(reg->rankingCombo->itemText(0), QString("Total points"));
+        QCOMPARE(reg->rankingCombo->itemText(1), QString("Knockout order"));
+        QCOMPARE(reg->rankingCombo->currentData().toString(), QString("TOTAL_POINTS"));
+        QCOMPARE(reg->rankingHint->text().remove(QChar(0x200B)),
+                 QString("Qualifying points plus final points determine places. Ties use qualifying seed."));
+        QVERIFY(layoutProblems().isEmpty());
+
+        reg->rankingCombo->setCurrentIndex(1);
+        settle();
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("KNOCKOUT"));
+        QCOMPARE(reg->rankingHint->text().remove(QChar(0x200B)),
+                 QString("Final elimination order determines places. Simultaneous eliminations use qualifying seed."));
+        // the choice is saved: coming back to the page shows it
+        go<HomeScreen>("home");
+        reg = go<CommanderRegistrationScreen>("registration", {{"tournament_id", tid}});
+        QCOMPARE(reg->rankingCombo->currentData().toString(), QString("KNOCKOUT"));
+        QVERIFY(reg->rankingCombo->isVisibleTo(reg));
+        reg->rankingCombo->setCurrentIndex(0);
+        QCOMPARE(cdb::getEvent(tid)["final_ranking"].toString(), QString("TOTAL_POINTS"));
+
+        // the start question names the choice, and the event then keeps it
+        setAutoConfirm(false);
+        QString asked;
+        QTimer::singleShot(100, qApp, [&asked] {
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                asked = box->text();
+                box->reject();
+            }
+        });
+        reg->confirmStart();
+        setAutoConfirm(true);
+        QVERIFY2(asked.contains("Final standings: total points"), qPrintable(asked));
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("REGISTRATION"));
+        reg->confirmStart();
+        settle();
+        QCOMPARE(cdb::getEvent(tid)["stage"].toString(), QString("SWISS"));
+        QVERIFY_THROWS_EXCEPTION(cdb::CommanderError, cdb::updateEventConfig(tid, 0, {}, {}, -1, "KNOCKOUT"));
+
+        // an event with the final switched off does not offer the choice
+        const qint64 plain = commander(eight(), 1, false, 80, "No Final Night", false, "TOTAL_POINTS");
+        auto *other = go<CommanderRegistrationScreen>("registration", {{"tournament_id", plain}});
+        QVERIFY(!other->rankingCombo->isVisibleTo(other));
+        // and an event with the earlier rules, which has no final, never does
+        const qint64 earlier = commander(eight(), 1, false, 80, "Old Night");
+        earlierRules(earlier);
+        auto *old = go<CommanderRegistrationScreen>("registration", {{"tournament_id", earlier}});
+        QVERIFY(!old->rankingCombo->isVisibleTo(old) && !old->finalCheck->isVisibleTo(old));
+    }
+
+    void totalPointsFinalRunsThroughTheScreens()
+    {
+        qint64 tid = 0;
+        const QList<qint64> s = totalFinalEvent(&tid, {"Ana", "Bo", "Cy", "Di", "Ed", "Flo", "Gus", LONG_NAME});
+        QHash<qint64, QString> nameOf;
+        for (const QVariant &p : cdb::getFinal(tid)["players"].toList())
+            nameOf.insert(p.toMap()["player_id"].toLongLong(), p.toMap()["display_name"].toString());
+        auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        auto *e = shownTotalEditor(ev);
+        QVERIFY(e && !shownEditor(ev));
+        QVERIFY(labelText(ev).contains("TOP-FOUR FINAL"));
+        QVERIFY(!e->confirmBtn->isEnabled());
+        QVERIFY(e->preview->text().remove(QChar(0x200B)).contains("Choose the winner, or Draw"));
+        for (qint64 p : s)
+            QVERIFY2(labelText(e).contains(nameOf[p].left(10)), qPrintable(nameOf[p]));
+        QVERIFY(labelText(e).contains("Seed 1  ·  5 qualifying points") && labelText(e).contains("Seed 3  ·  0 qualifying points"));
+        QVERIFY(!e->seconds.value(s[0])->isEnabled() && !e->noSecond->isEnabled());       // no winner yet
+
+        // seed 3 wins: provisional until the second place is decided, and nothing is saved
+        const int version = cdb::getFinal(tid)["result_version"].toInt();
+        e->winners.value(s[2])->click();
+        QVERIFY(e->winners.value(s[2])->isChecked() && !e->seconds.value(s[2])->isEnabled());
+        QVERIFY(e->seconds.value(s[0])->isEnabled() && e->noSecond->isEnabled());
+        QVERIFY2(e->preview->text().remove(QChar(0x200B)).contains("Provisional: choose second place or No clear second"), qPrintable(e->preview->text()));
+        QVERIFY(!e->ready() && !e->confirmBtn->isEnabled());
+        e->confirmBtn->click();
+        settle();
+        QCOMPARE(cdb::getFinal(tid)["status"].toString(), QString("PLAYING"));
+        QCOMPARE(cdb::getFinal(tid)["result_version"].toInt(), version);
+        QVERIFY(!auditActions(tid).contains("FINAL_CONFIRMED"));
+
+        // seed 1 second: 5 + 2.5 = 7.5 leads; seed 2 and seed 3 are level on 5 and go by seed
+        e->seconds.value(s[0])->click();
+        QVERIFY(e->ready() && e->confirmBtn->isEnabled());
+        QStringList lines = e->preview->text().remove(QChar(0x200B)).split('\n');
+        QCOMPARE(lines.size(), 4);
+        QVERIFY(lines[0].startsWith("1st") && lines[0].contains(nameOf[s[0]].left(10)) && lines[0].contains("qual 5 + final 2.5 = 7.5"));
+        QVERIFY(lines[1].startsWith("2nd") && lines[1].contains("qual 5 + final 0 = 5") && lines[1].contains("by seed"));
+        QVERIFY(lines[2].startsWith("3rd") && lines[2].contains("qual 0 + final 5 = 5") && lines[2].contains("by seed"));
+        QVERIFY(lines[3].startsWith("4th") && lines[3].contains("qual 0 + final 0 = 0") && !lines[3].contains("by seed"));
+        // no clear second instead: three-way tie on 5 by seed
+        e->noSecond->click();
+        QVERIFY(e->noSecond->isChecked() && !e->seconds.value(s[0])->isChecked() && e->ready());
+        lines = e->preview->text().remove(QChar(0x200B)).split('\n');
+        QVERIFY(lines[0].contains(nameOf[s[0]].left(10)) && lines[0].contains("= 5") && lines[0].contains("by seed"));
+        // a draw clears the winner and the second place; players who were already out are ticked
+        e->drawBtn->click();
+        QVERIFY(e->drawBtn->isChecked() && e->outcome() == "DRAW" && !e->winners.value(s[2])->isChecked());
+        QVERIFY(e->outChecks.value(s[3])->isVisible());
+        e->outChecks.value(s[3])->setChecked(true);
+        QVERIFY(e->ready() && e->preview->text().remove(QChar(0x200B)).contains("qual 0 + final 0 = 0"));
+        QCOMPARE(cdb::getFinal(tid)["status"].toString(), QString("PLAYING"));          // still nothing saved
+
+        // back to the result that is confirmed: seed 3 wins, seed 1 is second
+        e->winners.value(s[2])->click();
+        e->seconds.value(s[0])->click();
+        QVERIFY(!e->outChecks.value(s[3])->isVisible() && e->outAtDraw().isEmpty());
+        QVERIFY(e->ready());
+        e->confirmBtn->click();
+        QTRY_COMPARE_WITH_TIMEOUT(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"), 10000);
+        settle();
+        QCOMPARE(cdb::getFinal(tid)["winner_player_id"].toLongLong(), s[2]);
+        QCOMPARE(cdb::getEvent(tid)["champion_player_id"].toLongLong(), s[0]);
+
+        // the page says why the champion is first
+        ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        QVERIFY(labelText(ev).contains("1st place: " + nameOf[s[0]] + " (most total points)"));
+        QVERIFY(!labelText(ev).contains("won the final)"));
+        QVERIFY(labelText(ev).contains("Qualifying 5 + final 2.5 = total 7.5"));
+        QVERIFY(buttons(ev).contains(QStringLiteral("Correct final…")));
+
+        // standings, CSV and PDF agree on the places and on the qualifying, final and total points
+        auto *standings = go<CommanderStandingsScreen>("standings", {{"tournament_id", tid}});
+        QVERIFY(standings);
+        QCOMPARE(standings->rows.size(), 8);
+        const QList<qint64> order{s[0], s[1], s[2], s[3]};
+        const QList<QStringList> figures{{"5", "2.5", "7.5"}, {"5", "0", "5"}, {"0", "5", "5"}, {"0", "0", "0"}};
+        const QStringList notes{"Final: 1st", "Final: 2nd, by seed", "Final: 3rd, by seed", "Final: 4th"};
+        const QStringList csv = standings->csvText().split('\n');
+        QCOMPARE(csv.size(), 10);                           // the header, eight players, and the end of the last line
+        QVERIFY(csv[0].endsWith(",Final,Qualifying points,Final points,Total points"));
+        const printing::Doc pdf = standings->pdfDoc();
+        QCOMPARE(pdf.columns[2].first, QString("Qual pts"));
+        QCOMPARE(pdf.columns[3].first, QString("Final"));
+        QCOMPARE(pdf.columns[4].first, QString("Total"));
+        QVERIFY(labelText(standings).contains("QUAL PTS") && labelText(standings).contains("TOTAL"));
+        for (int i = 0; i < 8; ++i) {
+            const QVariantMap r = standings->rows[i].toMap();
+            const QStringList cells = csv[i + 1].split(',');
+            QCOMPARE(cells[0], QString::number(i + 1));
+            QCOMPARE(pdf.rows[i][0], QString::number(i + 1));
+            QCOMPARE(pdf.rows[i][1], r["display_name"].toString());
+            if (i < 4) {
+                QCOMPARE(r["player_id"].toLongLong(), order[i]);
+                QCOMPARE(r["note"].toString(), notes[i]);
+                QCOMPARE(cells.mid(cells.size() - 3), figures[i]);
+                QCOMPARE(pdf.rows[i].mid(2, 3), figures[i]);
+                QVERIFY(pdf.rows[i].last().startsWith(notes[i]));
+            } else {
+                QCOMPARE(cells.mid(cells.size() - 2), (QStringList{"", ""}));       // nonfinalists: no final, no total
+                QCOMPARE(pdf.rows[i].mid(3, 2), (QStringList{"", ""}));
+                QCOMPARE(pdf.rows[i][2], cmdr::pointsText(r["points"].toDouble()));
+            }
+        }
+        QVERIFY(labelText(standings).contains("Qual pts never include the final's points"));
+        QVERIFY(!printing::pdfBytes({pdf}).isEmpty());
+
+        // the player's profile says what the final gave
+        auto *profile = go<PlayerProfileScreen>("player_profile", {{"player_id", s[0]}});
+        for (T::ClickFrame *r : profile->findChildren<T::ClickFrame *>())
+            if (r->accessibleName() == "Total Night: show matches")
+                QTest::keyClick(r, Qt::Key_Space);
+        QTRY_VERIFY_WITH_TIMEOUT(labelText(w_->currentScreen()).contains("2nd in final, +2.5, total 7.5, placed 1st"), 10000);
+    }
+
+    void totalPointsFinalEntryKeepsThePageAndFocus()
+    {
+        qint64 tid = 0;
+        const QList<qint64> s = totalFinalEvent(&tid, eight(), "Steady Total");
+        w_.reset();
+        openWindow(true);               // keyboard focus only exists in a real, active window
+        for (const QSize &size : {QSize(1180, 520), QSize(640, 480), QSize(420, 600)}) {
+            for (const QString &textSize : {QString("standard"), QString("large")}) {
+                prefs::setPref("text_size", textSize);
+                w_->restyle();
+                w_->resize(size);
+                settle();
+                auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+                TotalFinalEditor *e = shownTotalEditor(ev);
+                QVERIFY(ev && e);
+                auto *page = ev->findChild<QScrollArea *>();
+                QScrollBar *bar = page->verticalScrollBar();
+                const QByteArray where = QStringLiteral("%1 %2x%3").arg(textSize).arg(size.width()).arg(size.height()).toUtf8();
+                QVERIFY2(bar->maximum() > 0, where + " the final page scrolls");
+
+                // scrolls the control to the middle of the view, presses it, and checks nothing moved or was saved
+                const auto press = [&](const QString &step, QAbstractButton *b, const std::function<bool()> &chosen) {
+                    const QByteArray at = where + " " + step.toUtf8();
+                    QVERIFY2(b && b->isEnabled(), at);
+                    page->ensureWidgetVisible(b, 0, page->viewport()->height() / 2 - b->height());
+                    settle();
+                    const int target = bar->value();
+                    const QRect frame = w_->frameGeometry();
+                    b->setFocus(Qt::MouseFocusReason);
+                    QTest::mouseClick(b, Qt::LeftButton);
+                    QTRY_VERIFY_WITH_TIMEOUT(chosen(), 5000);
+                    settle();
+                    QVERIFY2(qAbs(bar->value() - qMin(target, bar->maximum())) <= 2,
+                             at + QStringLiteral(": the page moved from %1 to %2").arg(target).arg(bar->value()).toUtf8());
+                    QVERIFY2(w_->frameGeometry() == frame, at + ": the window moved or changed size");
+                    QVERIFY2(shownTotalEditor(ev) == e, at + ": the editor was rebuilt");
+                    QWidget *f = QApplication::focusWidget();
+                    QVERIFY2(f && (!page->isAncestorOf(f) || !f->visibleRegion().isEmpty()),
+                             at + ": focus went off screen to " + (f ? f->accessibleName().toUtf8() : QByteArray("nothing")));
+                    QCOMPARE(cdb::getFinal(tid)["status"].toString(), QString("PLAYING"));      // choosing saves nothing
+                    QCOMPARE(cdb::getFinal(tid)["result_version"].toInt(), 0);
+                };
+                press("winner", e->winners.value(s[1]), [&] { return e->winner() == s[1]; });
+                press("another winner", e->winners.value(s[2]), [&] { return e->winner() == s[2]; });
+                press("second", e->seconds.value(s[0]), [&] { return e->second().playerId == s[0]; });
+                press("no clear second", e->noSecond, [&] { return e->second().kind == cdb::SecondPlace::NoClearSecond; });
+                press("draw", e->drawBtn, [&] { return e->outcome() == "DRAW"; });
+                press("already out", e->outChecks.value(s[3]), [&] { return e->outAtDraw() == QList<qint64>{s[3]}; });
+                press("winner again", e->winners.value(s[0]), [&] { return e->outcome() == "WIN" && e->second().kind == cdb::SecondPlace::NotRecorded; });
+                // the keyboard does the same: space on the focused pill
+                e->seconds.value(s[1])->setFocus(Qt::TabFocusReason);
+                QTest::keyClick(e->seconds.value(s[1]), Qt::Key_Space);
+                QTRY_VERIFY_WITH_TIMEOUT(e->second().playerId == s[1] && e->ready(), 5000);
+                QVERIFY(QApplication::focusWidget() == e->seconds.value(s[1]));
+                settle();
+                QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
+            }
+        }
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_audit WHERE action IN ('FINAL_CONFIRMED', 'FINAL_CORRECTED') "
+                           "AND tournament_id = ?", {tid}).toInt(), 0);
+    }
+
+    void totalPointsDrawOffersAlreadyOutOnlyWhenKnockedOutPlayersLose()
+    {
+        qint64 tid = 0;
+        QList<qint64> s = totalFinalEvent(&tid, eight(), "Losing Draw");
+        auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        auto *e = shownTotalEditor(ev);
+        QVERIFY(e);
+        for (qint64 p : s)
+            QVERIFY(!e->outChecks.value(p)->isVisible());           // only a draw asks
+        e->drawBtn->click();
+        for (qint64 p : s)
+            QVERIFY(e->outChecks.value(p)->isVisible() && e->outChecks.value(p)->text() == "Already out");
+        QVERIFY(e->ready());
+        // one player left in is not a draw: it is refused with the reason, beside the places
+        for (qint64 p : {s[1], s[2], s[3]})
+            e->outChecks.value(p)->setChecked(true);
+        QVERIFY(!e->ready() && !e->confirmBtn->isEnabled());
+        QVERIFY2(e->problem->isVisible() && e->problem->text().remove(QChar(0x200B)).contains("at least two players still in"), qPrintable(e->problem->text()));
+        e->outChecks.value(s[2])->setChecked(false);
+        QVERIFY(e->ready() && !e->problem->isVisible());
+        QCOMPARE(e->outAtDraw(), (QList<qint64>{s[1], s[3]}));
+        e->confirmBtn->click();
+        QTRY_COMPARE_WITH_TIMEOUT(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"), 10000);
+        QCOMPARE(db::value("SELECT COUNT(*) FROM commander_final_players WHERE out_at_draw = 1 AND tournament_id = ?", {tid}).toInt(), 2);
+
+        // when the whole pod draws, nobody can be marked out
+        qint64 all = 0;
+        s = totalFinalEvent(&all, eight(), "Whole Pod Draw", {{"draw_policy", "ALL_DRAW"}});
+        ev = go<CommanderEventScreen>("round", {{"tournament_id", all}});
+        e = shownTotalEditor(ev);
+        QVERIFY(e);
+        e->drawBtn->click();
+        for (qint64 p : s)
+            QVERIFY(!e->outChecks.value(p)->isVisible());
+        QVERIFY(e->ready() && e->outAtDraw().isEmpty());
+        QVERIFY(e->drawNote->isVisible() && e->drawNote->text().remove(QChar(0x200B)).contains("Every player earns the draw points"));
+    }
+
+    void totalPointsFinalCorrectionNeedsAReason()
+    {
+        qint64 tid = 0;
+        const QList<qint64> s = totalFinalEvent(&tid, eight(), "Correction Night");
+        cdb::confirmTotalFinal(tid, "WIN", s[2], s[0], {}, cdb::getFinal(tid)["result_version"].toInt());
+        const int v = cdb::getFinal(tid)["result_version"].toInt();
+        auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        bool opened = false;
+        inNextDialog<FinalCorrectionDialog>([&](FinalCorrectionDialog *d) {
+            opened = d->totalEditor && !d->editor;
+            QVERIFY(d->before->text().remove(QChar(0x200B)).startsWith("1st"));
+            QVERIFY(d->before->text().contains("qual 5 + final 2.5 = 7.5"));
+            // it starts from what was saved
+            QCOMPARE(d->totalEditor->winner(), s[2]);
+            QCOMPARE(d->totalEditor->second().playerId, s[0]);
+            QVERIFY(!d->totalEditor->confirmBtn);
+            d->reasonEdit->setText("A reason");
+            QVERIFY(d->saveBtn->isEnabled());
+            d->totalEditor->winners.value(s[0])->click();                    // the second place was the winner
+            QVERIFY(d->totalEditor->second().kind == cdb::SecondPlace::NotRecorded);
+            QVERIFY(!d->saveBtn->isEnabled());                                // a second place is still to decide
+            d->totalEditor->seconds.value(s[2])->click();
+            d->reasonEdit->setText("   ");
+            QVERIFY(!d->saveBtn->isEnabled());
+            d->reasonEdit->setText("winner and second were swapped");
+            QVERIFY(d->saveBtn->isEnabled());
+            d->saveBtn->click();
+        });
+        buttons(ev).value(QStringLiteral("Correct final…"))->click();
+        QTRY_COMPARE_WITH_TIMEOUT(cdb::getFinal(tid)["winner_player_id"].toLongLong(), s[0], 10000);
+        settle();
+        QVERIFY(opened);
+        QCOMPARE(cdb::getFinal(tid)["result_version"].toInt(), v + 1);
+        QCOMPARE(cdb::getFinal(tid)["second_place_player_id"].toLongLong(), s[2]);
+        const QVariantMap audit = cdb::getAudit(tid)[1].toMap();
+        QCOMPARE(audit["action"].toString(), QString("FINAL_CORRECTED"));
+        QCOMPARE(audit["detail"].toMap()["reason"].toString(), QString("winner and second were swapped"));
+        QCOMPARE(cdb::getEvent(tid)["champion_player_id"].toLongLong(), s[0]);      // 5 + 5 = 10
+        QVERIFY(labelText(w_->currentScreen()).contains("(most total points)"));
+    }
+
+    void totalPointsFinalFitsThemesLargeTextAndNarrowWindows()
+    {
+        QStringList names;
+        for (int i = 1; i <= 8; ++i)
+            names << QStringLiteral("%1 %2").arg(LONG_NAME).arg(i);
+        qint64 tid = 0;
+        const QList<qint64> s = totalFinalEvent(&tid, names, "Long Names Total");
+        const auto check = [&](const QString &step) {
+            for (const QString &textSize : {QString("standard"), QString("large")}) {
+                for (const QString &mode : {QString("dark"), QString("light")}) {
+                    prefs::setPref("theme", mode);
+                    prefs::setPref("text_size", textSize);
+                    w_->restyle();
+                    for (const QSize &size : {QSize(1180, 780), QSize(360, 480)}) {
+                        w_->resize(size);
+                        for (const QString &page : {QString("round"), QString("standings")}) {
+                            auto *screen = go<T::Screen>(page, {{"tournament_id", tid}});
+                            QVERIFY(screen);
+                            const QByteArray where = QStringLiteral("%1 %2 %3 %4 %5").arg(step, page, textSize, mode).arg(size.width()).toUtf8();
+                            QVERIFY2(layoutProblems().isEmpty(), where + " " + layoutProblems().join("; ").toUtf8());
+                        }
+                    }
+                }
+            }
+        };
+        check("playing");
+        auto *ev = go<CommanderEventScreen>("round", {{"tournament_id", tid}});
+        auto *e = shownTotalEditor(ev);
+        QVERIFY(e);
+        e->winners.value(s[2])->click();
+        e->seconds.value(s[0])->click();
+        QVERIFY(e->ready());
+        w_->resize(360, 480);
+        settle();
+        QVERIFY(e->stacked());
+        QVERIFY2(layoutProblems().isEmpty(), qPrintable(layoutProblems().join("; ")));
+        e->confirmBtn->click();
+        QTRY_COMPARE_WITH_TIMEOUT(cdb::getEvent(tid)["stage"].toString(), QString("COMPLETE"), 10000);
+        check("complete");
+        prefs::setPref("theme", "dark");
+        prefs::setPref("text_size", "standard");
+        w_->restyle();
+    }
+
+    void olderAndNoFinalEventsReportAsBefore()
+    {
+        // a knockout final: the same columns, notes and banner as before
+        const qint64 knock = commander(eight(), 1, true, 80, "Knockout Night", true);
+        const QList<qint64> s = playToFinal(knock);
+        cdb::confirmFinal(knock, {{s[3]}, {s[2]}, {s[1]}}, "WIN", s[0], cdb::getFinal(knock)["result_version"].toInt());
+        auto *standings = go<CommanderStandingsScreen>("standings", {{"tournament_id", knock}});
+        QVERIFY(standings);
+        QVERIFY(standings->csvText().startsWith("Place,Player,Points,Wins,Losses,Draws,Byes,Seconds,OMW%,MW%,Dropped,Final\n"));
+        QCOMPARE(standings->pdfDoc().columns[2].first, QString("Pts"));
+        QCOMPARE(standings->pdfDoc().columns.size(), 10);
+        QCOMPARE(standings->rows[0].toMap()["note"].toString(), QString("Final: 1st, won"));
+        QVERIFY(!labelText(standings).contains("QUAL PTS"));
+        QVERIFY(labelText(go<CommanderEventScreen>("round", {{"tournament_id", knock}})).contains("(won the final)"));
+
+        // no final: the qualifying standings, with no final columns
+        const qint64 plain = commander(eight(), 1, true, 80, "Plain Night");
+        for (const QVariant &pv : cdb::getRounds(plain).last().toMap()["pods"].toList()) {
+            const QVariantList seats = pv.toMap()["seats"].toList();
+            cdb::reportPodResult(pv.toMap()["pod_id"].toLongLong(), "WIN", seats[0].toMap()["player_id"].toLongLong(), {},
+                                 cdb::NONE, cdb::SecondPlace::noClearSecond());
+        }
+        cdb::finalizeRound(cdb::getRounds(plain).last().toMap()["round_id"].toLongLong());
+        standings = go<CommanderStandingsScreen>("standings", {{"tournament_id", plain}});
+        QVERIFY(standings->csvText().startsWith("Place,Player,Points,Wins,Losses,Draws,Byes,Seconds,OMW%,MW%,Dropped\n"));
+        QCOMPARE(standings->pdfDoc().columns.size(), 10);
+        QVERIFY(!labelText(standings).contains("QUAL PTS") && !labelText(standings).contains("TOTAL"));
+
+        // an event with the earlier rules keeps its columns too
+        const qint64 old = commander(eight(), 1, false, 80, "Old Night");
+        earlierRules(old);
+        cdb::startEvent(old);
+        standings = go<CommanderStandingsScreen>("standings", {{"tournament_id", old}});
+        QVERIFY(standings->csvText().startsWith("Place,Player,Points,Wins,Losses,Draws,Byes,OMW%,MW%,Dropped\n"));
+        QCOMPARE(standings->pdfDoc().columns.size(), 9);       // no 2nd column before second place scored
+        QCOMPARE(cdb::getEvent(old)["final_ranking"].toString(), QString("KNOCKOUT"));
     }
 };
 

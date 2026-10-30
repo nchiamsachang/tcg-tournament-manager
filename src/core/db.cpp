@@ -717,6 +717,81 @@ static void migration009CommanderFinalPlayStarted()
          "AND f.elimination_group IS NOT NULL))");
 }
 
+// a final can be ranked by total points (qualifying points plus the points the final awards)
+// instead of its knockout order.  every event that exists now is tagged KNOCKOUT, the way it
+// was run, including ones still in registration.  commander_final_players is rebuilt the way
+// update 4 rebuilds tournaments, because its placement_basis rule has to allow new values.
+static void migration010CommanderFinalRanking()
+{
+    if (!columns("commander_events").contains("final_ranking"))
+        exec("ALTER TABLE commander_events ADD COLUMN final_ranking TEXT NOT NULL DEFAULT 'KNOCKOUT' "
+             "CHECK (final_ranking IN ('KNOCKOUT', 'TOTAL_POINTS'))");
+    if (!columns("commander_finals").contains("second_place_player_id"))
+        exec("ALTER TABLE commander_finals ADD COLUMN second_place_player_id INTEGER REFERENCES players(player_id)");
+    if (!columns("commander_finals").contains("second_place_status"))
+        exec("ALTER TABLE commander_finals ADD COLUMN second_place_status TEXT "
+             "CHECK (second_place_status IN ('PLAYER', 'NONE'))");
+
+    const QString sql = value("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'commander_final_players'").toString();
+    if (!sql.contains("TOTAL_POINTS")) {
+        // the index and every trigger that names the table go with it: capture them, put them back afterwards
+        const Rows attached = query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND "
+                                    "((type = 'index' AND tbl_name = 'commander_final_players') OR "
+                                    "(type = 'trigger' AND sql LIKE '%commander_final_players%')) ORDER BY rowid");
+        for (const Row &r : attached)
+            if (r["type"].toString() == "trigger")
+                exec(QStringLiteral("DROP TRIGGER IF EXISTS \"%1\"").arg(r["name"].toString()));
+        const int before = value("SELECT COUNT(*) FROM commander_final_players").toInt();
+
+        exec("DROP TABLE IF EXISTS commander_final_players_rebuild");
+        exec(R"sql(
+            CREATE TABLE commander_final_players_rebuild (
+                final_id          INTEGER NOT NULL REFERENCES commander_finals(final_id) ON DELETE CASCADE,
+                tournament_id     INTEGER NOT NULL REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+                player_id         INTEGER NOT NULL REFERENCES players(player_id),
+                seed              INTEGER NOT NULL CHECK (seed BETWEEN 1 AND 4),
+                seat_number       INTEGER NOT NULL CHECK (seat_number BETWEEN 1 AND 4),
+                qualifying_rank   INTEGER NOT NULL CHECK (qualifying_rank >= 1),
+                elimination_group INTEGER CHECK (elimination_group BETWEEN 1 AND 3),
+                placement         INTEGER CHECK (placement BETWEEN 1 AND 4),
+                placement_basis   TEXT    CHECK (placement_basis IN ('WINNER', 'ELIMINATION', 'QUALIFYING_RANK',
+                                                                     'TOTAL_POINTS', 'TOTAL_POINTS_SEED')),
+                qualifying_points REAL,
+                final_result      TEXT    CHECK (final_result IN ('WIN', 'SECOND', 'LOSS', 'DRAW')),
+                final_points      REAL,
+                out_at_draw       INTEGER NOT NULL DEFAULT 0 CHECK (out_at_draw IN (0, 1)),
+                PRIMARY KEY (final_id, player_id),
+                UNIQUE (final_id, seed),
+                UNIQUE (final_id, seat_number),
+                UNIQUE (final_id, placement),
+                CHECK ((placement IS NULL) = (placement_basis IS NULL))
+            )
+        )sql");
+        exec("INSERT INTO commander_final_players_rebuild (final_id, tournament_id, player_id, seed, seat_number, "
+             "qualifying_rank, elimination_group, placement, placement_basis) "
+             "SELECT final_id, tournament_id, player_id, seed, seat_number, qualifying_rank, elimination_group, "
+             "placement, placement_basis FROM commander_final_players");
+        if (value("SELECT COUNT(*) FROM commander_final_players_rebuild").toInt() != before)
+            throw Error(QStringLiteral("Not every finalist could be copied, so the table was left unchanged."), false);
+        exec("DROP TABLE commander_final_players");
+        exec("ALTER TABLE commander_final_players_rebuild RENAME TO commander_final_players");
+        for (const Row &r : attached) {
+            QString text = r["sql"].toString();
+            // the saved qualifying points are part of what is fixed once the final exists
+            if (r["name"].toString() == "commander_final_players_fixed")
+                text.replace(QStringLiteral("qualifying_rank ON"), QStringLiteral("qualifying_rank, qualifying_points ON"));
+            exec(text);
+        }
+    }
+
+    exec(R"sql(
+        CREATE TRIGGER IF NOT EXISTS commander_final_ranking_frozen
+        BEFORE UPDATE OF final_ranking ON commander_events
+        WHEN OLD.stage <> 'REGISTRATION' AND NEW.final_ranking IS NOT OLD.final_ranking
+        BEGIN SELECT RAISE(ABORT, 'the final standings option is fixed once the event has started'); END
+    )sql");
+}
+
 const QList<Migration> &migrations()
 {
     static const QList<Migration> list = {
@@ -729,6 +804,7 @@ const QList<Migration> &migrations()
         {7, "commander_second_place", migration007CommanderSecondPlace},
         {8, "commander_scored_second_and_final", migration008CommanderScoredSecondAndFinal},
         {9, "commander_final_play_started", migration009CommanderFinalPlayStarted},
+        {10, "commander_final_ranking", migration010CommanderFinalRanking, true},
     };
     return list;
 }

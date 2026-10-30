@@ -306,7 +306,10 @@ void CommanderRegistrationScreen::buildUi()
     // One line per setting: the control with its label, and a short explanation beside it
     // (directly below it when the window is narrow).
     auto addSetting = [&](const QString &label, QWidget *control, QLabel **hint) {
+        auto *holder = new QWidget;
         QBoxLayout *line = flip(T::row(16));
+        holder->setLayout(line);
+        line->setContentsMargins(0, 0, 0, 0);
         auto *col = new QVBoxLayout;
         col->setSpacing(4);
         col->addWidget(T::caps(label, {}, 10));
@@ -318,10 +321,17 @@ void CommanderRegistrationScreen::buildUi()
         (*hint)->setAlignment(Qt::AlignLeft | Qt::AlignBottom);
         (*hint)->setContentsMargins(0, 0, 0, 8);
         line->addWidget(*hint, 1);
-        pv->addLayout(line);
+        pv->addWidget(holder);
+        return holder;
     };
     addSetting("Rounds", roundsSpin, &roundsHint);
     addSetting("Final", finalCheck, &finalHint);
+    rankingCombo = T::combo();
+    rankingCombo->addItem("Total points", "TOTAL_POINTS");
+    rankingCombo->addItem("Knockout order", "KNOCKOUT");
+    rankingCombo->setAccessibleName("Final standings");
+    rankingCombo->setToolTip("How the final's places are decided.");
+    rankingRow_ = addSetting("Final standings", rankingCombo, &rankingHint);
     addSetting("Draws", drawCombo, &drawHint);
     addSetting("3-player pods", shortCombo, &shortHint);
     scoringLabel = T::lbl("", T::MUTED, 12, 400, true);
@@ -353,6 +363,7 @@ void CommanderRegistrationScreen::buildUi()
     connect(roundsSpin, &QSpinBox::valueChanged, this, [this] { configChanged(true); });
     connect(drawCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(false); });
     connect(shortCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(false); });
+    connect(rankingCombo, &QComboBox::currentIndexChanged, this, [this] { configChanged(false); });
     connect(finalCheck, &QCheckBox::toggled, this, [this] {
         if (loading_)
             return;
@@ -436,6 +447,9 @@ void CommanderRegistrationScreen::updateHints()
     drawHint->setText(drawCombo->currentData().toString() == "ELIMINATED_LOSE"
                           ? "Players still in draw; knocked-out players lose."
                           : "Every seated player draws, even those knocked out.");
+    rankingHint->setText(rankingCombo->currentData().toString() == "TOTAL_POINTS"
+                             ? "Qualifying points plus final points determine places. Ties use qualifying seed."
+                             : "Final elimination order determines places. Simultaneous eliminations use qualifying seed.");
     const QString placement = shortCombo->currentData().toString();
     shortHint->setText(placement == "LOW" ? "Lowest-ranked players fill the three-player pods."
                        : placement == "HIGH" ? "Highest-ranked players fill the three-player pods."
@@ -455,6 +469,8 @@ void CommanderRegistrationScreen::syncConfig(int checked)
     finalCheck->setChecked(ev["final_enabled"].toBool());
     finalCheck->setVisible(current);
     finalHint->setVisible(current);
+    rankingCombo->setCurrentIndex(qMax(0, rankingCombo->findData(ev["final_ranking"])));
+    rankingRow_->setVisible(current && ev["final_enabled"].toBool());
     scoringLabel->setText(current
         ? QStringLiteral("Scoring (club rules): win %1, clear second place %2, other losses %3, draw %4, bye %5. Announce "
                          "the rules, and whether there is a final, before the tournament starts.")
@@ -505,7 +521,8 @@ void CommanderRegistrationScreen::configChanged(bool rounds)
         return;
     try {
         cdb::updateEventConfig(tournamentId, rounds ? roundsSpin->value() : 0, drawCombo->currentData().toString(),
-                               shortCombo->currentData().toString(), finalCheck->isVisible() ? int(finalCheck->isChecked()) : -1);
+                               shortCombo->currentData().toString(), finalCheck->isVisible() ? int(finalCheck->isChecked()) : -1,
+                               finalCheck->isVisible() ? rankingCombo->currentData().toString() : QString());
     } catch (const cdb::CommanderError &e) {
         warn(this, "Setup", e.message);
     }
@@ -523,12 +540,16 @@ void CommanderRegistrationScreen::confirmStart()
     const QString rounds = ev["final_enabled"].toBool()
         ? QStringLiteral("Rounds: %1 qualifying round%2, then the top-four final").arg(n).arg(n == 1 ? "" : "s")
         : QStringLiteral("Rounds: %1 in total, the tournament ends after Round %1").arg(n);
+    const QString ranking = !ev["final_enabled"].toBool() ? QString()
+        : ev["final_ranking"].toString() == "TOTAL_POINTS"
+            ? QStringLiteral("\nFinal standings: total points (qualifying points plus final points)")
+            : QStringLiteral("\nFinal standings: knockout order");
     if (!confirm(this, "Start Commander event",
                  QStringLiteral("Start %1 with %2 checked-in players?\n\nRound 1 pods: %3%4\n%5\n\nThe number of rounds, "
                                 "scoring and tiebreakers are frozen once the event starts.")
                      .arg(tName).arg(ev["checked_in_count"].toInt())
                      .arg(pods.join(" + "), rec["byes"].toInt() ? QStringLiteral(" and %1 bye").arg(rec["byes"].toInt()) : QString())
-                     .arg(rounds)))
+                     .arg(rounds + ranking)))
         return;
     try {
         cdb::startEvent(tournamentId);
@@ -1585,9 +1606,20 @@ QWidget *PlayerProfileScreen::detailPanel(qint64 tournamentId)
             Line line;
             line.when = "Final";
             line.where = QStringLiteral("Top-four final  ·  seed %1  ·  seat %2").arg(p["seed"].toInt()).arg(p["seat"].toInt());
+            const QString ordinal = place == 1 ? "1st" : place == 2 ? "2nd" : place == 3 ? "3rd" : "4th";
+            if (fin["final_ranking"].toString() == "TOTAL_POINTS" && place && !p["final_points"].isNull()) {
+                const QString result = p["final_result"].toString();
+                line.result = (result == "WIN" ? QStringLiteral("Won the final") : result == "SECOND" ? QStringLiteral("2nd in final")
+                               : result == "DRAW" ? QStringLiteral("Drew the final") : QStringLiteral("Lost the final"))
+                              + QStringLiteral(", +%1, total %2, placed %3").arg(cmdr::pointsText(p["final_points"].toDouble()),
+                                                                              cmdr::pointsText(p["total_points"].toDouble()), ordinal)
+                              + (basis == "TOTAL_POINTS_SEED" ? QStringLiteral(" by seed") : QString());
+                line.color = place == 1 ? T::GREEN : T::TEXT;
+                lines << line;
+                continue;
+            }
             line.result = !place ? QStringLiteral("Not placed")
-                        : (place == 1 ? "1st" : place == 2 ? "2nd" : place == 3 ? "3rd" : "4th")
-                              + QString(basis == "WINNER" ? ", won" : basis == "QUALIFYING_RANK" ? ", by seed" : "");
+                        : ordinal + QString(basis == "WINNER" ? ", won" : basis == "QUALIFYING_RANK" ? ", by seed" : "");
             line.color = basis == "WINNER" ? T::GREEN : place ? T::TEXT : T::MUTED;
             lines << line;
         }

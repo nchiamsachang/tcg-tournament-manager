@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QRandomGenerator>
 #include <algorithm>
+#include <cmath>
 #include <optional>
 
 using db::Row;
@@ -273,10 +274,14 @@ bool isCommander(qint64 tournamentId)
 }
 
 qint64 createCommanderTournament(const QString &name, int expectedPlayers, int swissRounds, const QVariantMap &settings,
-                                 qint64 baseSeed, const QString &tournamentDate, int roundTimeMins, bool topFourFinal)
+                                 qint64 baseSeed, const QString &tournamentDate, int roundTimeMins, bool topFourFinal,
+                                 const QString &finalRanking)
 {
     applog::Action log("tournament.create", {{"game", "MTG"}, {"format", "Commander"}, {"rounds", swissRounds},
-                                             {"rules", QString(cmdr::RULES_VERSION)}, {"top_four_final", topFourFinal}});
+                                             {"rules", QString(cmdr::RULES_VERSION)}, {"top_four_final", topFourFinal},
+                                             {"final_ranking", finalRanking}});
+    if (!cmdr::isFinalRanking(finalRanking))
+        throw CommanderError("Unknown final standings option: " + finalRanking);
     const QString wanted = tdb::checkedName(name, QStringLiteral("tournament"));
     if (!tdb::isValidRoundMinutes(roundTimeMins))
         throw CommanderError("Round length must be from 1 to 240 minutes.");
@@ -307,10 +312,11 @@ qint64 createCommanderTournament(const QString &name, int expectedPlayers, int s
         "INSERT INTO tournaments (name, game, format, tournament_date, total_rounds, top_cut, round_time_mins, status) "
         "VALUES (?, 'MTG', ?, ?, ?, 0, ?, 'PENDING')", {wanted, QString(FORMAT), date, rounds, roundTimeMins}).lastId;
     db::exec("INSERT INTO commander_events (tournament_id, rules_version, settings_json, recommended_rounds, "
-             "swiss_rounds, recommended_cut, playoff_cut, base_seed, final_enabled) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)",
-             {tid, QString(cmdr::RULES_VERSION), toJson(cfg), recRounds, rounds, seed, topFourFinal ? 1 : 0});
+             "swiss_rounds, recommended_cut, playoff_cut, base_seed, final_enabled, final_ranking) "
+             "VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)",
+             {tid, QString(cmdr::RULES_VERSION), toJson(cfg), recRounds, rounds, seed, topFourFinal ? 1 : 0, finalRanking});
     audit(tid, "EVENT_CREATED", {{"rounds", rounds}, {"base_seed", seed}, {"rules_version", QString(cmdr::RULES_VERSION)},
-                                 {"top_four_final", topFourFinal}});
+                                 {"top_four_final", topFourFinal}, {"final_ranking", finalRanking}});
     tx.commit();
     log.set("tournament", tid);
     return tid;
@@ -367,9 +373,10 @@ void setCheckedIn(qint64 tournamentId, qint64 playerId, bool checkedIn)
 }
 
 void updateEventConfig(qint64 tournamentId, int swissRounds, const QString &drawPolicy, const QString &threePodPlacement,
-                       int topFourFinal)
+                       int topFourFinal, const QString &finalRanking)
 {
-    applog::Action log("event.configure", {{"tournament", tournamentId}, {"top_four_final", topFourFinal}});
+    applog::Action log("event.configure", {{"tournament", tournamentId}, {"top_four_final", topFourFinal},
+                                           {"final_ranking", finalRanking}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
     if (ev["stage"].toString() != "REGISTRATION")
@@ -397,13 +404,21 @@ void updateEventConfig(qint64 tournamentId, int swissRounds, const QString &draw
     const bool final = topFourFinal < 0 ? ev["final_enabled"].toBool() : topFourFinal != 0;
     if (final && !ev["final_enabled"].toBool() && !ev["scores_second"].toBool())
         throw CommanderError("This event was created with earlier rules, which have no top-four final.");
-    db::exec("UPDATE commander_events SET swiss_rounds = ?, settings_json = ?, final_enabled = ? WHERE tournament_id = ?",
-             {rounds, toJson(settings), final ? 1 : 0, tournamentId});
+    QString ranking = ev["final_ranking"].toString();
+    if (!finalRanking.isEmpty()) {
+        if (!cmdr::isFinalRanking(finalRanking))
+            throw CommanderError("Unknown final standings option: " + finalRanking);
+        if (finalRanking != ranking && !ev["scores_second"].toBool())
+            throw CommanderError("This event was created with earlier rules, which rank a final by its knockout order.");
+        ranking = finalRanking;
+    }
+    db::exec("UPDATE commander_events SET swiss_rounds = ?, settings_json = ?, final_enabled = ?, final_ranking = ? "
+             "WHERE tournament_id = ?", {rounds, toJson(settings), final ? 1 : 0, ranking, tournamentId});
     db::exec("UPDATE tournaments SET total_rounds = ? WHERE tournament_id = ?", {rounds, tournamentId});
     audit(tournamentId, "CONFIG_UPDATED",
           {{"rounds", rounds}, {"draw_policy", settings["draw_policy"]},
            {"three_pod_placement", settings.value("three_pod_placement", cmdr::LEGACY_THREE_POD_PLACEMENT)},
-           {"top_four_final", final}});
+           {"top_four_final", final}, {"final_ranking", ranking}});
     tx.commit();
 }
 
@@ -827,7 +842,7 @@ static QVariantList finalTable(const QVariantList &table)
 
 // final placings of an event with a confirmed final: the four finalists in the places the
 // final gave them, then everyone else in qualifying order.  nothing else moves them.
-static QVariantList finalPlacings(const QVariantList &table, const Rows &finalists)
+static QVariantList finalPlacings(const QVariantList &table, const Rows &finalists, bool byTotal)
 {
     QHash<qint64, QVariantMap> rows;
     for (const QVariant &v : table)
@@ -841,6 +856,15 @@ static QVariantList finalPlacings(const QVariantList &table, const Rows &finalis
             r["final_seed"] = f["seed"];
             r["final_basis"] = f["placement_basis"];
             r["final_group"] = f["elimination_group"];
+            if (byTotal) {
+                // the final's points are kept apart: the qualifying points above never include them
+                const double qualifying = f["qualifying_points"].isNull() ? r["points"].toDouble()
+                                                                          : f["qualifying_points"].toDouble();
+                r["final_result"] = f["final_result"];
+                r["final_qualifying_points"] = qualifying;
+                r["final_points"] = f["final_points"];
+                r["final_total_points"] = qualifying + f["final_points"].toDouble();
+            }
             out << r;
         }
     }
@@ -863,7 +887,8 @@ static void complete(qint64 tournamentId, const QString &action = "EVENT_COMPLET
         const Row fin = loadFinalRow(tournamentId);
         if (fin.isEmpty() || fin["status"].toString() != "CONFIRMED")
             throw CommanderError("The top-four final has no confirmed result, so the tournament cannot be completed.");
-        table = finalPlacings(qualifying, loadFinalPlayers(fin["final_id"].toLongLong()));
+        table = finalPlacings(qualifying, loadFinalPlayers(fin["final_id"].toLongLong()),
+                              ev["final_ranking"].toString() == "TOTAL_POINTS");
     } else {
         table = finalTable(qualifying);
     }
@@ -882,6 +907,12 @@ static void complete(qint64 tournamentId, const QString &action = "EVENT_COMPLET
             if (r.contains("final_seed")) {
                 row["final_seed"] = r["final_seed"];
                 row["final_basis"] = r["final_basis"];
+                if (r.contains("final_result")) {
+                    row["final_result"] = r["final_result"];
+                    row["qualifying_points"] = r["final_qualifying_points"];
+                    row["final_points"] = r["final_points"];
+                    row["total_points"] = r["final_total_points"];
+                }
             }
         }
         snapshot << row;
@@ -1011,6 +1042,40 @@ static Candidates candidatesFrom(const QVariantList &table)
     return c;
 }
 
+static QList<double> finalQualifyingPoints(const Row &fin, const Rows &finalists);
+
+// points are whole or half points: compare them as halves, never as doubles
+static int halfPoints(double points)
+{
+    return int(std::lround(points * 2));
+}
+
+QStringList finalChangeLines(const FinalAffected &e, const QHash<qint64, QString> &names)
+{
+    const auto nameOf = [&names](const QVariant &id) { return names.value(id.toLongLong(), QStringLiteral("?")); };
+    QStringList out;
+    for (int i = 0; i < e.seedsBefore.size(); ++i)
+        if (!e.seedsAfter.contains(e.seedsBefore[i]))
+            out << QStringLiteral("%1 leaves the final (was seed %2).").arg(nameOf(e.seedsBefore[i])).arg(i + 1);
+    for (int i = 0; i < e.seedsAfter.size(); ++i)
+        if (!e.seedsBefore.contains(e.seedsAfter[i]))
+            out << QStringLiteral("%1 joins the final as seed %2.").arg(nameOf(e.seedsAfter[i])).arg(i + 1);
+    for (int i = 0; i < e.seedsBefore.size(); ++i) {
+        const int to = int(e.seedsAfter.indexOf(e.seedsBefore[i]));
+        if (to >= 0 && to != i)
+            out << QStringLiteral("%1 moves from seed %2 to seed %3.").arg(nameOf(e.seedsBefore[i])).arg(i + 1).arg(to + 1);
+    }
+    for (const QVariant &v : e.pointsChanged) {
+        const QVariantMap m = v.toMap();
+        out << QStringLiteral("%1: qualifying points %2 to %3.")
+                   .arg(nameOf(m["player_id"]), cmdr::pointsText(m["points_before"].toDouble()),
+                        cmdr::pointsText(m["points_after"].toDouble()));
+    }
+    if (!e.seedsChanged())
+        out << QStringLiteral("The finalists and their seeds stay the same.");
+    return out;
+}
+
 bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const QList<qint64> &eliminatedIds,
                    const QString &resolution, const QString &reason, const SecondPlace &requested)
 {
@@ -1089,16 +1154,47 @@ bool correctResult(qint64 podId, const QString &outcome, qint64 winnerId, const 
     if (!fin.isEmpty() && scoreChanged) {
         const Rows finalists = loadFinalPlayers(fin["final_id"].toLongLong());
         const QList<qint64> saved = finalSeeds(finalists);
-        const Candidates now = candidatesFrom(computeTable(ev, loadPlayers(tid), loadRounds(tid)));
-        if (now.seeds != saved) {
+        const QVariantList nowTable = computeTable(ev, loadPlayers(tid), loadRounds(tid));
+        const Candidates now = candidatesFrom(nowTable);
+        // where finals add to qualifying points, a finalist whose points move changes the final as
+        // much as a new seed does
+        bool pointsMoved = false;
+        QVariantList pointsChanged;
+        if (ev["final_ranking"].toString() == "TOTAL_POINTS") {
+            QHash<qint64, double> current;
+            for (const QVariant &v : nowTable)
+                current.insert(v.toMap().value("player_id").toLongLong(), v.toMap().value("points").toDouble());
+            const QList<double> start = finalQualifyingPoints(fin, finalists);
+            for (int i = 0; i < saved.size(); ++i) {
+                const bool moved = halfPoints(current.value(saved[i])) != halfPoints(start[i]);
+                if (moved)
+                    pointsChanged << QVariant(QVariantMap{{"player_id", saved[i]}, {"points_before", start[i]},
+                                                          {"points_after", current.value(saved[i])}});
+                pointsMoved = pointsMoved || moved;
+            }
+        }
+        if (now.seeds != saved || pointsMoved) {
+            const bool seedsMoved = now.seeds != saved;
+            // names the kind of change without naming anyone
+            const QString what = !pointsMoved ? QStringLiteral("who qualifies for the final or their seeds")
+                : !seedsMoved ? QStringLiteral("a finalist's qualifying points")
+                              : QStringLiteral("who qualifies for the final, their seeds and a finalist's qualifying points");
             if (finalBegun(fin, finalists))
-                throw CommanderError(QStringLiteral("This correction would change who plays the final or their seeds, "
-                                                    "and the final has already %1. The correction cannot be saved.")
-                                         .arg(fin["status"].toString() == "CONFIRMED" ? "been played" : "begun"));
-            if (resolution != "REBUILD_FINAL")
-                throw FinalAffected("This correction changes who qualifies for the final or their seeds. The final has "
-                                    "not begun, so it can be discarded and created again from the corrected standings.",
-                                    idList(saved), idList(now.seeds));
+                throw CommanderError(QStringLiteral("This correction would change %1, and the final has already %2. "
+                                                    "The correction cannot be saved.")
+                                         .arg(what, fin["status"].toString() == "CONFIRMED" ? "been played" : "begun"));
+            if (resolution != "REBUILD_FINAL") {
+                const QString tail = QStringLiteral("The final has not begun, so it can be discarded and created again "
+                                                    "from the corrected standings.");
+                const QString msg = !pointsMoved
+                    ? "This correction changes who qualifies for the final or their seeds. " + tail
+                    : !seedsMoved
+                    ? "This correction changes a finalist's qualifying points; the finalists and seeds stay the same. "
+                      "The final adds to qualifying points, so it has to be created again. " + tail
+                    : "This correction changes who qualifies for the final or their seeds, and a finalist's qualifying "
+                      "points. " + tail;
+                throw FinalAffected(msg, idList(saved), idList(now.seeds), pointsChanged);
+            }
             db::exec("DELETE FROM commander_finals WHERE final_id = ?", {fin["final_id"]});
             seedsBefore = idList(saved);
             seedsAfter = idList(now.seeds);
@@ -1290,16 +1386,20 @@ qint64 createFinal(qint64 tournamentId, const QList<qint64> &expectedSeeds)
     }
     const qint64 finalId = db::exec("INSERT INTO commander_finals (tournament_id, qualifying_json) VALUES (?, ?)",
                                     {tournamentId, toJson(snapshot)}).lastId;
-    QVariantList ranks;
+    QVariantList ranks, points;
     for (int i = 0; i < c.seeds.size(); ++i) {
         const QVariantMap r = c.eligible[i].toMap();
         // seats follow the seeds, seed 1 taking the first turn (TopDeck multiplayer addendum)
-        db::exec("INSERT INTO commander_final_players (final_id, tournament_id, player_id, seed, seat_number, qualifying_rank) "
-                 "VALUES (?, ?, ?, ?, ?, ?)", {finalId, tournamentId, c.seeds[i], i + 1, i + 1, r["standing"]});
+        // the points are the ones the seeding used, kept so later corrections cannot move the final
+        db::exec("INSERT INTO commander_final_players (final_id, tournament_id, player_id, seed, seat_number, qualifying_rank, "
+                 "qualifying_points) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 {finalId, tournamentId, c.seeds[i], i + 1, i + 1, r["standing"], r["points"]});
         ranks << r["standing"];
+        points << r["points"];
     }
     audit(tournamentId, "FINAL_CREATED", {{"final_id", finalId}, {"seeds", idList(c.seeds)}, {"qualifying_ranks", ranks},
-                                          {"eligible", int(c.eligible.size())}});
+                                          {"eligible", int(c.eligible.size())}, {"final_ranking", ev["final_ranking"]},
+                                          {"qualifying_points", points}});
     tx.commit();
     log.set("final", finalId);
     return finalId;
@@ -1314,6 +1414,17 @@ static Row finalForChange(qint64 tournamentId, int expectedVersion)
     if (expectedVersion != NONE && expectedVersion != fin["result_version"].toInt())
         throw ConflictError("The final was changed elsewhere. Reload it and try again.");
     return fin;
+}
+
+// each way of ranking a final has its own calls; the other's are refused here, in the core
+static void requireRanking(const QVariantMap &ev, const QString &wanted)
+{
+    if (ev["final_ranking"].toString() == wanted)
+        return;
+    throw CommanderError(wanted == "KNOCKOUT"
+                             ? "This event ranks its final by total points, so knockouts are not recorded. Enter the "
+                               "final's result instead."
+                             : "This event ranks its final by knockout order, so total-points results are not recorded.");
 }
 
 static void checkedFinal(const QList<qint64> &seeds, const QList<QList<qint64>> &groups)
@@ -1357,7 +1468,7 @@ int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &reque
 {
     applog::Action log("final.eliminations", {{"tournament", tournamentId}, {"groups", groupsText(requested)}});
     db::Tx tx;
-    loadOpenEvent(tournamentId);
+    requireRanking(loadOpenEvent(tournamentId), "KNOCKOUT");
     const Row fin = finalForChange(tournamentId, expectedVersion);
     if (fin["status"].toString() == "CONFIRMED")
         throw CommanderError("The final's result is confirmed. Use Correct final to change it.");
@@ -1388,6 +1499,7 @@ int saveFinalEliminations(qint64 tournamentId, const QList<QList<qint64>> &reque
 
 QVariantList previewFinal(qint64 tournamentId, const QList<QList<qint64>> &groups, const QString &outcome, qint64 winnerId)
 {
+    requireRanking(loadEvent(tournamentId), "KNOCKOUT");
     const Row fin = loadFinalRow(tournamentId);
     if (fin.isEmpty())
         throw CommanderError("This event has no final yet.");
@@ -1414,6 +1526,7 @@ int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &requested, con
                                          {"groups", groupsText(requested)}});
     db::Tx tx;
     const QVariantMap ev = loadOpenEvent(tournamentId);
+    requireRanking(ev, "KNOCKOUT");
     const Row fin = finalForChange(tournamentId, expectedVersion);
     const qint64 finalId = fin["final_id"].toLongLong();
     const bool correction = fin["status"].toString() == "CONFIRMED";
@@ -1468,6 +1581,160 @@ int confirmFinal(qint64 tournamentId, const QList<QList<qint64>> &requested, con
     return version + 1;
 }
 
+// the qualifying points the finalists were seeded with, best seed first; finals created before
+// update 10 did not store them and read them from the saved standings
+static QList<double> finalQualifyingPoints(const Row &fin, const Rows &finalists)
+{
+    QHash<qint64, double> snapshot;
+    for (const QVariant &v : jsonArray(fin["qualifying_json"]))
+        snapshot.insert(v.toMap().value("player_id").toLongLong(), v.toMap().value("points").toDouble());
+    QList<double> out;
+    for (const Row &f : finalists)
+        out << (f["qualifying_points"].isNull() ? snapshot.value(f["player_id"].toLongLong())
+                                                : f["qualifying_points"].toDouble());
+    return out;
+}
+
+// the second place a total-points final has saved
+static SecondPlace savedFinalSecond(const Row &fin)
+{
+    if (fin["second_place_status"].toString() == "NONE")
+        return SecondPlace::noClearSecond();
+    return SecondPlace(fin["second_place_player_id"].toLongLong());
+}
+
+static QVariantList placedByTotal(const QVariantMap &ev, const Rows &finalists, const Row &fin, const QString &outcome,
+                                  qint64 winnerId, const SecondPlace &second, const QList<qint64> &outAtDraw)
+{
+    try {
+        return cmdr::placeFinalByTotal(finalSeeds(finalists), finalQualifyingPoints(fin, finalists), outcome, winnerId,
+                                       second.playerId, second.kind == SecondPlace::NoClearSecond, outAtDraw,
+                                       ev["settings"].toMap());
+    } catch (const std::invalid_argument &e) {
+        throw CommanderError(QString::fromStdString(e.what()));
+    }
+}
+
+QVariantList previewTotalFinal(qint64 tournamentId, const QString &outcome, qint64 winnerId, const SecondPlace &second,
+                               const QList<qint64> &outAtDraw)
+{
+    const QVariantMap ev = loadEvent(tournamentId);
+    requireRanking(ev, "TOTAL_POINTS");
+    const Row fin = loadFinalRow(tournamentId);
+    if (fin.isEmpty())
+        throw CommanderError("This event has no final yet.");
+    const Rows finalists = loadFinalPlayers(fin["final_id"].toLongLong());
+    QHash<qint64, QString> names;
+    for (const Row &p : shownPlayers(tournamentId))
+        names.insert(p["player_id"].toLongLong(), p["display_name"].toString());
+    const QList<qint64> seeds = finalSeeds(finalists);
+    QVariantList out;
+    for (const QVariant &v : placedByTotal(ev, finalists, fin, outcome, winnerId, second, outAtDraw)) {
+        QVariantMap p = v.toMap();
+        const qint64 id = p["player_id"].toLongLong();
+        p["display_name"] = names.value(id);
+        p["seed"] = int(seeds.indexOf(id)) + 1;
+        out << p;
+    }
+    return out;
+}
+
+int confirmTotalFinal(qint64 tournamentId, const QString &outcome, qint64 winnerId, const SecondPlace &second,
+                      const QList<qint64> &outAtDraw, int expectedVersion, const QString &reason)
+{
+    applog::Action log("final.confirm", {{"tournament", tournamentId}, {"final_result", outcome}, {"winner", winnerId},
+                                         {"second", second.playerId}, {"second_decision", int(second.kind)},
+                                         {"out", idsText(outAtDraw)}, {"final_ranking", "TOTAL_POINTS"}});
+    db::Tx tx;
+    const QVariantMap ev = loadOpenEvent(tournamentId);
+    requireRanking(ev, "TOTAL_POINTS");
+    const Row fin = loadFinalRow(tournamentId);
+    if (fin.isEmpty())
+        throw CommanderError("This event has no final yet.");
+    const qint64 finalId = fin["final_id"].toLongLong();
+    const bool correction = fin["status"].toString() == "CONFIRMED";
+    if (!correction && ev["stage"].toString() != "SWISS")
+        throw CommanderError("This tournament is finished.");
+    if (outcome == "WIN" && second.kind == SecondPlace::NotRecorded)
+        throw CommanderError("Choose the second-place player, or confirm that there was no clear second, before "
+                             "confirming the final. Nothing was saved.");
+    const Rows finalists = loadFinalPlayers(finalId);
+    const QList<qint64> seeds = finalSeeds(finalists);
+    const QVariantList places = placedByTotal(ev, finalists, fin, outcome, winnerId, second, outAtDraw);
+    const QString stored = outcome == "WIN" ? "WIN" : "NO_WINNER";
+    QList<qint64> outs;
+    for (qint64 s : seeds)
+        if (outAtDraw.contains(s))
+            outs << s;
+    QList<qint64> outsBefore;
+    for (const Row &f : finalists)
+        if (f["out_at_draw"].toInt())
+            outsBefore << f["player_id"].toLongLong();
+
+    const int version = fin["result_version"].toInt();
+    if (correction && fin["outcome"].toString() == stored && fin["winner_player_id"].toLongLong() == winnerId
+        && savedFinalSecond(fin) == second && outsBefore == outs) {
+        log.outcome("no-change");
+        return version;
+    }
+    if (expectedVersion != NONE && expectedVersion != version)
+        throw ConflictError("The final was changed elsewhere. Reload it and try again.");
+    if (correction && expectedVersion == NONE)
+        throw ConflictError("The final already has a result. Reload it to correct that result.");
+    if (correction)
+        requireReason(reason);
+
+    QVariantList previousPlaces, previousAwards;
+    for (int place = 1; place <= 4; ++place)
+        for (const Row &f : finalists)
+            if (f["placement"].toInt() == place) {
+                previousPlaces << f["player_id"];
+                previousAwards << f["final_points"];
+            }
+
+    // the new result replaces the old one; qualifying points and results are never touched
+    db::exec("UPDATE commander_final_players SET placement = NULL, placement_basis = NULL, final_result = NULL, "
+             "final_points = NULL, out_at_draw = 0 WHERE final_id = ?", {finalId});
+    QVariantList order, bases, awards, totals;
+    for (const QVariant &v : places) {
+        const QVariantMap p = v.toMap();
+        db::exec("UPDATE commander_final_players SET placement = ?, placement_basis = ?, final_result = ?, final_points = ?, "
+                 "out_at_draw = ? WHERE final_id = ? AND player_id = ?",
+                 {p["place"], p["basis"], p["result"], p["final_points"], p["out_at_draw"].toBool() ? 1 : 0, finalId,
+                  p["player_id"]});
+        order << p["player_id"];
+        bases << p["basis"];
+        awards << p["final_points"];
+        totals << p["total_points"];
+    }
+    const QVariant secondId = idOrNull(stored == "WIN" ? second.playerId : 0);
+    const QVariant secondStatus = stored != "WIN" ? QVariant()
+                                  : second.kind == SecondPlace::NoClearSecond ? QVariant("NONE") : QVariant("PLAYER");
+    db::exec("UPDATE commander_finals SET status = 'CONFIRMED', outcome = ?, winner_player_id = ?, "
+             "second_place_player_id = ?, second_place_status = ?, result_version = result_version + 1, "
+             "confirmed_at = DATETIME('now'), play_started_at = COALESCE(play_started_at, DATETIME('now')) "
+             "WHERE final_id = ?", {stored, idOrNull(winnerId), secondId, secondStatus, finalId});
+    QVariantMap detail{{"final_id", finalId}, {"final_ranking", "TOTAL_POINTS"}, {"outcome", stored},
+                       {"winner_player_id", idOrNull(winnerId)}, {"second_place_player_id", secondId},
+                       {"second_place_status", secondStatus}, {"out_at_draw", idList(outs)}, {"places", order},
+                       {"bases", bases}, {"final_points", awards}, {"total_points", totals}};
+    if (correction) {
+        detail["outcome_before"] = fin["outcome"];
+        detail["winner_before"] = fin["winner_player_id"];
+        detail["second_place_player_before"] = fin["second_place_player_id"];
+        detail["second_place_status_before"] = fin["second_place_status"];
+        detail["out_at_draw_before"] = idList(outsBefore);
+        detail["places_before"] = previousPlaces;
+        detail["final_points_before"] = previousAwards;
+        detail["reason"] = reason.trimmed();
+    }
+    audit(tournamentId, correction ? "FINAL_CORRECTED" : "FINAL_CONFIRMED", detail);
+    complete(tournamentId, correction ? "FINAL_STANDINGS_UPDATED" : "EVENT_COMPLETED");
+    tx.commit();
+    log.set("first", order.value(0));
+    return version + 1;
+}
+
 static QVariantMap finalView(qint64 tournamentId, const Rows &shown)
 {
     const Row fin = loadFinalRow(tournamentId);
@@ -1481,16 +1748,24 @@ static QVariantMap finalView(qint64 tournamentId, const Rows &shown)
     QHash<qint64, QVariantMap> snapshot;
     for (const QVariant &v : qualifying)
         snapshot.insert(v.toMap().value("player_id").toLongLong(), v.toMap());
+    const QList<double> startPoints = finalQualifyingPoints(fin, finalists);
     QVariantList players;
-    for (const Row &f : finalists) {
+    for (int i = 0; i < finalists.size(); ++i) {
+        const Row &f = finalists[i];
         const qint64 id = f["player_id"].toLongLong();
-        players << QVariantMap{{"player_id", id}, {"display_name", names.value(id, "?")}, {"seed", f["seed"]},
-                               {"seat", f["seat_number"]}, {"standing", f["qualifying_rank"]},
-                               {"points", snapshot.value(id).value("points")}, {"elimination_group", f["elimination_group"]},
-                               {"placement", f["placement"]}, {"placement_basis", f["placement_basis"]}};
+        QVariantMap p{{"player_id", id}, {"display_name", names.value(id, "?")}, {"seed", f["seed"]},
+                      {"seat", f["seat_number"]}, {"standing", f["qualifying_rank"]},
+                      {"points", snapshot.value(id).value("points")}, {"qualifying_points", startPoints[i]},
+                      {"elimination_group", f["elimination_group"]}, {"placement", f["placement"]},
+                      {"placement_basis", f["placement_basis"]}, {"final_result", f["final_result"]},
+                      {"final_points", f["final_points"]}, {"out_at_draw", f["out_at_draw"].toInt() != 0}};
+        p["total_points"] = f["final_points"].isNull() ? QVariant() : QVariant(startPoints[i] + f["final_points"].toDouble());
+        players << p;
     }
-    return {{"final_id", fin["final_id"]}, {"status", fin["status"]}, {"outcome", fin["outcome"]},
-            {"winner_player_id", fin["winner_player_id"]}, {"result_version", fin["result_version"]},
+    return {{"final_id", fin["final_id"]}, {"final_ranking", loadEvent(tournamentId)["final_ranking"]},
+            {"status", fin["status"]}, {"outcome", fin["outcome"]},
+            {"winner_player_id", fin["winner_player_id"]}, {"second_place_player_id", fin["second_place_player_id"]},
+            {"second_place_status", fin["second_place_status"]}, {"result_version", fin["result_version"]},
             {"begun", finalBegun(fin, finalists)}, {"groups", groupsList(finalGroups(finalists))},
             {"qualifying", qualifying}, {"players", players}, {"created_at", fin["created_at"]},
             {"confirmed_at", fin["confirmed_at"]}};
@@ -1599,7 +1874,8 @@ QVariantMap getState(qint64 tournamentId)
 
     return {
         {"event", ev}, {"players", playerList}, {"rounds", shown}, {"standings", table},
-        {"final_enabled", ev["final_enabled"]}, {"scores_second", ev["scores_second"]}, {"final", fin},
+        {"final_enabled", ev["final_enabled"]}, {"final_ranking", ev["final_ranking"]},
+        {"scores_second", ev["scores_second"]}, {"final", fin},
         {"candidates", next == "FINAL" ? finalCandidates(tournamentId) : QVariant()}, {"second_pending", secondPending},
         {"final_standings", finalStandings}, {"next", next}, {"active_count", active},
         {"rounds_created", int(swiss.size())}, {"total_rounds", ev["swiss_rounds"]}, {"can_pair", active >= 3},
@@ -1687,13 +1963,15 @@ QStringList rulesText(const QVariantMap &ev)
         placement == "LOW" ? "seated from the lowest match-point groups, so the leaders play four-player pods."
         : placement == "HIGH" ? "seated from the highest match-point groups."
         : "placed wherever players' match points line up best, which can be the top pod.";
+    const bool byTotal = ev.value("final_enabled").toBool() && ev.value("final_ranking").toString() == "TOTAL_POINTS";
     QStringList lines{
         QStringLiteral("Format: Commander, one game per pod per round.  Rules set %1, pairing %2.")
             .arg(s["rules_version"].toString(), cmdr::PAIRING_ALGORITHM),
         ev.value("final_enabled").toBool()
             ? QStringLiteral("Rounds: %1 qualifying round%2, then one top-four final pod. The four best players in the "
                              "qualifying standings who are checked in and have not dropped play it, seated in seed order "
-                             "(seed 1 takes the first turn). The final adds no points.").arg(n).arg(n == 1 ? "" : "s")
+                             "(seed 1 takes the first turn). %3").arg(n).arg(n == 1 ? "" : "s")
+                  .arg(byTotal ? "The final adds points to the qualifying points." : "The final adds no points.")
             : QStringLiteral("Rounds: %1 in total. The tournament ends when Round %1 is finalized; the standings after "
                              "that round are the final placings. There is no playoff, top cut or separate final.").arg(n),
         "Pods: four players by default; three-player pods are used so everyone plays (never 1, 2 or 5). "
@@ -1716,7 +1994,16 @@ QStringList rulesText(const QVariantMap &ev)
                        "opponents at the floor.")
             .arg(qRound(s["tiebreak_floor"].toDouble() * 100)).arg(s["bye_phantom_opponents"].toInt()),
     };
-    if (ev.value("final_enabled").toBool())
+    if (byTotal) {
+        lines << QStringLiteral("Final points: the winner gets %1, a clear second place %2, the other players %3 and a "
+                                "drawn final gives each player %4. Players already out when a final is drawn take %3 "
+                                "where eliminated players take a loss. A drawn final has no second place.")
+                     .arg(cmdr::pointsText(s["win_points"].toDouble()), cmdr::pointsText(s["second_place_points"].toDouble()),
+                          cmdr::pointsText(s["loss_points"].toDouble()), cmdr::pointsText(s["draw_points"].toDouble()));
+        lines << "Final places: each finalist's total is the qualifying points plus the final points. The most total points "
+                 "is 1st, so the winner of the final can place lower. Equal totals are ordered by qualifying seed. The "
+                 "round clock only announces the end of time; the organizer records how the final ended.";
+    } else if (ev.value("final_enabled").toBool())
         lines << "Final places: the first player eliminated is 4th, the next 3rd, the last opponent eliminated 2nd and "
                  "the winner 1st. Players eliminated at the same moment are ordered by their qualifying seed, and only "
                  "against each other. If the final is drawn or ends without a winner, players already eliminated keep "
